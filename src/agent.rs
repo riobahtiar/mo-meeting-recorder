@@ -684,10 +684,7 @@ fn workdir() -> std::io::Result<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = base.join(format!(
-        "omarchy-meeting-recorder-agent-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = base.join(format!("momr-agent-{}-{nanos}", std::process::id()));
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
 }
@@ -726,7 +723,7 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// `omarchy-meeting-recorder ask "<prompt>"` with the text on stdin, or
+/// `momr ask "<prompt>"` with the text on stdin, or
 /// `ask --agent` to show which agent would be used.
 pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
     use gtk::glib::ExitCode;

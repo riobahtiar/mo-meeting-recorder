@@ -2,7 +2,7 @@
 //!
 //! The app listens on a Unix socket in $XDG_RUNTIME_DIR and writes one JSON
 //! line per tick to every connected client: 20 times a second while recording,
-//! once a second otherwise. `omarchy-meeting-recorder watch` connects to it and
+//! once a second otherwise. `momr watch` connects to it and
 //! copies those lines to stdout, printing `{"state":"off"}` while the app is not
 //! running, so the widget only has to read NDJSON from a process.
 //!
@@ -148,7 +148,7 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static s
     }
 }
 
-/// `omarchy-meeting-recorder stop`: ask the running app to stop recording.
+/// `momr stop`: ask the running app to stop recording.
 pub fn send(command: &str) -> bool {
     match UnixStream::connect(socket_path()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
@@ -160,7 +160,7 @@ fn round(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-/// `omarchy-meeting-recorder watch`: relay the app's state lines to stdout.
+/// `momr watch`: relay the app's state lines to stdout.
 pub fn watch() {
     let mut stdout = std::io::stdout();
     loop {

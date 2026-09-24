@@ -26,7 +26,7 @@ const LINES: &[&str] = &[
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder()
-        .application_id("com.jankeesvw.OmarchyMeetingRecorder.AnimationPreview")
+        .application_id("io.github.riobahtiar.MOMRecorder.AnimationPreview")
         .build();
     app.connect_startup(|_| theme::follow(|| {}));
     app.connect_activate(|app| {

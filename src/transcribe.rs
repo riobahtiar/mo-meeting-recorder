@@ -460,7 +460,7 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|| glib::home_dir().join(".local/share"))
 }
 
-/// Where downloaded models live: `$XDG_DATA_HOME/omarchy-meeting-recorder/models`.
+/// Where downloaded models live: `$XDG_DATA_HOME/momr/models`.
 pub fn models_dir() -> PathBuf {
     data_dir().join(APP_NAME).join("models")
 }
@@ -1242,7 +1242,7 @@ pub fn to_markdown(title: &str, date: &str, transcript: &Transcript) -> String {
 // ---------------------------------------------------------------------------
 // CLI
 
-/// `omarchy-meeting-recorder transcribe <mic> <computer> [--language xx]`
+/// `momr transcribe <mic> <computer> [--language xx]`
 pub fn cli(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
@@ -1270,7 +1270,7 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
     })
 }
 
-/// `omarchy-meeting-recorder transcribe-file <audio> [--speakers N] [--language xx]`
+/// `momr transcribe-file <audio> [--speakers N] [--language xx]`
 pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();

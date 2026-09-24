@@ -1,4 +1,4 @@
-//! Meeting Recorder: records a meeting in two tracks (mic and computer
+//! MOM Recorder: records a meeting in two tracks (mic and computer
 //! audio), transcribes it with whisper.cpp after the call, and streams live
 //! levels to a bar widget.
 
@@ -21,8 +21,8 @@ mod ui;
 
 use gtk::glib;
 
-pub const APP_ID: &str = "com.jankeesvw.OmarchyMeetingRecorder";
-pub const APP_NAME: &str = "omarchy-meeting-recorder";
+pub const APP_ID: &str = "io.github.riobahtiar.MOMRecorder";
+pub const APP_NAME: &str = "momr";
 
 fn main() -> glib::ExitCode {
     match std::env::args().nth(1).as_deref() {

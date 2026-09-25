@@ -1,23 +1,85 @@
 //! Interface language: English or Indonesian. Every user-visible literal in
-//! the app goes through `t()`, with English and Indonesian tables holding
-//! exactly the same keys (the completeness test enforces it). Format
-//! arguments stay positional (`{}`) with matching order in both languages.
-//! Transcript *content* (names, markdown) is untouched; only the chrome
-//! translates. A language change takes effect on the next launch: the widgets
-//! are built once at startup.
+//! the app goes through `t()`. Both languages sit side by side in one table,
+//! so a key without its Indonesian text does not compile, and the key list
+//! the tests walk is generated from the same table. Format arguments stay
+//! positional (`{}`) with the same count in both languages; `tf()` fills
+//! them in one pass.
+//!
+//! Transcript *content* (speaker labels, the markdown, the language line) is
+//! untouched; only the chrome translates, because `transcript.md` is read by
+//! scripts. The language is resolved once per launch, since the widgets are
+//! built once at startup and a mid-run switch would mix the two: a change in
+//! Settings takes effect on the next launch.
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+use std::sync::OnceLock;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
     English,
     Indonesian,
 }
 
-/// The interface language from settings.
-pub fn current() -> Lang {
-    match crate::settings::load_ui_language() {
-        "id" => Lang::Indonesian,
-        _ => Lang::English,
+impl Lang {
+    /// The settings.json and `MOMR_LANG` code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::English => "en",
+            Lang::Indonesian => "id",
+        }
     }
+
+    pub fn from_code(code: &str) -> Option<Lang> {
+        match code {
+            "en" => Some(Lang::English),
+            "id" => Some(Lang::Indonesian),
+            _ => None,
+        }
+    }
+
+    /// A locale such as `id-ID`, `id_ID.UTF-8` or `en-GB` to a language.
+    fn from_locale(locale: &str) -> Lang {
+        if locale.trim().trim_matches('"').starts_with("id") {
+            Lang::Indonesian
+        } else {
+            Lang::English
+        }
+    }
+}
+
+/// The interface language for this launch: the one saved in Settings, else
+/// the first of macOS's preferred languages (what a Finder launch sees; $LANG
+/// is usually unset there), else $LANG for a terminal without defaults.
+/// Tests always read English, so they pass whatever the developer's settings.
+pub fn current() -> Lang {
+    static LANG: OnceLock<Lang> = OnceLock::new();
+    if cfg!(test) {
+        return Lang::English;
+    }
+    *LANG.get_or_init(|| {
+        crate::settings::load_ui_language()
+            .or_else(|| apple_language().map(|l| Lang::from_locale(&l)))
+            .unwrap_or_else(|| Lang::from_locale(&std::env::var("LANG").unwrap_or_default()))
+    })
+}
+
+/// The first entry of the global `AppleLanguages` default.
+fn apple_language() -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    first_apple_language(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `(\n    "id-ID",\n    "en-US"\n)` to `id-ID`.
+fn first_apple_language(plist: &str) -> Option<String> {
+    plist
+        .split(['(', ',', ')', '\n'])
+        .map(|item| item.trim().trim_matches('"'))
+        .find(|item| !item.is_empty())
+        .map(str::to_owned)
 }
 
 /// The string for `key` in the current language.
@@ -26,1284 +88,1085 @@ pub fn t(key: &str) -> &'static str {
 }
 
 pub fn t_in(lang: Lang, key: &str) -> &'static str {
-    match lang {
-        Lang::English => en(key),
-        Lang::Indonesian => id(key).unwrap_or_else(|| en(key)),
-    }
+    lookup(lang, key).unwrap_or("missing string")
 }
 
-macro_rules! table {
-    ($(($key:literal, $text:literal)),* $(,)?) => {
-        |key: &str| -> Option<&'static str> {
+/// `t(key)` with each `{}` replaced by the next of `args`, in one pass, so an
+/// argument that itself contains `{}` is never filled in again.
+pub fn tf(key: &str, args: &[&str]) -> String {
+    fill(t(key), args)
+}
+
+fn fill(template: &str, args: &[&str]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut args = args.iter();
+    let mut rest = template;
+    while let Some(at) = rest.find("{}") {
+        out.push_str(&rest[..at]);
+        out.push_str(args.next().copied().unwrap_or("{}"));
+        rest = &rest[at + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+macro_rules! strings {
+    ($(($key:literal, $en:literal, $id:literal)),* $(,)?) => {
+        /// Every key, generated from the table.
+        #[cfg(test)]
+        const KEYS: &[&str] = &[$($key),*];
+
+        fn lookup(lang: Lang, key: &str) -> Option<&'static str> {
             match key {
-                $($key => Some($text),)*
+                $($key => Some(match lang {
+                    Lang::English => $en,
+                    Lang::Indonesian => $id,
+                }),)*
                 _ => None,
             }
         }
     };
 }
 
-fn en(key: &str) -> &'static str {
-    let lookup = table![
-        ("menu.new", "New Recording"),
-        ("menu.open", "Open Meeting…"),
-        ("menu.import", "Import Audio File…"),
-        ("menu.reveal", "Reveal in Finder"),
-        ("menu.close_window", "Close Window"),
-        ("menu.undo", "Undo"),
-        ("menu.redo", "Redo"),
-        ("menu.cut", "Cut"),
-        ("menu.copy", "Copy"),
-        ("menu.paste", "Paste"),
-        ("menu.select_all", "Select All"),
-        ("menu.copy_transcript", "Copy Transcript"),
-        ("menu.start", "Start Recording"),
-        ("menu.pause_resume", "Pause / Resume"),
-        ("menu.stop", "Stop Recording"),
-        ("menu.compact", "Compact Strip"),
-        ("menu.fullscreen", "Enter Full Screen"),
-        ("menu.transcribe_again", "Transcribe Again"),
-        ("menu.window", "Window"),
-        ("menu.help", "MOM Recorder Help"),
-        ("menu.file", "File"),
-        ("menu.edit", "Edit"),
-        ("menu.recording", "Recording"),
-        ("menu.view", "View"),
-        ("ready.mic", "You (microphone)"),
-        ("ready.computer", "Computer audio"),
-        ("ready.hint", "Drop to import"),
-        (
-            "ready.import_hint",
-            "Import an audio file, or drop one here"
-        ),
-        ("ready.start", "Start recording"),
-        ("ready.stop", "Stop recording"),
-        ("ready.pause", "Pause"),
-        ("ready.resume", "Resume"),
-        (
-            "ready.status_idle",
-            "Ready. Press Start recording when the meeting begins."
-        ),
-        (
-            "ready.status_recording",
-            "Recording. Name, audio file and language can still be changed."
-        ),
-        (
-            "ready.status_paused",
-            "Paused. Nothing is recorded until you resume."
-        ),
-        ("ready.status_stopping", "Saving the audio…"),
-        (
-            "ready.status_transcribing",
-            "Transcribing the meeting on this computer…"
-        ),
-        ("ready.language_title", "Language"),
-        (
-            "ready.language_subtitle",
-            "Used for the transcript after the call"
-        ),
-        ("ready.format_title", "Audio file"),
-        ("ready.format_subtitle", "Can be changed during the call"),
-        ("ready.import_button", "Import an audio file"),
-        (
-            "ready.model_needed",
-            "The speech model ({}, {}) is needed to transcribe"
-        ),
-        ("ready.model_download", "Download"),
-        ("ready.model_downloading", "Downloading the speech model…"),
-        (
-            "ready.model_progress",
-            "Downloading the speech model… {:.0}%"
-        ),
-        (
-            "ready.press_start",
-            "Press Start recording when the meeting begins."
-        ),
-        ("ready.button_saving", "Saving…"),
-        ("ready.button_transcribing", "Transcribing…"),
-        ("done.copy", "Copy transcript"),
-        ("done.copied", "Copied to clipboard"),
-        ("done.no_transcript", "No transcript found"),
-        ("done.new", "New recording"),
-        ("done.reveal", "Reveal in Finder"),
-        ("done.open_folder", "Open folder"),
-        ("done.language_again", "Language"),
-        ("done.transcribe_again", "Transcribe again"),
-        (
-            "done.transcribe_again_hint",
-            "Transcribe the meeting again with the selected language"
-        ),
-        (
-            "done.transcribe_again_gone",
-            "The separate tracks of this meeting are gone, so it cannot be transcribed again"
-        ),
-        ("done.chapters", "Chapters"),
-        (
-            "done.chapters_hint",
-            "For meetings of three minutes or more"
-        ),
-        ("done.chapters_added", "{} chapters added"),
-        ("done.chapters_none", "No chapters yet"),
-        ("done.chapters_writing", "Writing chapters with {}…"),
-        ("done.speakers", "Speakers"),
-        ("done.rename_meeting", "Meeting name"),
-        ("done.your_name", "Your name"),
-        ("done.recovery_title", "Unfinished recording found"),
-        (
-            "done.recovery_body",
-            "A recording from {} ({}) was not stopped properly, probably because the app quit. Save it as a meeting?"
-        ),
-        ("done.recovery_discard", "Discard"),
-        ("done.recovery_later", "Later"),
-        ("done.recovery_save", "Save"),
-        ("done.close_recording_title", "Still recording"),
-        (
-            "done.close_recording_body",
-            "Closing stops the meeting. The audio is saved and transcribed first, then the app quits."
-        ),
-        ("done.close_recording_stop", "Stop and close"),
-        ("done.close_recording_keep", "Keep recording"),
-        ("done.close_transcribing_title", "Still transcribing"),
-        (
-            "done.close_transcribing_body",
-            "The audio is already saved. The transcript is not finished yet."
-        ),
-        ("done.close_transcribing_later", "Close when done"),
-        ("done.close_transcribing_keep", "Keep open"),
-        ("import.title", "Import an audio file"),
-        ("import.subtitle_language", "Language"),
-        ("import.subtitle_speakers", "Recognized by their voices"),
-        ("import.dialog_title", "Import audio"),
-        ("import.confirm", "Import"),
-        ("import.cancel", "Cancel"),
-        ("import.auto_speakers", "Automatic"),
-        ("import.drop_hint", "Import an audio file, or drop one here"),
-        (
-            "import.exists",
-            "A meeting folder with that name already exists"
-        ),
-        (
-            "import.not_openable",
-            "This is not a meeting the recorder can open"
-        ),
-        (
-            "banner.audio_permission",
-            "Microphone permission was refused — allow it in System Settings › Privacy & Security › Microphone."
-        ),
-        (
-            "banner.audio_tap_permission",
-            "System Audio Recording permission was refused — allow it in System Settings › Privacy & Security, then restart the app."
-        ),
-        (
-            "banner.audio_tap_unsupported",
-            "This macOS cannot tap the system audio."
-        ),
-        (
-            "banner.audio_install_blackhole",
-            "Install BlackHole to record the computer audio instead."
-        ),
-        (
-            "banner.audio_helper_missing",
-            "The momr-audio helper was not found — reinstall MOM Recorder."
-        ),
-        (
-            "banner.audio_device_gone",
-            "The computer-audio device went away — retrying. Check it in System Settings › Sound."
-        ),
-        (
-            "banner.audio_mic_failed",
-            "Microphone capture failed (exit {}) — check System Settings › Privacy & Security › Microphone."
-        ),
-        (
-            "banner.audio_no_ffmpeg",
-            "Could not start microphone capture — is ffmpeg installed?"
-        ),
-        (
-            "banner.audio_no_program",
-            "Could not start {} — is it installed?"
-        ),
-        (
-            "banner.computer_recording",
-            "Computer audio is being recorded."
-        ),
-        ("strip.tooltip", "Compact strip (⇧⌘M)"),
-        ("strip.drag_hint", "Drag to move, ⇧⌘M to expand"),
-        ("prefs.title", "Settings"),
-        ("prefs.transcription", "Transcription"),
-        ("prefs.model", "Speech model"),
-        ("prefs.model_present", "On this Mac"),
-        ("prefs.model_downloads", "Downloads on first use"),
-        (
-            "prefs.model_size_gb",
-            "About {size} GB, downloads on first use"
-        ),
-        (
-            "prefs.model_size_mb",
-            "About {size} MB, downloads on first use"
-        ),
-        ("prefs.language", "Default language"),
-        ("prefs.provider", "Transcription provider"),
-        ("prefs.provider_local_note", "Nothing leaves this Mac"),
-        (
-            "prefs.provider_eleven_note",
-            "Sends meeting audio to ElevenLabs when transcribing"
-        ),
-        (
-            "prefs.provider_google_note",
-            "Sends meeting audio to Google Cloud when transcribing"
-        ),
-        (
-            "prefs.provider_openrouter_note",
-            "Sends meeting audio to the chosen OpenRouter model when transcribing"
-        ),
-        ("prefs.eleven_key", "ElevenLabs API key"),
-        ("prefs.google_key", "Google API key"),
-        ("prefs.openrouter_key", "OpenRouter API key"),
-        (
-            "prefs.key_hint_eleven",
-            "Dashboard › profile › API Keys (elevenlabs.io/app/settings/api-keys)"
-        ),
-        (
-            "prefs.key_hint_google",
-            "Console › project › Speech-to-Text API › Credentials, restricted to the API"
-        ),
-        (
-            "prefs.key_hint_openrouter",
-            "OpenRouter dashboard › Keys (openrouter.ai/settings/keys)"
-        ),
-        ("prefs.key_saved", "Saved in the Keychain"),
-        ("prefs.key_saved_toast", "API key saved"),
-        ("prefs.chapters", "Chapters"),
-        (
-            "prefs.chapters_about",
-            "A coding agent with every tool switched off writes the chapter titles."
-        ),
-        ("prefs.agent", "Agent"),
-        ("prefs.agent_none", "None"),
-        ("prefs.recording", "Recording"),
-        ("prefs.format", "Default audio format"),
-        ("prefs.name", "Your name in transcripts"),
-        ("prefs.meetings", "Meetings folder"),
-        ("prefs.meetings_choose", "Choose…"),
-        ("prefs.audio", "Audio"),
-        ("prefs.mic", "Microphone"),
-        (
-            "prefs.mic_inputs",
-            "{} input devices, default follows the system"
-        ),
-        ("prefs.mic_none", "No input device found"),
-        ("prefs.computer", "Computer audio"),
-        ("prefs.computer_tap", "Records what the Mac plays"),
-        ("prefs.computer_blackhole", "Through {}"),
-        (
-            "prefs.computer_unavailable",
-            "Unavailable: install BlackHole"
-        ),
-        ("prefs.blackhole_how", "How to set up BlackHole"),
-        ("prefs.menubar", "Menu Bar"),
-        ("prefs.menubar_show", "Show recording status"),
-        ("prefs.menubar_restart", "Takes effect on the next launch"),
-        ("prefs.ui_language", "Interface language"),
-        (
-            "prefs.ui_language_hint",
-            "Bahasa Indonesia or English. Takes effect on the next launch."
-        ),
-        (
-            "about.comments",
-            "Two-track meeting recorder: your microphone and the computer audio, transcribed on this Mac."
-        ),
-        ("about.transcription_credit", "Transcription"),
-        (
-            "about.based_on",
-            "Based on Meeting Recorder by Jankees van Woezik"
-        ),
-        ("help.meeting_saved", "Meeting saved"),
-        ("help.recovered", "Recovered recording"),
-        ("help.finish_first", "Finish the current recording first"),
-        ("help.line_deleted", "Line deleted"),
-        ("help.saved", "Saved"),
-        ("help.copied_clipboard", "Copied to clipboard"),
-        ("notify.transcribed", "Meeting transcribed"),
-        ("misc.cancel", "Cancel"),
-        ("misc.close", "Close"),
-        ("misc.save", "Save"),
-        ("misc.discard", "Discard"),
-        ("misc.later", "Later"),
-        ("misc.download", "Download"),
-        ("row.edit", "Edit this line"),
-        ("row.next_speaker", "Next speaker"),
-        ("row.delete", "Delete this line"),
-        ("row.play_from", "Play from {}"),
-        ("chapter.play_from", "Play from {}"),
-        ("chapters.generate", "Generate"),
-        ("chapters.redo", "Redo"),
-        ("chapters.made_with", "Made with {}"),
-        (
-            "chapters.let_divide",
-            "Let {} divide the meeting into chapters"
-        ),
-        ("chapters.could_not", "{} could not make chapters"),
-        ("import.filter", "Audio and video"),
-        ("import.importing", "Importing audio"),
-        ("import.no_audio", "this file has no audio ffmpeg can read"),
-        ("import.no_convert", "could not convert the audio"),
-        ("open.title", "Open a meeting (.meeting-recorder file)"),
-        ("open.filter", "Meeting recordings"),
-        ("close.cancel_transcription", "Cancel transcription"),
-        ("canvas.not_recording", "Not recording"),
-        ("canvas.paused", "PAUSED"),
-        ("done.meeting_saved", "Meeting saved"),
-        ("done.transcript_ready", "Transcript ready"),
-        ("done.imported_audio", "Imported audio"),
-        ("done.recovered_title", "Recovered recording"),
-        ("done.fallback_title", "Meeting"),
-        (
-            "help.stopped_unexpectedly",
-            "the import stopped unexpectedly"
-        ),
-        (
-            "help.transcription_stopped",
-            "transcription stopped unexpectedly"
-        ),
-        ("help.no_meeting_folder", "no meeting folder"),
-        ("help.write_failed", "could not write the transcript: {}"),
-        (
-            "help.could_not_save_transcript",
-            "Could not save the transcript"
-        ),
-        ("help.model_ready", "Speech model ready"),
-        (
-            "help.model_download_failed",
-            "Could not download the model: {}"
-        ),
-        ("help.download_stopped", "the download stopped"),
-        ("help.not_openable", "not a meeting the recorder can open"),
-        (
-            "help.no_transcript_yet",
-            "This meeting has no transcript yet."
-        ),
-        ("help.cancelled", "Transcription cancelled."),
-        ("help.failed", "Transcription failed: {}."),
-        ("help.no_audio", "Could not save the audio."),
-        ("help.could_not_start", "Could not start recording: {}"),
-        ("help.stages_saving", "Saving audio"),
-        ("help.stages_loading", "Loading audio"),
-        ("help.stages_done", "Done"),
-        (
-            "help.folder_exists",
-            "A meeting folder with that name already exists"
-        ),
-        ("help.rename_failed", "Could not rename the folder: {}"),
-        ("help.every_speaker", "Every speaker needs a different name"),
-        ("speaker.row_mic", "Speaker on the microphone"),
-        ("speaker.row_computer", "Speaker on the computer audio"),
-        ("speaker.row_computer_n", "Speaker {} on the computer audio"),
-        ("speaker.import_default", "Speaker {}"),
-        ("speaker.empty_fallback", "Speaker {}"),
-        ("speaker.you", "You"),
-        ("speaker.remote", "Remote"),
-        ("speaker.remote_n", "Remote {}"),
-        ("stage.loading_model", "Loading model"),
-        ("stage.transcribing", "Transcribing"),
-        ("stage.loading_audio", "Loading audio"),
-        ("stage.warming_up", "Warming up"),
-        ("stage.finding_speakers", "Finding speakers"),
-        ("download.model", "Downloading model"),
-        ("download.speaker", "Downloading the speaker model"),
-        ("player.play", "Play"),
-        ("player.pause", "Pause"),
-        ("format.mono", "Mono"),
-        ("format.stereo", "Stereo (mic left, computer right)"),
-        ("format.separate", "Separate files"),
-        ("format.short_mono", "Mono"),
-        ("format.short_stereo", "Stereo"),
-        ("format.short_separate", "Separate files"),
-        ("lang.auto", "Auto-detect"),
-        ("lang.en", "English"),
-        ("lang.id", "Indonesian"),
-        ("lang.nl", "Dutch"),
-        ("lang.de", "German"),
-        ("lang.fr", "French"),
-        ("lang.es", "Spanish"),
-        ("lang.it", "Italian"),
-        ("lang.pt", "Portuguese"),
-        ("provider.name_local", "On this Mac (whisper)"),
-        ("provider.name_eleven", "ElevenLabs"),
-        ("provider.name_google", "Google Cloud Speech-to-Text"),
-        ("provider.name_openrouter", "OpenRouter"),
-        ("misc.keep", "Keep"),
-        ("misc.undo", "Undo"),
-        (
-            "cli.usage",
-            "Usage: {} [start | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]"
-        ),
-        (
-            "cli.no_command",
-            "(no command)  open the recorder, ready to record"
-        ),
-        (
-            "cli.meeting",
-            "<meeting>     open a .meeting-recorder file or a meeting folder"
-        ),
-        (
-            "cli.start",
-            "start         start recording in the open window (for a keybinding)"
-        ),
-        (
-            "cli.stop",
-            "stop          stop the running recording (for a keybinding)"
-        ),
-        (
-            "cli.compact",
-            "compact       switch the recording window between full and compact"
-        ),
-        (
-            "cli.pause",
-            "pause         pause or resume the running recording"
-        ),
-        (
-            "cli.watch",
-            "watch         stream the recorder state as NDJSON, for a menu bar item or any other client"
-        ),
-        (
-            "cli.transcribe",
-            "transcribe    transcribe two tracks and print the transcript as Markdown"
-        ),
-        (
-            "cli.ask",
-            "ask           run a prompt over stdin through the default agent, without tools"
-        ),
-        ("cli.not_running", "the recorder is not running"),
-        ("cli.diarize", "Usage: {} diarize <audio> [--speakers N]"),
-        ("cli.unknown", "unknown command '{}', see --help"),
-        ("agent.unset", "No agent set. Add agent = \"claude\" to {}"),
-        ("agent.missing", "{} is not installed"),
-        (
-            "agent.refused_agy",
-            "Antigravity only offers a blanket sandbox, not a way to remove its tools, so the recorder will not send your transcript to it"
-        ),
-        (
-            "agent.refused_crush",
-            "Crush has no flag to run without tools, so the recorder will not send your transcript to it"
-        ),
-        (
-            "agent.refused_unknown",
-            "The recorder does not know how to run {} without tools"
-        ),
-        (
-            "agent.ori_needs",
-            "Ori needs Claude Code or Pi installed to work on a transcript"
-        ),
-        ("agent.ori_harness", "Ori needs Claude Code or Pi installed"),
-        (
-            "agent.opencode_denied",
-            "OpenCode did not come back with every tool denied, so the recorder will not send your transcript to it"
-        ),
-        (
-            "agent.grok_setup",
-            "Grok has not been set up yet. Run grok once in a terminal, then try again."
-        ),
-        (
-            "agent.too_long",
-            "The transcript is too long to send to the agent"
-        ),
-        ("agent.no_workdir", "Could not make a working directory: {}"),
-        ("agent.no_start", "Could not start {}: {}"),
-        ("agent.no_answer", "{} did not answer within {} seconds"),
-        ("agent.exited", "{} exited with status {}"),
-        ("agent.nothing", "{} returned nothing"),
-        (
-            "ask.usage",
-            "Usage: {} ask \"<prompt>\" < text | ask --agent"
-        ),
-        ("ask.no_stdin", "could not read the text from stdin"),
-        ("help.agent_stopped", "the agent stopped unexpectedly"),
-    ];
-    lookup(key).unwrap_or("missing string")
-}
-
-fn id(key: &str) -> Option<&'static str> {
-    let lookup = table![
-        ("menu.new", "Rekaman Baru"),
-        ("menu.open", "Buka Rapat…"),
-        ("menu.import", "Impor Berkas Audio…"),
-        ("menu.reveal", "Tampilkan di Finder"),
-        ("menu.close_window", "Tutup Jendela"),
-        ("menu.undo", "Urungkan"),
-        ("menu.redo", "Ulangi"),
-        ("menu.cut", "Potong"),
-        ("menu.copy", "Salin"),
-        ("menu.paste", "Tempel"),
-        ("menu.select_all", "Pilih Semua"),
-        ("menu.copy_transcript", "Salin Transkrip"),
-        ("menu.start", "Mulai Merekam"),
-        ("menu.pause_resume", "Jeda / Lanjutkan"),
-        ("menu.stop", "Hentikan Rekaman"),
-        ("menu.compact", "Strip Ringkas"),
-        ("menu.fullscreen", "Masuk Layar Penuh"),
-        ("menu.transcribe_again", "Transkripsikan Lagi"),
-        ("menu.window", "Jendela"),
-        ("menu.help", "Bantuan MOM Recorder"),
-        ("menu.file", "Berkas"),
-        ("menu.edit", "Sunting"),
-        ("menu.recording", "Perekaman"),
-        ("menu.view", "Tampilan"),
-        ("ready.mic", "Kamu (mikrofon)"),
-        ("ready.computer", "Audio komputer"),
-        ("ready.hint", "Jatuhkan untuk mengimpor"),
-        (
-            "ready.import_hint",
-            "Impor berkas audio, atau jatuhkan ke sini"
-        ),
-        ("ready.start", "Mulai merekam"),
-        ("ready.stop", "Hentikan perekaman"),
-        ("ready.pause", "Jeda"),
-        ("ready.resume", "Lanjutkan"),
-        (
-            "ready.status_idle",
-            "Siap. Tekan Mulai merekam saat rapat dimulai."
-        ),
-        (
-            "ready.status_recording",
-            "Merekam. Nama, berkas audio, dan bahasa masih bisa diubah."
-        ),
-        (
-            "ready.status_paused",
-            "Dijeda. Tidak ada yang direkam sampai dilanjutkan."
-        ),
-        ("ready.status_stopping", "Menyimpan audio…"),
-        (
-            "ready.status_transcribing",
-            "Mentranskripsikan rapat di komputer ini…"
-        ),
-        ("ready.language_title", "Bahasa"),
-        (
-            "ready.language_subtitle",
-            "Dipakai untuk transkrip setelah panggilan"
-        ),
-        ("ready.format_title", "Berkas audio"),
-        ("ready.format_subtitle", "Bisa diubah selama panggilan"),
-        ("ready.import_button", "Impor berkas audio"),
-        (
-            "ready.model_needed",
-            "Model wicara ({}, {}) diperlukan untuk transkripsi"
-        ),
-        ("ready.model_download", "Unduh"),
-        ("ready.model_downloading", "Mengunduh model wicara…"),
-        ("ready.model_progress", "Mengunduh model wicara… {:.0}%"),
-        (
-            "ready.press_start",
-            "Tekan Mulai merekam saat rapat dimulai."
-        ),
-        ("ready.button_saving", "Menyimpan…"),
-        ("ready.button_transcribing", "Mentranskripsikan…"),
-        ("done.copy", "Salin transkrip"),
-        ("done.copied", "Disalin ke papan klip"),
-        ("done.no_transcript", "Transkrip tidak ditemukan"),
-        ("done.new", "Rekaman baru"),
-        ("done.reveal", "Tampilkan di Finder"),
-        ("done.open_folder", "Buka folder"),
-        ("done.language_again", "Bahasa"),
-        ("done.transcribe_again", "Transkripsikan lagi"),
-        (
-            "done.transcribe_again_hint",
-            "Transkripsikan lagi rapat ini dengan bahasa yang dipilih"
-        ),
-        (
-            "done.transcribe_again_gone",
-            "Trek terpisah rapat ini sudah hilang, jadi tidak bisa ditranskripsikan lagi"
-        ),
-        ("done.chapters", "Bab"),
-        ("done.chapters_hint", "Untuk rapat tiga menit atau lebih"),
-        ("done.chapters_added", "{} bab ditambahkan"),
-        ("done.chapters_none", "Belum ada bab"),
-        ("done.chapters_writing", "Menulis bab dengan {}…"),
-        ("done.speakers", "Pembicara"),
-        ("done.rename_meeting", "Nama rapat"),
-        ("done.your_name", "Namamu"),
-        (
-            "done.recovery_title",
-            "Rekaman yang belum selesai ditemukan"
-        ),
-        (
-            "done.recovery_body",
-            "Rekaman dari {} ({}) tidak dihentikan dengan benar, mungkin karena aplikasi keluar. Simpan sebagai rapat?"
-        ),
-        ("done.recovery_discard", "Buang"),
-        ("done.recovery_later", "Nanti"),
-        ("done.recovery_save", "Simpan"),
-        ("done.close_recording_title", "Masih merekam"),
-        (
-            "done.close_recording_body",
-            "Menutup menghentikan rapat. Audio disimpan dan ditranskripsikan dulu, lalu aplikasi keluar."
-        ),
-        ("done.close_recording_stop", "Hentikan dan tutup"),
-        ("done.close_recording_keep", "Lanjutkan merekam"),
-        ("done.close_transcribing_title", "Masih mentranskripsikan"),
-        (
-            "done.close_transcribing_body",
-            "Audio sudah tersimpan. Transkripnya belum selesai."
-        ),
-        ("done.close_transcribing_later", "Tutup jika sudah selesai"),
-        ("done.close_transcribing_keep", "Tetap buka"),
-        ("import.title", "Impor berkas audio"),
-        ("import.subtitle_language", "Bahasa"),
-        ("import.subtitle_speakers", "Dikenali dari suaranya"),
-        ("import.dialog_title", "Impor audio"),
-        ("import.confirm", "Impor"),
-        ("import.cancel", "Batal"),
-        ("import.auto_speakers", "Otomatis"),
-        (
-            "import.drop_hint",
-            "Impor berkas audio, atau jatuhkan ke sini"
-        ),
-        ("import.exists", "Folder rapat dengan nama itu sudah ada"),
-        (
-            "import.not_openable",
-            "Ini bukan rapat yang bisa dibuka perekam"
-        ),
-        (
-            "banner.audio_permission",
-            "Izin mikrofon ditolak — izinkan di Pengaturan Sistem › Privasi & Keamanan › Mikrofon."
-        ),
-        (
-            "banner.audio_tap_permission",
-            "Izin Perekaman Audio Sistem ditolak — izinkan di Pengaturan Sistem › Privasi & Keamanan, lalu buka ulang aplikasi."
-        ),
-        (
-            "banner.audio_tap_unsupported",
-            "macOS ini tidak bisa menyadap audio sistem."
-        ),
-        (
-            "banner.audio_install_blackhole",
-            "Pasang BlackHole agar audio komputer ikut terekam."
-        ),
-        (
-            "banner.audio_helper_missing",
-            "Helper momr-audio tidak ditemukan — pasang ulang MOM Recorder."
-        ),
-        (
-            "banner.audio_device_gone",
-            "Perangkat audio komputer hilang — mencoba lagi. Periksa di Pengaturan Sistem › Suara."
-        ),
-        (
-            "banner.audio_mic_failed",
-            "Perekaman mikrofon gagal (exit {}) — periksa Pengaturan Sistem › Privasi & Keamanan › Mikrofon."
-        ),
-        (
-            "banner.audio_no_ffmpeg",
-            "Tidak bisa mulai perekaman mikrofon — apakah ffmpeg terpasang?"
-        ),
-        (
-            "banner.audio_no_program",
-            "Tidak bisa menjalankan {} — apakah terpasang?"
-        ),
-        (
-            "banner.computer_recording",
-            "Audio komputer sedang direkam."
-        ),
-        ("strip.tooltip", "Strip ringkas (⇧⌘M)"),
-        (
-            "strip.drag_hint",
-            "Seret untuk memindah, ⇧⌘M untuk melebarkan"
-        ),
-        ("prefs.title", "Pengaturan"),
-        ("prefs.transcription", "Transkripsi"),
-        ("prefs.model", "Model wicara"),
-        ("prefs.model_present", "Di Mac ini"),
-        ("prefs.model_downloads", "Diunduh saat pertama dipakai"),
-        (
-            "prefs.model_size_gb",
-            "Sekitar {size} GB, diunduh saat pertama dipakai"
-        ),
-        (
-            "prefs.model_size_mb",
-            "Sekitar {size} MB, diunduh saat pertama dipakai"
-        ),
-        ("prefs.language", "Bahasa default"),
-        ("prefs.provider", "Penyedia transkripsi"),
-        (
-            "prefs.provider_local_note",
-            "Tidak ada yang keluar dari Mac ini"
-        ),
-        (
-            "prefs.provider_eleven_note",
-            "Mengirim audio rapat ke ElevenLabs saat transkripsi"
-        ),
-        (
-            "prefs.provider_google_note",
-            "Mengirim audio rapat ke Google Cloud saat transkripsi"
-        ),
-        (
-            "prefs.provider_openrouter_note",
-            "Mengirim audio rapat ke model OpenRouter pilihan saat transkripsi"
-        ),
-        ("prefs.eleven_key", "Kunci API ElevenLabs"),
-        ("prefs.google_key", "Kunci API Google"),
-        ("prefs.openrouter_key", "Kunci API OpenRouter"),
-        (
-            "prefs.key_hint_eleven",
-            "Dasbor › profil › API Keys (elevenlabs.io/app/settings/api-keys)"
-        ),
-        (
-            "prefs.key_hint_google",
-            "Konsol › proyek › Speech-to-Text API › Credentials, dibatasi untuk API itu"
-        ),
-        (
-            "prefs.key_hint_openrouter",
-            "Dasbor OpenRouter › Keys (openrouter.ai/settings/keys)"
-        ),
-        ("prefs.key_saved", "Tersimpan di Keychain"),
-        ("prefs.key_saved_toast", "Kunci API tersimpan"),
-        ("prefs.chapters", "Bab"),
-        (
-            "prefs.chapters_about",
-            "Agen pengode dengan semua perkakas dimatikan yang menulis judul bab."
-        ),
-        ("prefs.agent", "Agen"),
-        ("prefs.agent_none", "Tidak ada"),
-        ("prefs.recording", "Perekaman"),
-        ("prefs.format", "Format audio default"),
-        ("prefs.name", "Namamu di transkrip"),
-        ("prefs.meetings", "Folder rapat"),
-        ("prefs.meetings_choose", "Pilih…"),
-        ("prefs.audio", "Audio"),
-        ("prefs.mic", "Mikrofon"),
-        (
-            "prefs.mic_inputs",
-            "{} perangkat input, default mengikuti sistem"
-        ),
-        ("prefs.mic_none", "Tidak ada perangkat input"),
-        ("prefs.computer", "Audio komputer"),
-        ("prefs.computer_tap", "Merekam yang dimainkan Mac"),
-        ("prefs.computer_blackhole", "Melalui {}"),
-        (
-            "prefs.computer_unavailable",
-            "Tidak tersedia: pasang BlackHole"
-        ),
-        ("prefs.blackhole_how", "Cara memasang BlackHole"),
-        ("prefs.menubar", "Bilah Menu"),
-        ("prefs.menubar_show", "Tampilkan status perekaman"),
-        ("prefs.menubar_restart", "Berlaku saat dibuka berikutnya"),
-        ("prefs.ui_language", "Bahasa antarmuka"),
-        (
-            "prefs.ui_language_hint",
-            "Bahasa Indonesia atau English. Berlaku saat dibuka berikutnya."
-        ),
-        (
-            "about.comments",
-            "Perekam rapat dua trek: mikrofonmu dan audio komputermu, ditranskripsikan di Mac ini."
-        ),
-        ("about.transcription_credit", "Transkripsi"),
-        (
-            "about.based_on",
-            "Berdasarkan Meeting Recorder oleh Jankees van Woezik"
-        ),
-        ("help.meeting_saved", "Rapat tersimpan"),
-        ("help.recovered", "Rekaman pulihan"),
-        (
-            "help.finish_first",
-            "Selesaikan dulu perekaman yang berjalan"
-        ),
-        ("help.line_deleted", "Baris dihapus"),
-        ("help.saved", "Tersimpan"),
-        ("help.copied_clipboard", "Disalin ke papan klip"),
-        ("notify.transcribed", "Rapat ditranskripsikan"),
-        ("misc.cancel", "Batal"),
-        ("misc.close", "Tutup"),
-        ("misc.save", "Simpan"),
-        ("misc.discard", "Buang"),
-        ("misc.later", "Nanti"),
-        ("misc.download", "Unduh"),
-        ("misc.keep", "Tetap"),
-        ("misc.undo", "Urungkan"),
-        (
-            "cli.usage",
-            "Pakai: {} [start | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]"
-        ),
-        (
-            "cli.no_command",
-            "(tanpa perintah)  buka perekam, siap merekam"
-        ),
-        (
-            "cli.meeting",
-            "<rapat>       buka berkas .meeting-recorder atau folder rapat"
-        ),
-        (
-            "cli.start",
-            "start         mulai merekam di jendela yang terbuka (untuk pintasan)"
-        ),
-        (
-            "cli.stop",
-            "stop          hentikan perekaman yang berjalan (untuk pintasan)"
-        ),
-        (
-            "cli.compact",
-            "compact       alihkan jendela perekaman antara penuh dan ringkas"
-        ),
-        (
-            "cli.pause",
-            "pause         jeda atau lanjutkan rekaman yang berjalan"
-        ),
-        (
-            "cli.watch",
-            "watch         alirkan status perekam sebagai NDJSON, untuk item bilah menu atau klien lain"
-        ),
-        (
-            "cli.transcribe",
-            "transcribe    transkripsikan dua trek dan cetak transkrip sebagai Markdown"
-        ),
-        (
-            "cli.ask",
-            "ask           jalankan prompt lewat stdin melalui agen default, tanpa perkakas"
-        ),
-        ("cli.not_running", "perekam tidak berjalan"),
-        ("cli.diarize", "Pakai: {} diarize <audio> [--speakers N]"),
-        ("cli.unknown", "perintah '{}' tidak dikenal, lihat --help"),
-        (
-            "agent.unset",
-            "Agen belum diatur. Tambahkan agent = \"claude\" ke {}"
-        ),
-        ("agent.missing", "{} belum terpasang"),
-        (
-            "agent.refused_agy",
-            "Antigravity hanya menawarkan sandbox umum, bukan cara mematikan perkakasnya, jadi perekam tidak akan mengirim transkripmu ke sana"
-        ),
-        (
-            "agent.refused_crush",
-            "Crush tidak punya flag untuk berjalan tanpa perkakas, jadi perekam tidak akan mengirim transkripmu ke sana"
-        ),
-        (
-            "agent.refused_unknown",
-            "Perekam tidak tahu cara menjalankan {} tanpa perkakas"
-        ),
-        (
-            "agent.ori_needs",
-            "Ori butuh Claude Code atau Pi terpasang agar bisa mengolah transkrip"
-        ),
-        (
-            "agent.ori_harness",
-            "Ori butuh Claude Code atau Pi terpasang"
-        ),
-        (
-            "agent.opencode_denied",
-            "OpenCode tidak kembali dengan semua perkakas dimatikan, jadi perekam tidak akan mengirim transkripmu ke sana"
-        ),
-        (
-            "agent.grok_setup",
-            "Grok belum disiapkan. Jalankan grok sekali di terminal, lalu coba lagi."
-        ),
-        (
-            "agent.too_long",
-            "Transkrip terlalu panjang untuk dikirim ke agen"
-        ),
-        ("agent.no_workdir", "Tidak bisa membuat direktori kerja: {}"),
-        ("agent.no_start", "Tidak bisa menjalankan {}: {}"),
-        ("agent.no_answer", "{} tidak menjawab dalam {} detik"),
-        ("agent.exited", "{} keluar dengan status {}"),
-        ("agent.nothing", "{} tidak mengembalikan apa-apa"),
-        (
-            "ask.usage",
-            "Pakai: {} ask \"<prompt>\" < text | ask --agent"
-        ),
-        ("ask.no_stdin", "tidak bisa membaca teks dari stdin"),
-        ("help.agent_stopped", "agen berhenti tiba-tiba"),
-        ("row.edit", "Sunting baris ini"),
-        ("row.next_speaker", "Pembicara berikutnya"),
-        ("row.delete", "Hapus baris ini"),
-        ("row.play_from", "Putar dari {}"),
-        ("chapter.play_from", "Putar dari {}"),
-        ("chapters.generate", "Buat"),
-        ("chapters.redo", "Ulangi"),
-        ("chapters.made_with", "Dibuat dengan {}"),
-        ("chapters.let_divide", "Minta {} membagi rapat menjadi bab"),
-        ("chapters.could_not", "{} tidak bisa membuat bab"),
-        ("import.filter", "Audio dan video"),
-        ("import.importing", "Mengimpor audio"),
-        (
-            "import.no_audio",
-            "berkas ini tidak punya audio yang bisa dibaca ffmpeg"
-        ),
-        ("import.no_convert", "tidak bisa mengonversi audio"),
-        ("open.title", "Buka rapat (berkas .meeting-recorder)"),
-        ("open.filter", "Rekaman rapat"),
-        ("close.cancel_transcription", "Batalkan transkripsi"),
-        ("canvas.not_recording", "Tidak merekam"),
-        ("canvas.paused", "DIJEDA"),
-        ("done.meeting_saved", "Rapat tersimpan"),
-        ("done.transcript_ready", "Transkrip siap"),
-        ("done.imported_audio", "Audio impor"),
-        ("done.recovered_title", "Rekaman pulihan"),
-        ("done.fallback_title", "Rapat"),
-        ("help.stopped_unexpectedly", "impor berhenti tiba-tiba"),
-        (
-            "help.transcription_stopped",
-            "transkripsi berhenti tiba-tiba"
-        ),
-        ("help.no_meeting_folder", "tidak ada folder rapat"),
-        ("help.write_failed", "tidak bisa menulis transkrip: {}"),
-        (
-            "help.could_not_save_transcript",
-            "Tidak bisa menyimpan transkrip"
-        ),
-        ("help.model_ready", "Model wicara siap"),
-        (
-            "help.model_download_failed",
-            "Tidak bisa mengunduh model: {}"
-        ),
-        ("help.download_stopped", "unduhan berhenti"),
-        ("help.not_openable", "bukan rapat yang bisa dibuka perekam"),
-        ("help.no_transcript_yet", "Rapat ini belum punya transkrip."),
-        ("help.cancelled", "Transkripsi dibatalkan."),
-        ("help.failed", "Transkripsi gagal: {}."),
-        ("help.no_audio", "Tidak bisa menyimpan audio."),
-        ("help.could_not_start", "Tidak bisa mulai merekam: {}"),
-        ("help.stages_saving", "Menyimpan audio"),
-        ("help.stages_loading", "Memuat audio"),
-        ("help.stages_done", "Selesai"),
-        (
-            "help.folder_exists",
-            "Folder rapat dengan nama itu sudah ada"
-        ),
-        ("help.rename_failed", "Tidak bisa mengganti nama folder: {}"),
-        ("help.every_speaker", "Setiap pembicara butuh nama berbeda"),
-        ("speaker.row_mic", "Pembicara di mikrofon"),
-        ("speaker.row_computer", "Pembicara di audio komputer"),
-        ("speaker.row_computer_n", "Pembicara {} di audio komputer"),
-        ("speaker.import_default", "Pembicara {}"),
-        ("speaker.empty_fallback", "Pembicara {}"),
-        ("speaker.you", "Kamu"),
-        ("speaker.remote", "Remote"),
-        ("speaker.remote_n", "Remote {}"),
-        ("stage.loading_model", "Memuat model"),
-        ("stage.transcribing", "Mentranskripsikan"),
-        ("stage.loading_audio", "Memuat audio"),
-        ("stage.warming_up", "Pemanasan"),
-        ("stage.finding_speakers", "Mencari pembicara"),
-        ("download.model", "Mengunduh model"),
-        ("download.speaker", "Mengunduh model pembicara"),
-        ("player.play", "Putar"),
-        ("player.pause", "Jeda"),
-        ("format.mono", "Mono"),
-        ("format.stereo", "Stereo (mic kiri, komputer kanan)"),
-        ("format.separate", "Berkas terpisah"),
-        ("format.short_mono", "Mono"),
-        ("format.short_stereo", "Stereo"),
-        ("format.short_separate", "Berkas terpisah"),
-        ("lang.auto", "Otomatis"),
-        ("lang.en", "Inggris"),
-        ("lang.id", "Indonesia"),
-        ("lang.nl", "Belanda"),
-        ("lang.de", "Jerman"),
-        ("lang.fr", "Prancis"),
-        ("lang.es", "Spanyol"),
-        ("lang.it", "Italia"),
-        ("lang.pt", "Portugis"),
-        ("provider.name_local", "Di Mac ini (whisper)"),
-        ("provider.name_eleven", "ElevenLabs"),
-        ("provider.name_google", "Google Cloud Speech-to-Text"),
-        ("provider.name_openrouter", "OpenRouter"),
-    ];
-    lookup(key)
-}
+// (key, English, Indonesian)
+strings![
+    ("menu.new", "New Recording", "Rekaman Baru"),
+    ("menu.open", "Open Meeting…", "Buka Rapat…"),
+    ("menu.import", "Import Audio File…", "Impor Berkas Audio…"),
+    ("menu.reveal", "Reveal in Finder", "Tampilkan di Finder"),
+    ("menu.close_window", "Close Window", "Tutup Jendela"),
+    ("menu.undo", "Undo", "Urungkan"),
+    ("menu.redo", "Redo", "Ulangi"),
+    ("menu.cut", "Cut", "Potong"),
+    ("menu.copy", "Copy", "Salin"),
+    ("menu.paste", "Paste", "Tempel"),
+    ("menu.select_all", "Select All", "Pilih Semua"),
+    ("menu.copy_transcript", "Copy Transcript", "Salin Transkrip"),
+    ("menu.start", "Start Recording", "Mulai Merekam"),
+    ("menu.pause_resume", "Pause / Resume", "Jeda / Lanjutkan"),
+    ("menu.stop", "Stop Recording", "Hentikan Rekaman"),
+    ("menu.compact", "Compact Strip", "Strip Ringkas"),
+    ("menu.fullscreen", "Enter Full Screen", "Masuk Layar Penuh"),
+    (
+        "menu.transcribe_again",
+        "Transcribe Again",
+        "Transkripsikan Lagi"
+    ),
+    ("menu.window", "Window", "Jendela"),
+    ("menu.help", "MOM Recorder Help", "Bantuan MOM Recorder"),
+    ("menu.file", "File", "Berkas"),
+    ("menu.edit", "Edit", "Sunting"),
+    ("menu.recording", "Recording", "Perekaman"),
+    ("menu.view", "View", "Tampilan"),
+    ("ready.mic", "You (microphone)", "Kamu (mikrofon)"),
+    ("ready.computer", "Computer audio", "Audio komputer"),
+    ("ready.hint", "Drop to import", "Jatuhkan untuk mengimpor"),
+    (
+        "ready.import_hint",
+        "Import an audio file, or drop one here",
+        "Impor berkas audio, atau jatuhkan ke sini"
+    ),
+    ("ready.start", "Start recording", "Mulai merekam"),
+    ("ready.stop", "Stop recording", "Hentikan perekaman"),
+    ("ready.pause", "Pause", "Jeda"),
+    ("ready.resume", "Resume", "Lanjutkan"),
+    (
+        "ready.status_idle",
+        "Ready. Press Start recording when the meeting begins.",
+        "Siap. Tekan Mulai merekam saat rapat dimulai."
+    ),
+    (
+        "ready.status_recording",
+        "Recording. Name, audio file and language can still be changed.",
+        "Merekam. Nama, berkas audio, dan bahasa masih bisa diubah."
+    ),
+    (
+        "ready.status_paused",
+        "Paused. Nothing is recorded until you resume.",
+        "Dijeda. Tidak ada yang direkam sampai dilanjutkan."
+    ),
+    (
+        "ready.status_stopping",
+        "Saving the audio…",
+        "Menyimpan audio…"
+    ),
+    (
+        "ready.status_transcribing",
+        "Transcribing the meeting on this computer…",
+        "Mentranskripsikan rapat di komputer ini…"
+    ),
+    ("ready.language_title", "Language", "Bahasa"),
+    (
+        "ready.language_subtitle",
+        "Used for the transcript after the call",
+        "Dipakai untuk transkrip setelah panggilan"
+    ),
+    ("ready.format_title", "Audio file", "Berkas audio"),
+    (
+        "ready.format_subtitle",
+        "Can be changed during the call",
+        "Bisa diubah selama panggilan"
+    ),
+    (
+        "ready.model_needed",
+        "The speech model ({}, {}) is needed to transcribe",
+        "Model wicara ({}, {}) diperlukan untuk transkripsi"
+    ),
+    ("ready.model_download", "Download", "Unduh"),
+    (
+        "ready.model_downloading",
+        "Downloading the speech model…",
+        "Mengunduh model wicara…"
+    ),
+    (
+        "ready.model_progress",
+        "Downloading the speech model… {:.0}%",
+        "Mengunduh model wicara… {:.0}%"
+    ),
+    ("ready.button_saving", "Saving…", "Menyimpan…"),
+    (
+        "ready.button_transcribing",
+        "Transcribing…",
+        "Mentranskripsikan…"
+    ),
+    ("done.copy", "Copy transcript", "Salin transkrip"),
+    (
+        "done.no_transcript",
+        "No transcript found",
+        "Transkrip tidak ditemukan"
+    ),
+    ("done.new", "New recording", "Rekaman baru"),
+    ("done.reveal", "Reveal in Finder", "Tampilkan di Finder"),
+    ("done.language_again", "Language", "Bahasa"),
+    (
+        "done.transcribe_again",
+        "Transcribe again",
+        "Transkripsikan lagi"
+    ),
+    (
+        "done.transcribe_again_hint",
+        "Transcribe the meeting again with the selected language",
+        "Transkripsikan lagi rapat ini dengan bahasa yang dipilih"
+    ),
+    (
+        "done.transcribe_again_gone",
+        "The separate tracks of this meeting are gone, so it cannot be transcribed again",
+        "Trek terpisah rapat ini sudah hilang, jadi tidak bisa ditranskripsikan lagi"
+    ),
+    ("done.chapters", "Chapters", "Bab"),
+    (
+        "done.chapters_hint",
+        "For meetings of three minutes or more",
+        "Untuk rapat tiga menit atau lebih"
+    ),
+    (
+        "done.chapters_added",
+        "{} chapters added",
+        "{} bab ditambahkan"
+    ),
+    ("done.chapters_none", "No chapters yet", "Belum ada bab"),
+    (
+        "done.chapters_writing",
+        "Writing chapters with {}…",
+        "Menulis bab dengan {}…"
+    ),
+    ("done.speakers", "Speakers", "Pembicara"),
+    ("done.rename_meeting", "Meeting name", "Nama rapat"),
+    (
+        "done.recovery_title",
+        "Unfinished recording found",
+        "Rekaman yang belum selesai ditemukan"
+    ),
+    (
+        "done.recovery_body",
+        "A recording from {} ({}) was not stopped properly, probably because the app quit. Save it as a meeting?",
+        "Rekaman dari {} ({}) tidak dihentikan dengan benar, mungkin karena aplikasi keluar. Simpan sebagai rapat?"
+    ),
+    ("done.recovery_discard", "Discard", "Buang"),
+    ("done.recovery_later", "Later", "Nanti"),
+    ("done.recovery_save", "Save", "Simpan"),
+    (
+        "done.close_recording_title",
+        "Still recording",
+        "Masih merekam"
+    ),
+    (
+        "done.close_recording_body",
+        "Closing stops the meeting. The audio is saved and transcribed first, then the app quits.",
+        "Menutup menghentikan rapat. Audio disimpan dan ditranskripsikan dulu, lalu aplikasi keluar."
+    ),
+    (
+        "done.close_recording_stop",
+        "Stop and close",
+        "Hentikan dan tutup"
+    ),
+    (
+        "done.close_recording_keep",
+        "Keep recording",
+        "Lanjutkan merekam"
+    ),
+    (
+        "done.close_transcribing_title",
+        "Still transcribing",
+        "Masih mentranskripsikan"
+    ),
+    (
+        "done.close_transcribing_body",
+        "The audio is already saved. The transcript is not finished yet.",
+        "Audio sudah tersimpan. Transkripnya belum selesai."
+    ),
+    (
+        "done.close_transcribing_later",
+        "Close when done",
+        "Tutup jika sudah selesai"
+    ),
+    ("done.close_transcribing_keep", "Keep open", "Tetap buka"),
+    ("import.title", "Import an audio file", "Impor berkas audio"),
+    (
+        "import.subtitle_speakers",
+        "Recognized by their voices",
+        "Dikenali dari suaranya"
+    ),
+    ("import.dialog_title", "Import audio", "Impor audio"),
+    ("import.confirm", "Import", "Impor"),
+    ("import.cancel", "Cancel", "Batal"),
+    ("import.auto_speakers", "Automatic", "Otomatis"),
+    (
+        "import.not_openable",
+        "This is not a meeting the recorder can open",
+        "Ini bukan rapat yang bisa dibuka perekam"
+    ),
+    (
+        "banner.audio_permission",
+        "Microphone permission was refused — allow it in System Settings › Privacy & Security › Microphone.",
+        "Izin mikrofon ditolak — izinkan di Pengaturan Sistem › Privasi & Keamanan › Mikrofon."
+    ),
+    (
+        "banner.audio_tap_permission",
+        "System Audio Recording permission was refused — allow it in System Settings › Privacy & Security, then restart the app.",
+        "Izin Perekaman Audio Sistem ditolak — izinkan di Pengaturan Sistem › Privasi & Keamanan, lalu buka ulang aplikasi."
+    ),
+    (
+        "banner.audio_tap_unsupported",
+        "This macOS cannot tap the system audio.",
+        "macOS ini tidak bisa menyadap audio sistem."
+    ),
+    (
+        "banner.audio_install_blackhole",
+        "Install BlackHole to record the computer audio instead.",
+        "Pasang BlackHole agar audio komputer ikut terekam."
+    ),
+    (
+        "banner.audio_helper_missing",
+        "The momr-audio helper was not found — reinstall MOM Recorder.",
+        "Helper momr-audio tidak ditemukan — pasang ulang MOM Recorder."
+    ),
+    (
+        "banner.audio_mic_failed",
+        "Microphone capture failed (exit {}) — check System Settings › Privacy & Security › Microphone.",
+        "Perekaman mikrofon gagal (exit {}) — periksa Pengaturan Sistem › Privasi & Keamanan › Mikrofon."
+    ),
+    (
+        "banner.audio_no_ffmpeg",
+        "Could not start microphone capture — is ffmpeg installed?",
+        "Tidak bisa mulai perekaman mikrofon — apakah ffmpeg terpasang?"
+    ),
+    (
+        "banner.audio_no_program",
+        "Could not start {} — is it installed?",
+        "Tidak bisa menjalankan {} — apakah terpasang?"
+    ),
+    (
+        "strip.tooltip",
+        "Compact strip (⇧⌘M)",
+        "Strip ringkas (⇧⌘M)"
+    ),
+    (
+        "strip.drag_hint",
+        "Drag to move, ⇧⌘M to expand",
+        "Seret untuk memindah, ⇧⌘M untuk melebarkan"
+    ),
+    ("prefs.title", "Settings", "Pengaturan"),
+    ("prefs.transcription", "Transcription", "Transkripsi"),
+    ("prefs.model", "Speech model", "Model wicara"),
+    ("prefs.model_present", "On this Mac", "Di Mac ini"),
+    (
+        "prefs.model_size_gb",
+        "About {size} GB, downloads on first use",
+        "Sekitar {size} GB, diunduh saat pertama dipakai"
+    ),
+    (
+        "prefs.model_size_mb",
+        "About {size} MB, downloads on first use",
+        "Sekitar {size} MB, diunduh saat pertama dipakai"
+    ),
+    ("prefs.language", "Default language", "Bahasa default"),
+    (
+        "prefs.provider",
+        "Transcription provider",
+        "Penyedia transkripsi"
+    ),
+    (
+        "prefs.provider_local_note",
+        "Nothing leaves this Mac",
+        "Tidak ada yang keluar dari Mac ini"
+    ),
+    (
+        "prefs.provider_eleven_note",
+        "Sends meeting audio to ElevenLabs when transcribing",
+        "Mengirim audio rapat ke ElevenLabs saat transkripsi"
+    ),
+    (
+        "prefs.provider_google_note",
+        "Sends meeting audio to Google Cloud when transcribing",
+        "Mengirim audio rapat ke Google Cloud saat transkripsi"
+    ),
+    (
+        "prefs.provider_openrouter_note",
+        "Sends meeting audio to the chosen OpenRouter model when transcribing",
+        "Mengirim audio rapat ke model OpenRouter pilihan saat transkripsi"
+    ),
+    (
+        "prefs.eleven_key",
+        "ElevenLabs API key",
+        "Kunci API ElevenLabs"
+    ),
+    ("prefs.google_key", "Google API key", "Kunci API Google"),
+    (
+        "prefs.openrouter_key",
+        "OpenRouter API key",
+        "Kunci API OpenRouter"
+    ),
+    (
+        "prefs.key_hint_eleven",
+        "Dashboard › profile › API Keys (elevenlabs.io/app/settings/api-keys)",
+        "Dasbor › profil › API Keys (elevenlabs.io/app/settings/api-keys)"
+    ),
+    (
+        "prefs.key_hint_google",
+        "Console › project › Speech-to-Text API › Credentials, restricted to the API",
+        "Konsol › proyek › Speech-to-Text API › Credentials, dibatasi untuk API itu"
+    ),
+    (
+        "prefs.key_hint_openrouter",
+        "OpenRouter dashboard › Keys (openrouter.ai/settings/keys)",
+        "Dasbor OpenRouter › Keys (openrouter.ai/settings/keys)"
+    ),
+    (
+        "prefs.key_saved",
+        "Saved in the Keychain",
+        "Tersimpan di Keychain"
+    ),
+    (
+        "prefs.key_saved_toast",
+        "API key saved",
+        "Kunci API tersimpan"
+    ),
+    ("prefs.chapters", "Chapters", "Bab"),
+    (
+        "prefs.chapters_about",
+        "A coding agent with every tool switched off writes the chapter titles.",
+        "Agen pengode dengan semua perkakas dimatikan yang menulis judul bab."
+    ),
+    ("prefs.agent", "Agent", "Agen"),
+    ("prefs.agent_none", "None", "Tidak ada"),
+    ("prefs.recording", "Recording", "Perekaman"),
+    (
+        "prefs.format",
+        "Default audio format",
+        "Format audio default"
+    ),
+    (
+        "prefs.name",
+        "Your name in transcripts",
+        "Namamu di transkrip"
+    ),
+    ("prefs.meetings", "Meetings folder", "Folder rapat"),
+    ("prefs.meetings_choose", "Choose…", "Pilih…"),
+    ("prefs.audio", "Audio", "Audio"),
+    ("prefs.mic", "Microphone", "Mikrofon"),
+    (
+        "prefs.mic_inputs",
+        "{} input devices, default follows the system",
+        "{} perangkat input, default mengikuti sistem"
+    ),
+    (
+        "prefs.mic_none",
+        "No input device found",
+        "Tidak ada perangkat input"
+    ),
+    ("prefs.computer", "Computer audio", "Audio komputer"),
+    (
+        "prefs.computer_tap",
+        "Records what the Mac plays",
+        "Merekam yang dimainkan Mac"
+    ),
+    ("prefs.computer_blackhole", "Through {}", "Melalui {}"),
+    (
+        "prefs.computer_unavailable",
+        "Unavailable: install BlackHole",
+        "Tidak tersedia: pasang BlackHole"
+    ),
+    (
+        "prefs.blackhole_how",
+        "How to set up BlackHole",
+        "Cara memasang BlackHole"
+    ),
+    ("prefs.menubar", "Menu Bar", "Bilah Menu"),
+    (
+        "prefs.menubar_show",
+        "Show recording status",
+        "Tampilkan status perekaman"
+    ),
+    (
+        "prefs.menubar_restart",
+        "Takes effect on the next launch",
+        "Berlaku saat dibuka berikutnya"
+    ),
+    (
+        "prefs.ui_language",
+        "Interface language",
+        "Bahasa antarmuka"
+    ),
+    (
+        "prefs.ui_language_hint",
+        "Bahasa Indonesia or English. Takes effect on the next launch.",
+        "Bahasa Indonesia atau English. Berlaku saat dibuka berikutnya."
+    ),
+    (
+        "about.comments",
+        "Two-track meeting recorder: your microphone and the computer audio, transcribed on this Mac.",
+        "Perekam rapat dua trek: mikrofonmu dan audio komputermu, ditranskripsikan di Mac ini."
+    ),
+    ("about.transcription_credit", "Transcription", "Transkripsi"),
+    (
+        "about.based_on",
+        "Based on Meeting Recorder by Jankees van Woezik",
+        "Berdasarkan Meeting Recorder oleh Jankees van Woezik"
+    ),
+    (
+        "help.finish_first",
+        "Finish the current recording first",
+        "Selesaikan dulu perekaman yang berjalan"
+    ),
+    ("help.line_deleted", "Line deleted", "Baris dihapus"),
+    ("help.saved", "Saved", "Tersimpan"),
+    (
+        "help.copied_clipboard",
+        "Copied to clipboard",
+        "Disalin ke papan klip"
+    ),
+    (
+        "notify.transcribed",
+        "Meeting transcribed",
+        "Rapat ditranskripsikan"
+    ),
+    ("row.edit", "Edit this line", "Sunting baris ini"),
+    ("row.next_speaker", "Next speaker", "Pembicara berikutnya"),
+    ("row.delete", "Delete this line", "Hapus baris ini"),
+    ("row.play_from", "Play from {}", "Putar dari {}"),
+    ("chapter.play_from", "Play from {}", "Putar dari {}"),
+    ("chapters.generate", "Generate", "Buat"),
+    ("chapters.redo", "Redo", "Ulangi"),
+    ("chapters.made_with", "Made with {}", "Dibuat dengan {}"),
+    (
+        "chapters.let_divide",
+        "Let {} divide the meeting into chapters",
+        "Minta {} membagi rapat menjadi bab"
+    ),
+    (
+        "chapters.could_not",
+        "{} could not make chapters",
+        "{} tidak bisa membuat bab"
+    ),
+    ("import.filter", "Audio and video", "Audio dan video"),
+    ("import.importing", "Importing audio", "Mengimpor audio"),
+    (
+        "import.no_audio",
+        "this file has no audio ffmpeg can read",
+        "berkas ini tidak punya audio yang bisa dibaca ffmpeg"
+    ),
+    (
+        "import.no_convert",
+        "could not convert the audio",
+        "tidak bisa mengonversi audio"
+    ),
+    (
+        "open.title",
+        "Open a meeting (.meeting-recorder file)",
+        "Buka rapat (berkas .meeting-recorder)"
+    ),
+    ("open.filter", "Meeting recordings", "Rekaman rapat"),
+    (
+        "close.cancel_transcription",
+        "Cancel transcription",
+        "Batalkan transkripsi"
+    ),
+    ("canvas.not_recording", "Not recording", "Tidak merekam"),
+    ("canvas.paused", "PAUSED", "DIJEDA"),
+    ("done.meeting_saved", "Meeting saved", "Rapat tersimpan"),
+    (
+        "done.transcript_ready",
+        "Transcript ready",
+        "Transkrip siap"
+    ),
+    ("done.imported_audio", "Imported audio", "Audio impor"),
+    (
+        "done.recovered_title",
+        "Recovered recording",
+        "Rekaman pulihan"
+    ),
+    ("done.fallback_title", "Meeting", "Rapat"),
+    (
+        "help.stopped_unexpectedly",
+        "the import stopped unexpectedly",
+        "impor berhenti tiba-tiba"
+    ),
+    (
+        "help.transcription_stopped",
+        "transcription stopped unexpectedly",
+        "transkripsi berhenti tiba-tiba"
+    ),
+    (
+        "help.no_meeting_folder",
+        "no meeting folder",
+        "tidak ada folder rapat"
+    ),
+    (
+        "help.write_failed",
+        "could not write the transcript: {}",
+        "tidak bisa menulis transkrip: {}"
+    ),
+    (
+        "help.could_not_save_transcript",
+        "Could not save the transcript",
+        "Tidak bisa menyimpan transkrip"
+    ),
+    (
+        "help.model_ready",
+        "Speech model ready",
+        "Model wicara siap"
+    ),
+    (
+        "help.model_download_failed",
+        "Could not download the model: {}",
+        "Tidak bisa mengunduh model: {}"
+    ),
+    (
+        "help.download_stopped",
+        "the download stopped",
+        "unduhan berhenti"
+    ),
+    (
+        "help.not_openable",
+        "not a meeting the recorder can open",
+        "bukan rapat yang bisa dibuka perekam"
+    ),
+    (
+        "help.no_transcript_yet",
+        "This meeting has no transcript yet.",
+        "Rapat ini belum punya transkrip."
+    ),
+    (
+        "help.cancelled",
+        "Transcription cancelled.",
+        "Transkripsi dibatalkan."
+    ),
+    (
+        "help.failed",
+        "Transcription failed: {}.",
+        "Transkripsi gagal: {}."
+    ),
+    (
+        "help.no_audio",
+        "Could not save the audio.",
+        "Tidak bisa menyimpan audio."
+    ),
+    (
+        "help.could_not_start",
+        "Could not start recording: {}",
+        "Tidak bisa mulai merekam: {}"
+    ),
+    ("help.stages_saving", "Saving audio", "Menyimpan audio"),
+    ("help.stages_loading", "Loading audio", "Memuat audio"),
+    ("help.stages_done", "Done", "Selesai"),
+    (
+        "help.folder_exists",
+        "A meeting folder with that name already exists",
+        "Folder rapat dengan nama itu sudah ada"
+    ),
+    (
+        "help.rename_failed",
+        "Could not rename the folder: {}",
+        "Tidak bisa mengganti nama folder: {}"
+    ),
+    (
+        "help.every_speaker",
+        "Every speaker needs a different name",
+        "Setiap pembicara butuh nama berbeda"
+    ),
+    (
+        "speaker.row_mic",
+        "Speaker on the microphone",
+        "Pembicara di mikrofon"
+    ),
+    (
+        "speaker.row_computer",
+        "Speaker on the computer audio",
+        "Pembicara di audio komputer"
+    ),
+    (
+        "speaker.row_computer_n",
+        "Speaker {} on the computer audio",
+        "Pembicara {} di audio komputer"
+    ),
+    ("speaker.empty_fallback", "Speaker {}", "Pembicara {}"),
+    ("stage.loading_model", "Loading model", "Memuat model"),
+    ("stage.transcribing", "Transcribing", "Mentranskripsikan"),
+    ("stage.loading_audio", "Loading audio", "Memuat audio"),
+    (
+        "stage.finding_speakers",
+        "Finding speakers",
+        "Mencari pembicara"
+    ),
+    ("download.model", "Downloading model", "Mengunduh model"),
+    (
+        "download.speaker",
+        "Downloading the speaker model",
+        "Mengunduh model pembicara"
+    ),
+    ("player.play", "Play", "Putar"),
+    ("player.pause", "Pause", "Jeda"),
+    ("format.mono", "Mono", "Mono"),
+    (
+        "format.stereo",
+        "Stereo (mic left, computer right)",
+        "Stereo (mic kiri, komputer kanan)"
+    ),
+    ("format.separate", "Separate files", "Berkas terpisah"),
+    ("format.short_mono", "Mono", "Mono"),
+    ("format.short_stereo", "Stereo", "Stereo"),
+    ("format.short_separate", "Separate files", "Berkas terpisah"),
+    ("lang.auto", "Auto-detect", "Otomatis"),
+    ("lang.en", "English", "Inggris"),
+    ("lang.id", "Indonesian", "Indonesia"),
+    ("lang.nl", "Dutch", "Belanda"),
+    ("lang.de", "German", "Jerman"),
+    ("lang.fr", "French", "Prancis"),
+    ("lang.es", "Spanish", "Spanyol"),
+    ("lang.it", "Italian", "Italia"),
+    ("lang.pt", "Portuguese", "Portugis"),
+    (
+        "provider.name_local",
+        "On this Mac (whisper)",
+        "Di Mac ini (whisper)"
+    ),
+    ("provider.name_eleven", "ElevenLabs", "ElevenLabs"),
+    (
+        "provider.name_google",
+        "Google Cloud Speech-to-Text",
+        "Google Cloud Speech-to-Text"
+    ),
+    ("provider.name_openrouter", "OpenRouter", "OpenRouter"),
+    ("misc.undo", "Undo", "Urungkan"),
+    (
+        "cli.usage",
+        "Usage: {} [start | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]",
+        "Pakai: {} [start | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]"
+    ),
+    (
+        "cli.no_command",
+        "(no command)  open the recorder, ready to record",
+        "(tanpa perintah)  buka perekam, siap merekam"
+    ),
+    (
+        "cli.meeting",
+        "<meeting>     open a .meeting-recorder file or a meeting folder",
+        "<rapat>       buka berkas .meeting-recorder atau folder rapat"
+    ),
+    (
+        "cli.start",
+        "start         start recording in the open window (for a keybinding)",
+        "start         mulai merekam di jendela yang terbuka (untuk pintasan)"
+    ),
+    (
+        "cli.stop",
+        "stop          stop the running recording (for a keybinding)",
+        "stop          hentikan perekaman yang berjalan (untuk pintasan)"
+    ),
+    (
+        "cli.compact",
+        "compact       switch the recording window between full and compact",
+        "compact       alihkan jendela perekaman antara penuh dan ringkas"
+    ),
+    (
+        "cli.pause",
+        "pause         pause or resume the running recording",
+        "pause         jeda atau lanjutkan rekaman yang berjalan"
+    ),
+    (
+        "cli.watch",
+        "watch         stream the recorder state as NDJSON, for a menu bar item or any other client",
+        "watch         alirkan status perekam sebagai NDJSON, untuk item bilah menu atau klien lain"
+    ),
+    (
+        "cli.transcribe",
+        "transcribe    transcribe two tracks and print the transcript as Markdown",
+        "transcribe    transkripsikan dua trek dan cetak transkrip sebagai Markdown"
+    ),
+    (
+        "cli.ask",
+        "ask           run a prompt over stdin through the default agent, without tools",
+        "ask           jalankan prompt lewat stdin melalui agen default, tanpa perkakas"
+    ),
+    (
+        "cli.not_running",
+        "the recorder is not running",
+        "perekam tidak berjalan"
+    ),
+    (
+        "cli.diarize",
+        "Usage: {} diarize <audio> [--speakers N]",
+        "Pakai: {} diarize <audio> [--speakers N]"
+    ),
+    (
+        "cli.unknown",
+        "unknown command '{}', see --help",
+        "perintah '{}' tidak dikenal, lihat --help"
+    ),
+    (
+        "agent.unset",
+        "No agent set. Add agent = \"claude\" to {}",
+        "Agen belum diatur. Tambahkan agent = \"claude\" ke {}"
+    ),
+    ("agent.missing", "{} is not installed", "{} belum terpasang"),
+    (
+        "agent.refused_agy",
+        "Antigravity only offers a blanket sandbox, not a way to remove its tools, so the recorder will not send your transcript to it",
+        "Antigravity hanya menawarkan sandbox umum, bukan cara mematikan perkakasnya, jadi perekam tidak akan mengirim transkripmu ke sana"
+    ),
+    (
+        "agent.refused_crush",
+        "Crush has no flag to run without tools, so the recorder will not send your transcript to it",
+        "Crush tidak punya flag untuk berjalan tanpa perkakas, jadi perekam tidak akan mengirim transkripmu ke sana"
+    ),
+    (
+        "agent.refused_unknown",
+        "The recorder does not know how to run {} without tools",
+        "Perekam tidak tahu cara menjalankan {} tanpa perkakas"
+    ),
+    (
+        "agent.ori_needs",
+        "Ori needs Claude Code or Pi installed to work on a transcript",
+        "Ori butuh Claude Code atau Pi terpasang agar bisa mengolah transkrip"
+    ),
+    (
+        "agent.ori_harness",
+        "Ori needs Claude Code or Pi installed",
+        "Ori butuh Claude Code atau Pi terpasang"
+    ),
+    (
+        "agent.opencode_denied",
+        "OpenCode did not come back with every tool denied, so the recorder will not send your transcript to it",
+        "OpenCode tidak kembali dengan semua perkakas dimatikan, jadi perekam tidak akan mengirim transkripmu ke sana"
+    ),
+    (
+        "agent.grok_setup",
+        "Grok has not been set up yet. Run grok once in a terminal, then try again.",
+        "Grok belum disiapkan. Jalankan grok sekali di terminal, lalu coba lagi."
+    ),
+    (
+        "agent.too_long",
+        "The transcript is too long to send to the agent",
+        "Transkrip terlalu panjang untuk dikirim ke agen"
+    ),
+    (
+        "agent.no_workdir",
+        "Could not make a working directory: {}",
+        "Tidak bisa membuat direktori kerja: {}"
+    ),
+    (
+        "agent.no_start",
+        "Could not start {}: {}",
+        "Tidak bisa menjalankan {}: {}"
+    ),
+    (
+        "agent.no_answer",
+        "{} did not answer within {} seconds",
+        "{} tidak menjawab dalam {} detik"
+    ),
+    (
+        "agent.exited",
+        "{} exited with status {}",
+        "{} keluar dengan status {}"
+    ),
+    (
+        "agent.nothing",
+        "{} returned nothing",
+        "{} tidak mengembalikan apa-apa"
+    ),
+    (
+        "ask.usage",
+        "Usage: {} ask \"<prompt>\" < text | ask --agent",
+        "Pakai: {} ask \"<prompt>\" < text | ask --agent"
+    ),
+    (
+        "ask.no_stdin",
+        "could not read the text from stdin",
+        "tidak bisa membaca teks dari stdin"
+    ),
+    (
+        "help.agent_stopped",
+        "the agent stopped unexpectedly",
+        "agen berhenti tiba-tiba"
+    ),
+    (
+        "banner.audio_tap_failed",
+        "System audio capture failed in Core Audio — retrying.",
+        "Perekaman audio sistem gagal di Core Audio — mencoba lagi."
+    ),
+    (
+        "banner.audio_conversion",
+        "The audio could not be converted for recording — try another device in System Settings › Sound.",
+        "Audio tidak bisa dikonversi untuk direkam — coba perangkat lain di Pengaturan Sistem › Suara."
+    ),
+    (
+        "banner.audio_tap_fell_back",
+        "Recording through BlackHole instead, which only hears what is routed to it: send the output through a Multi-Output Device.",
+        "Merekam lewat BlackHole sebagai gantinya, yang hanya mendengar audio yang diarahkan ke sana: kirim keluaran lewat Multi-Output Device."
+    ),
+    (
+        "banner.audio_no_mic",
+        "No microphone was found — connect one or pick it in System Settings › Sound.",
+        "Mikrofon tidak ditemukan — sambungkan atau pilih di Pengaturan Sistem › Suara."
+    ),
+    (
+        "banner.audio_write_failed",
+        "Audio could not be written to disk ({}) — part of the recording is lost.",
+        "Audio tidak bisa ditulis ke disk ({}) — sebagian rekaman hilang."
+    ),
+    (
+        "cli.transcribe_file",
+        "transcribe-file  transcribe one audio file: --speakers N, --language xx, --model name, --provider local|elevenlabs|google|openrouter",
+        "transcribe-file  transkripsikan satu berkas audio: --speakers N, --language xx, --model nama, --provider local|elevenlabs|google|openrouter"
+    ),
+    (
+        "cli.diarize_help",
+        "diarize       tell the voices in an audio file apart and print who speaks when",
+        "diarize       bedakan suara dalam berkas audio dan cetak siapa berbicara kapan"
+    ),
+    ("cli.done_in", "Done in {}s", "Selesai dalam {} dtk"),
+    (
+        "provider.unknown_id",
+        "config.toml names an unknown provider \"{}\"; use local, elevenlabs, google or openrouter.",
+        "config.toml menyebut penyedia yang tidak dikenal \"{}\"; gunakan local, elevenlabs, google, atau openrouter."
+    ),
+    (
+        "provider.key_missing",
+        "No API key saved for {}. Add one in Settings › Transcription.",
+        "Belum ada kunci API untuk {}. Tambahkan di Pengaturan › Transkripsi."
+    ),
+    (
+        "provider.key_unreadable",
+        "Could not read the {} key from the Keychain: {}",
+        "Kunci {} tidak bisa dibaca dari Keychain: {}"
+    ),
+    (
+        "provider.key_empty",
+        "Paste the whole key on one line; an empty key is not saved.",
+        "Tempel seluruh kunci dalam satu baris; kunci kosong tidak disimpan."
+    ),
+    (
+        "provider.key_save_failed",
+        "Could not save the API key: {}",
+        "Kunci API tidak bisa disimpan: {}"
+    ),
+    (
+        "provider.google_needs_language",
+        "Google Cloud cannot detect the language: pick one first (the transcription language, or --language on the command line).",
+        "Google Cloud tidak bisa mendeteksi bahasa: pilih dulu bahasanya (bahasa transkripsi, atau --language di baris perintah)."
+    ),
+    (
+        "provider.err_not_json",
+        "{} returned text that is not JSON: {}",
+        "{} mengembalikan teks yang bukan JSON: {}"
+    ),
+    ("provider.err_failed", "{} failed: {}", "{} gagal: {}"),
+    (
+        "provider.err_rejected",
+        "{} rejected the API key: {}",
+        "{} menolak kunci API: {}"
+    ),
+    (
+        "provider.err_credits",
+        "{} is out of credits: {}",
+        "Kredit {} habis: {}"
+    ),
+    (
+        "provider.err_quota",
+        "{} is out of quota: {}",
+        "Kuota {} habis: {}"
+    ),
+    (
+        "provider.err_request",
+        "{} request failed: {}",
+        "Permintaan ke {} gagal: {}"
+    ),
+    (
+        "provider.err_shape",
+        "{} answered without the expected {} field; its API may have changed.",
+        "{} menjawab tanpa kolom {} yang diharapkan; API-nya mungkin berubah."
+    ),
+    (
+        "provider.chunk_failed",
+        "Stopped at part {} of {}: {}",
+        "Berhenti di bagian {} dari {}: {}"
+    ),
+    (
+        "provider.ffmpeg_missing",
+        "ffmpeg could not run: {}",
+        "ffmpeg tidak bisa dijalankan: {}"
+    ),
+    (
+        "provider.ffmpeg_google",
+        "ffmpeg could not prepare the audio for Google",
+        "ffmpeg tidak bisa menyiapkan audio untuk Google"
+    ),
+    (
+        "provider.ffmpeg_cut",
+        "ffmpeg could not cut the audio for upload",
+        "ffmpeg tidak bisa memotong audio untuk diunggah"
+    ),
+    (
+        "provider.workdir_failed",
+        "Could not make a working folder: {}",
+        "Folder kerja tidak bisa dibuat: {}"
+    ),
+    (
+        "provider.stage",
+        "Transcribing with {}",
+        "Mentranskripsikan dengan {}"
+    ),
+    (
+        "provider.stage_failed",
+        "Could not stage the audio for upload: {}",
+        "Audio tidak bisa disiapkan untuk diunggah: {}"
+    ),
+    (
+        "help.socket_failed",
+        "The menu bar item and momr stop cannot reach this window ({}).",
+        "Item bilah menu dan momr stop tidak bisa menjangkau jendela ini ({})."
+    ),
+    (
+        "player.failed",
+        "Playback stopped: {}",
+        "Pemutaran berhenti: {}"
+    ),
+    (
+        "prefs.save_failed",
+        "The setting was not saved: {}",
+        "Pengaturan tidak tersimpan: {}"
+    ),
+    (
+        "prefs.devices_unknown",
+        "Could not list the devices: {}",
+        "Perangkat tidak bisa didaftar: {}"
+    ),
+    (
+        "ready.status_transcribing_cloud",
+        "Uploading the audio to {} and transcribing…",
+        "Mengunggah audio ke {} dan mentranskripsikan…"
+    ),
+    ("speaker.row_import", "Speaker {}", "Pembicara {}"),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// All lookup keys, the single source of truth for the completeness test.
-    const KEYS: &[&str] = &[
-        "menu.new",
-        "menu.open",
-        "menu.import",
-        "menu.reveal",
-        "menu.close_window",
-        "menu.undo",
-        "menu.redo",
-        "menu.cut",
-        "menu.copy",
-        "menu.paste",
-        "menu.select_all",
-        "menu.copy_transcript",
-        "menu.start",
-        "menu.pause_resume",
-        "menu.stop",
-        "menu.compact",
-        "menu.fullscreen",
-        "menu.transcribe_again",
-        "menu.window",
-        "menu.help",
-        "menu.file",
-        "menu.edit",
-        "menu.recording",
-        "menu.view",
-        "ready.mic",
-        "ready.computer",
-        "ready.hint",
-        "ready.import_hint",
-        "ready.start",
-        "ready.stop",
-        "ready.pause",
-        "ready.resume",
-        "ready.status_idle",
-        "ready.status_recording",
-        "ready.status_paused",
-        "ready.status_stopping",
-        "ready.status_transcribing",
-        "ready.language_title",
-        "ready.language_subtitle",
-        "ready.format_title",
-        "ready.format_subtitle",
-        "ready.import_button",
-        "ready.model_needed",
-        "ready.model_download",
-        "ready.model_downloading",
-        "ready.model_progress",
-        "ready.press_start",
-        "ready.button_saving",
-        "ready.button_transcribing",
-        "done.copy",
-        "done.copied",
-        "done.no_transcript",
-        "done.new",
-        "done.reveal",
-        "done.open_folder",
-        "done.language_again",
-        "done.transcribe_again",
-        "done.transcribe_again_hint",
-        "done.transcribe_again_gone",
-        "done.chapters",
-        "done.chapters_hint",
-        "done.chapters_added",
-        "done.chapters_none",
-        "done.chapters_writing",
-        "done.speakers",
-        "done.rename_meeting",
-        "done.your_name",
-        "done.recovery_title",
-        "done.recovery_body",
-        "done.recovery_discard",
-        "done.recovery_later",
-        "done.recovery_save",
-        "done.close_recording_title",
-        "done.close_recording_body",
-        "done.close_recording_stop",
-        "done.close_recording_keep",
-        "done.close_transcribing_title",
-        "done.close_transcribing_body",
-        "done.close_transcribing_later",
-        "done.close_transcribing_keep",
-        "import.title",
-        "import.subtitle_language",
-        "import.subtitle_speakers",
-        "import.dialog_title",
-        "import.confirm",
-        "import.cancel",
-        "import.auto_speakers",
-        "import.drop_hint",
-        "import.exists",
-        "import.not_openable",
-        "banner.audio_permission",
-        "banner.audio_tap_permission",
-        "banner.audio_tap_unsupported",
-        "banner.audio_install_blackhole",
-        "banner.audio_helper_missing",
-        "banner.audio_device_gone",
-        "banner.audio_mic_failed",
-        "banner.audio_no_ffmpeg",
-        "banner.audio_no_program",
-        "banner.computer_recording",
-        "strip.tooltip",
-        "strip.drag_hint",
-        "prefs.title",
-        "prefs.transcription",
-        "prefs.model",
-        "prefs.model_present",
-        "prefs.model_downloads",
-        "prefs.model_size_gb",
-        "prefs.model_size_mb",
-        "prefs.language",
-        "prefs.provider",
-        "prefs.provider_local_note",
-        "prefs.provider_eleven_note",
-        "prefs.provider_google_note",
-        "prefs.provider_openrouter_note",
-        "prefs.eleven_key",
-        "prefs.google_key",
-        "prefs.openrouter_key",
-        "prefs.key_hint_eleven",
-        "prefs.key_hint_google",
-        "prefs.key_hint_openrouter",
-        "prefs.key_saved",
-        "prefs.key_saved_toast",
-        "prefs.chapters",
-        "prefs.chapters_about",
-        "prefs.agent",
-        "prefs.agent_none",
-        "row.edit",
-        "row.next_speaker",
-        "row.delete",
-        "row.play_from",
-        "chapter.play_from",
-        "chapters.generate",
-        "chapters.redo",
-        "chapters.made_with",
-        "chapters.let_divide",
-        "chapters.could_not",
-        "import.filter",
-        "import.importing",
-        "import.no_audio",
-        "import.no_convert",
-        "import.auto_speakers",
-        "open.title",
-        "open.filter",
-        "close.cancel_transcription",
-        "canvas.not_recording",
-        "canvas.paused",
-        "done.meeting_saved",
-        "done.transcript_ready",
-        "done.imported_audio",
-        "done.recovered_title",
-        "done.fallback_title",
-        "help.stopped_unexpectedly",
-        "help.transcription_stopped",
-        "help.no_meeting_folder",
-        "help.write_failed",
-        "help.could_not_save_transcript",
-        "help.model_ready",
-        "help.model_download_failed",
-        "help.download_stopped",
-        "help.not_openable",
-        "help.no_transcript_yet",
-        "help.cancelled",
-        "help.failed",
-        "help.no_audio",
-        "help.could_not_start",
-        "help.stages_saving",
-        "help.stages_loading",
-        "help.stages_done",
-        "help.folder_exists",
-        "help.rename_failed",
-        "help.every_speaker",
-        "speaker.row_mic",
-        "speaker.row_computer",
-        "speaker.row_computer_n",
-        "speaker.import_default",
-        "speaker.empty_fallback",
-        "speaker.you",
-        "speaker.remote",
-        "speaker.remote_n",
-        "stage.loading_model",
-        "stage.transcribing",
-        "stage.loading_audio",
-        "stage.warming_up",
-        "stage.finding_speakers",
-        "download.model",
-        "download.speaker",
-        "player.play",
-        "player.pause",
-        "format.mono",
-        "format.stereo",
-        "format.separate",
-        "format.short_mono",
-        "format.short_stereo",
-        "format.short_separate",
-        "lang.auto",
-        "lang.en",
-        "lang.id",
-        "lang.nl",
-        "lang.de",
-        "lang.fr",
-        "lang.es",
-        "lang.it",
-        "lang.pt",
-        "provider.name_local",
-        "provider.name_eleven",
-        "provider.name_google",
-        "provider.name_openrouter",
-        "prefs.mic",
-        "prefs.mic_inputs",
-        "prefs.mic_none",
-        "prefs.computer",
-        "prefs.computer_tap",
-        "prefs.computer_blackhole",
-        "prefs.computer_unavailable",
-        "prefs.blackhole_how",
-        "prefs.menubar",
-        "prefs.menubar_show",
-        "prefs.menubar_restart",
-        "prefs.ui_language",
-        "prefs.ui_language_hint",
-        "about.comments",
-        "about.transcription_credit",
-        "about.based_on",
-        "help.meeting_saved",
-        "help.recovered",
-        "help.finish_first",
-        "help.line_deleted",
-        "help.saved",
-        "help.copied_clipboard",
-        "notify.transcribed",
-        "misc.cancel",
-        "misc.close",
-        "misc.save",
-        "misc.discard",
-        "misc.later",
-        "misc.download",
-        "misc.keep",
-        "misc.undo",
-        "cli.usage",
-        "cli.no_command",
-        "cli.meeting",
-        "cli.start",
-        "cli.stop",
-        "cli.compact",
-        "cli.pause",
-        "cli.watch",
-        "cli.transcribe",
-        "cli.ask",
-        "cli.not_running",
-        "cli.diarize",
-        "cli.unknown",
-        "agent.unset",
-        "agent.missing",
-        "agent.refused_agy",
-        "agent.refused_crush",
-        "agent.refused_unknown",
-        "agent.ori_needs",
-        "agent.ori_harness",
-        "agent.opencode_denied",
-        "agent.grok_setup",
-        "agent.too_long",
-        "agent.no_workdir",
-        "agent.no_start",
-        "agent.no_answer",
-        "agent.exited",
-        "agent.nothing",
-        "ask.usage",
-        "ask.no_stdin",
-        "help.agent_stopped",
-    ];
-
     #[test]
-    fn both_tables_cover_every_key() {
-        let mut missing = Vec::new();
+    fn every_key_has_text_and_matching_placeholders() {
+        let mut bad = Vec::new();
         for key in KEYS {
-            // English needs a real text, not the key or the missing marker.
-            let en_text = t_in(Lang::English, key);
-            if en_text == *key || en_text == "missing string" {
-                missing.push(("en", key));
-            }
-            // Indonesian needs its own entry, not a silent fall back to English.
-            if id(key).is_none() {
-                missing.push(("id", key));
+            let en = t_in(Lang::English, key);
+            let id = t_in(Lang::Indonesian, key);
+            if en.is_empty()
+                || id.is_empty()
+                || en.matches("{}").count() != id.matches("{}").count()
+            {
+                bad.push(*key);
             }
         }
-        assert!(missing.is_empty(), "untranslated keys: {missing:?}");
+        assert!(
+            bad.is_empty(),
+            "empty text or placeholder mismatch: {bad:?}"
+        );
+    }
+
+    /// Every `t("…")`/`tf("…")` literal in the sources is in the table, so a
+    /// typo shows up here instead of as "missing string" on screen.
+    #[test]
+    fn every_looked_up_key_exists() {
+        let sources = [
+            include_str!("agent.rs"),
+            include_str!("audio.rs"),
+            include_str!("main.rs"),
+            include_str!("provider.rs"),
+            include_str!("transcribe.rs"),
+            include_str!("ui.rs"),
+        ];
+        let mut missing = Vec::new();
+        for source in sources {
+            for call in ["t(", "tf(", "t_in(Lang::English,"] {
+                for (at, _) in source.match_indices(call) {
+                    // `set_text(` also ends in `t(`: only a call whose name
+                    // starts here counts.
+                    let before = source[..at].chars().next_back();
+                    if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                        continue;
+                    }
+                    // rustfmt may break the line before a long key.
+                    let Some(rest) = source[at + call.len()..].trim_start().strip_prefix('"')
+                    else {
+                        continue;
+                    };
+                    let Some(end) = rest.find('"') else { continue };
+                    let key = &rest[..end];
+                    if key.contains('.') && !key.contains(' ') && !KEYS.contains(&key) {
+                        missing.push(key.to_owned());
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "keys not in the table: {missing:?}");
     }
 
     #[test]
     fn unknown_key_falls_back_to_a_marker() {
         assert_eq!(t("no.such.key"), "missing string");
+    }
+
+    #[test]
+    fn fill_is_one_pass() {
+        assert_eq!(fill("{} and {}", &["a{}", "b"]), "a{} and b");
+        assert_eq!(fill("{} only", &[]), "{} only");
+    }
+
+    #[test]
+    fn languages_parse() {
+        assert_eq!(Lang::from_locale("id_ID.UTF-8"), Lang::Indonesian);
+        assert_eq!(Lang::from_locale("\"id-ID\""), Lang::Indonesian);
+        assert_eq!(Lang::from_locale("en-GB"), Lang::English);
+        assert_eq!(Lang::from_locale(""), Lang::English);
+        assert_eq!(
+            first_apple_language("(\n    \"id-ID\",\n    \"en-US\"\n)\n").as_deref(),
+            Some("id-ID")
+        );
+        assert_eq!(first_apple_language("()"), None);
+        for lang in [Lang::English, Lang::Indonesian] {
+            assert_eq!(Lang::from_code(lang.code()), Some(lang));
+        }
     }
 }

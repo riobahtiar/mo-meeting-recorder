@@ -6,8 +6,9 @@
 speech-to-text, Google Cloud Speech-to-Text, or any speech-to-text model on
 OpenRouter instead of the local whisper model, picked in Preferences (or
 `transcribe-file --provider` for one run) with the credentials entered
-there, and the whole UI reads in English or Indonesian, switched in
-Preferences. Local whisper stays the default: without an explicit choice no
+there, and the whole interface reads in English or Indonesian, switched in
+Preferences. Transcript content and what scripts parse (the Markdown on
+stdout, the `watch` lines) stay English (D23). Local whisper stays the default: without an explicit choice no
 audio leaves the Mac. The OpenRouter model is `openrouter_model` in
 config.toml (`openai/whisper-1` unless set to another transcription-capable
 slug); OpenRouter returns no speaker tags, so its words transcribe without
@@ -32,11 +33,23 @@ like the local path where the provider returns tags), routing in
 `transcribe()`/`transcribe_single()`, `transcribe-file --provider` flag for
 one run without touching config, Preferences picker + password rows +
 per-provider privacy, `locales.rs` (English + Indonesian,
-completeness-tested) with the whole UI converted including menus, dialogs,
-toasts, stages, agent messages, CLI help and the menu-bar item. Omnilingual
+completeness-tested) with menus, dialogs, toasts, stages, agent messages and
+the menu-bar item converted. Omnilingual
 stays out (Python fairseq2 stack, no shippable runtime). Live provider runs
 need the user's own keys, so the end-to-end cloud path is verified to the
 key gate (correct "no key" error per provider) rather than past it.
+
+Moved into the locales table after review, 2026-09-25: the provider
+progress line ("Transcribing with …"), every provider and Keychain error,
+the audio banners (mic permission, no microphone, tap failure, BlackHole
+fall-back, lost writes), the default meeting title and the import errors;
+the table now holds both languages side by side, so a key without its
+Indonesian text does not compile, and a test checks every `t("…")` in the
+sources exists. The Indonesian line in Done when stays `[~]` until a UI walk
+finds no English. On the command line, what a person reads (`--help`,
+errors, the "Done in" line on stderr) translates; what scripts parse (the
+transcript Markdown on stdout, the `watch` NDJSON) stays English.
+
 ## Prerequisites
 
 Plans 07 (Preferences dialog) and 05 (config keys).
@@ -61,8 +74,9 @@ the `multipart` and `json` features — no new crates.
 | Key | Dashboard → profile → API Keys (`https://elevenlabs.io/app/settings/api-keys`) | Console → project → enable Speech-to-Text API → Credentials → API key, restricted to the API |
 | Audio | 48 kHz mono WAV per chunk | 16 kHz mono LINEAR16 base64 per chunk (own base64: no new crate) |
 
-Keys live in the macOS Keychain (`security` CLI, service `momr-<provider>`),
-never in config files; the config only names the provider. Missing key,
+Keys live in the macOS Keychain (`security` CLI, service `momr-<provider>`,
+written through `security -i` with the command on stdin so the key never
+appears in a process's argv; D21), never in config files; the config only names the provider. Missing key,
 bad key and quota errors surface as the provider's message in the UI, and a
 failed chunk aborts the run like a failed whisper pass.
 
@@ -78,7 +92,13 @@ Every user-visible literal in `ui.rs` (labels, buttons, banners, dialogs,
 toasts, menu items, Preferences) goes through it; format arguments stay
 positional (`{}`) with matching order in both languages. The completeness
 test asserts both tables hold exactly the same keys. Transcript *content*
-(stored names, markdown) is untouched — only the chrome translates.
+(stored names, markdown) is untouched — only the chrome translates. The
+default speaker labels ("You", "Remote", "Remote N", "Speaker N") and the
+`transcript.md` language line are content, so they stay English whatever the
+interface language (D23). The interface language is resolved once per
+launch (`ui_language` in `settings.json`, else the first macOS preferred
+language from `AppleLanguages`, else `$LANG`) and passed to `momr-menubar`
+as `MOMR_LANG`, so the item and the window agree.
 
 ## Steps
 
@@ -97,6 +117,12 @@ test asserts both tables hold exactly the same keys. Transcript *content*
 
 - API field names drift: parse defensively (`serde_json::Value`, required
   `text`/`transcript` only) and report the provider's error body verbatim.
+- Google Cloud needs an explicit language: its v1 API has no language
+  detection, so Auto-detect is refused for Google rather than silently sent
+  as US English.
+- Provider speaker numbers restart in every chunk (about 10 minutes for
+  ElevenLabs, 55 seconds for Google and OpenRouter), so "Remote 2" in one
+  chunk may be another voice in the next. The README says so.
 - Long meetings multiply cost: show the chunk count in the progress line so
   a cloud run never surprises.
 - `say` fixtures stay the transcription tests; provider tests use checked-in

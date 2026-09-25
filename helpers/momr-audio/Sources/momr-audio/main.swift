@@ -7,9 +7,23 @@
 //   run -- <program> <args…>         run a program, killing it when the parent exits
 //
 // Exit codes, shared with src/audio.rs, which maps them to the BlackHole
-// fallback and the ready-page banner:
-//   0 normal end (stdout closed)   2 bad arguments   3 tap unsupported
-//   4 permission denied            5 no device
+// fallback and the ready-page banner. They are an interface: change one only
+// together with the Rust side.
+//
+//   0  normal end: stdout closed (the app went away) or SIGTERM/SIGINT.
+//   2  bad arguments, or `run` could not find or start its program.
+//   3  process taps are unsupported here (macOS older than 14.2).
+//   4  permission denied. For the microphone this is the Microphone
+//      privacy setting; for `system` it means the tap could not be created,
+//      which is almost always the System Audio Recording permission.
+//   5  no input device, or the microphone could not start or restart.
+//   6  the tap failed for a Core Audio reason other than permission: reading
+//      the tap format, creating the aggregate device, attaching the IOProc or
+//      starting it. The OSStatus is on stderr.
+//   7  audio conversion keeps failing: 50 buffers in a row could not become
+//      s16le, so the recording would be silent. The reason is on stderr.
+//
+// `run` exits with its child's status instead, except for 2 above.
 
 import AVFoundation
 import Darwin

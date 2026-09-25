@@ -1,7 +1,7 @@
 //! Which whisper model transcribes, where it is on disk, and fetching it.
 //!
 //! The model is picked with `--model` on the command line, or `model = "…"`
-//! in `~/.config/momr/config.toml`, and is
+//! in config.toml (`~/Library/Application Support/momr/config.toml`), and is
 //! `large-v3-turbo` otherwise. A name from `MODELS` is looked for in the app's
 //! own model folder and in voxtype's (same files, no need to have them twice),
 //! and downloaded when it is in neither. A path to a `.bin` file is used as is.
@@ -99,14 +99,18 @@ pub fn config_value(key: &str) -> Option<String> {
 }
 
 /// The value of `key = "…"` in one config file's text, so tests can cover the
-/// shape without touching the real file.
+/// shape without touching the real file. A quoted value runs to its closing
+/// quote, so a `#` inside it is kept; after an unquoted one it starts a comment.
 fn parse_config_value(text: &str, key: &str) -> Option<String> {
     text.lines()
         .find_map(|line| {
             let (found, value) = line.split_once('=')?;
             (found.trim() == key).then(|| {
-                let value = value.split('#').next().unwrap_or("");
-                value.trim().trim_matches('"').to_owned()
+                let value = value.trim();
+                match value.strip_prefix('"') {
+                    Some(quoted) => quoted.split('"').next().unwrap_or("").to_owned(),
+                    None => value.split('#').next().unwrap_or("").trim().to_owned(),
+                }
             })
         })
         .filter(|value| !value.is_empty())
@@ -121,14 +125,33 @@ pub fn configured() -> String {
 }
 
 /// Rewrites `key = "value"` in config.toml, appending it when absent and
-pub fn save_config_value(key: &str, value: &str) {
-    let path = config_file();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let text = rewrite_config_line(&text, key, value);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+/// keeping every other line and comment as the user wrote it. A config that
+/// exists but cannot be read is an error, never an empty file: writing only
+/// this key back would silently drop every other setting.
+pub fn save_config_value(key: &str, value: &str) -> std::io::Result<()> {
+    if value.contains(['"', '\n', '\r']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{key}: a value cannot contain quotes or line breaks"),
+        ));
     }
-    let _ = std::fs::write(path, text);
+    let path = config_file();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    crate::settings::write_atomic(&path, rewrite_config_line(&text, key, value).as_bytes())
+}
+
+/// Whether the menu bar item runs, `menubar = "false"` in config.toml to turn
+/// it off. On unless switched off, since it is how a hidden window is found.
+pub fn menubar_enabled() -> bool {
+    config_value("menubar").as_deref() != Some("false")
+}
+
+pub fn save_menubar_enabled(on: bool) -> std::io::Result<()> {
+    save_config_value("menubar", if on { "true" } else { "false" })
 }
 
 /// `text` with `key = "value"` replaced or appended.
@@ -168,8 +191,9 @@ fn file_name(model: &Model) -> String {
     format!("ggml-{}.bin", model.name)
 }
 
-/// voxtype's models, wherever voxtype keeps them: same files, no need to have
-/// them twice.
+/// voxtype's models: same files, no need to have them twice. Homebrew's GLib
+/// has no Cocoa support (D22), so this is `~/.local/share/voxtype/models`,
+/// where voxtype keeps them; that is on purpose (plan 06), not a leftover.
 fn voxtype_models() -> PathBuf {
     glib::user_data_dir().join("voxtype/models")
 }
@@ -257,6 +281,15 @@ mod tests {
         assert_eq!(parse_config_value(text, "agent").as_deref(), Some("claude"));
         assert_eq!(parse_config_value(text, "missing"), None);
         assert_eq!(parse_config_value("agent = \"\"\n", "agent"), None);
+        // A '#' inside quotes is part of the value; after a bare one, a comment.
+        assert_eq!(
+            parse_config_value("openrouter_model = \"a#b\" # c\n", "openrouter_model").as_deref(),
+            Some("a#b")
+        );
+        assert_eq!(
+            parse_config_value("menubar = false # off\n", "menubar").as_deref(),
+            Some("false")
+        );
     }
 
     #[test]

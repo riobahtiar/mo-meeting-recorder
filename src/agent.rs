@@ -51,8 +51,10 @@ pub const MAX_ANSWER_BYTES: usize = 128 * 1024;
 /// bounds what a runaway agent can put on disk before anything reads it back.
 /// It has to fit the agent's own session file, which holds the whole prompt.
 const FILE_LIMIT_KB: u64 = 2048;
-/// Linux refuses a single argv string over 128 KiB (MAX_ARG_STRLEN); agents
-/// that only take the prompt as an argument cannot go past it.
+/// The cap on a prompt passed as an argument, for agents that take it no
+/// other way. macOS has no per-string limit, only ARG_MAX (1 MiB) for the
+/// arguments and environment together, and a user's environment can be
+/// large; 120 KiB leaves it plenty and still holds a long meeting's summary.
 const MAX_ARG_BYTES: usize = 120 * 1024;
 
 /// The agent opencode runs as, passed through OPENCODE_CONFIG_CONTENT, a
@@ -86,12 +88,33 @@ const CODEX_NO_TOOLS: &[&str] = &[
     "tools.apps=false",
 ];
 
-/// The default agent, when one is set and can be driven safely.
+/// The default agent, when one is set and can be driven safely: supported,
+/// installed and with no blocker. The fields are private so `status_with`
+/// is the only way to get one, and `run` never receives an agent that
+/// skipped those checks.
 #[derive(Clone, Debug)]
 pub struct Agent {
     /// The id from `agent = "…"` in config.toml, e.g. "claude".
-    pub id: String,
+    id: String,
     /// For the UI, e.g. "Claude Code".
+    name: &'static str,
+}
+
+impl Agent {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// An agent to offer in Settings: known and on PATH, not yet checked for
+/// blockers, so it cannot be run; picking it only saves its id.
+#[derive(Clone, Copy, Debug)]
+pub struct Choice {
+    pub id: &'static str,
     pub name: &'static str,
 }
 
@@ -111,17 +134,9 @@ impl std::fmt::Display for Unavailable {
         match self {
             Unavailable::Unset => {
                 let path = crate::models::config_file().display().to_string();
-                write!(
-                    f,
-                    "{}",
-                    crate::locales::t("agent.unset").replace("{}", &path)
-                )
+                f.write_str(&crate::locales::tf("agent.unset", &[&path]))
             }
-            Unavailable::Missing(id) => write!(
-                f,
-                "{}",
-                crate::locales::t("agent.missing").replace("{}", id)
-            ),
+            Unavailable::Missing(id) => f.write_str(&crate::locales::tf("agent.missing", &[id])),
             Unavailable::Refused(reason) => f.write_str(reason),
         }
     }
@@ -134,10 +149,17 @@ pub fn default_agent() -> Option<Agent> {
 
 /// The default agent, or why it cannot be used.
 pub fn status() -> Result<Agent, Unavailable> {
-    status_with(
-        || crate::models::config_value("agent"),
-        |id| which(id).is_some(),
-    )
+    status_with(configured_id, |id| which(id).is_some())
+}
+
+/// The agent id in config.toml, None when unset.
+pub fn configured_id() -> Option<String> {
+    crate::models::config_value("agent")
+}
+
+/// Saves the agent id; an empty id means no agent.
+pub fn save_configured_id(id: &str) -> std::io::Result<()> {
+    crate::models::save_config_value("agent", id)
 }
 
 /// The default agent from an id source and an install check passed as
@@ -191,20 +213,18 @@ const AGENT_IDS: &[&str] = &[
     "claude", "codex", "opencode", "pi", "omp", "ori", "grok", "copilot", "goose",
 ];
 
-/// The table agents found on `PATH`, for the Preferences dropdown.
-pub fn installed_agents() -> Vec<Agent> {
+/// The table agents found on `PATH`, for the Settings dropdown.
+pub fn installed_agents() -> Vec<Choice> {
     AGENT_IDS
         .iter()
         .filter(|id| which(id).is_some())
-        .map(|id| Agent {
-            id: id.to_string(),
+        .map(|id| Choice {
+            id,
             name: label(id),
         })
         .collect()
 }
 
-/// Must stay in step with `build`: an agent here and missing there runs
-/// nothing, an agent there and missing here would run with its tools.
 fn supported(id: &str) -> bool {
     AGENT_IDS.contains(&id)
 }
@@ -513,11 +533,9 @@ fn run_built(
         })
         .stdout(stdout)
         .stderr(stderr);
-    let mut child = command.spawn().map_err(|e| {
-        crate::locales::t("agent.no_start")
-            .replacen("{}", agent.name, 1)
-            .replacen("{}", &e.to_string(), 1)
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| crate::locales::tf("agent.no_start", &[agent.name, &e.to_string()]))?;
 
     // The prompt goes in from a thread: a long transcript is more than a pipe
     // holds, and the agent may start answering before it has read it all.
@@ -545,9 +563,10 @@ fn run_built(
         }
         kill_group(child.id(), "KILL");
         let _ = child.wait();
-        return Err(crate::locales::t("agent.no_answer")
-            .replacen("{}", agent.name, 1)
-            .replacen("{}", &timeout.as_secs().to_string(), 1));
+        return Err(crate::locales::tf(
+            "agent.no_answer",
+            &[agent.name, &timeout.as_secs().to_string()],
+        ));
     };
     if let Some(writer) = writer {
         let _ = writer.join();
@@ -564,20 +583,16 @@ fn run_built(
     // refusal to stdout, where it would otherwise pass for the answer.
     // 124 is gtimeout's own exit status, 137 a KILL after its grace period.
     if matches!(status.code(), Some(124 | 137)) {
-        return Err(crate::locales::t("agent.no_answer")
-            .replacen("{}", agent.name, 1)
-            .replacen("{}", &timeout.as_secs().to_string(), 1));
+        return Err(crate::locales::tf(
+            "agent.no_answer",
+            &[agent.name, &timeout.as_secs().to_string()],
+        ));
     }
     if !status.success() {
         let detail = first_line(&stderr).or_else(|| first_line(&stdout));
         return Err(detail.unwrap_or_else(|| {
-            crate::locales::t("agent.exited")
-                .replacen("{}", agent.name, 1)
-                .replacen(
-                    "{}",
-                    &status.code().map_or("?".into(), |c| c.to_string()),
-                    1,
-                )
+            let code = status.code().map_or("?".into(), |c| c.to_string());
+            crate::locales::tf("agent.exited", &[agent.name, &code])
         }));
     }
 
@@ -585,7 +600,7 @@ fn run_built(
     let answer = truncate(&answer, MAX_ANSWER_BYTES);
     if answer.trim().is_empty() {
         return Err(first_line(&stderr)
-            .unwrap_or_else(|| crate::locales::t("agent.nothing").replace("{}", agent.name)));
+            .unwrap_or_else(|| crate::locales::tf("agent.nothing", &[agent.name])));
     }
     Ok(answer.to_owned())
 }
@@ -719,12 +734,9 @@ fn read_bounded(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// A private, empty directory for one run.
+/// A private, empty directory for one run, under the per-user `$TMPDIR`.
 fn workdir() -> std::io::Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(std::env::temp_dir);
+    let base = std::env::temp_dir();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -1023,9 +1035,12 @@ not json"#;
             id: "pi".into(),
             name: "Pi",
         };
+        // A sleep length no other process on the machine will have, so
+        // pgrep below only finds this test's child.
+        let marker = format!("sleep {}", 900_000 + std::process::id());
         let built = Built {
             program: "sh".into(),
-            args: vec!["-c".into(), "sleep 1000".into()],
+            args: vec!["-c".into(), marker.clone().into()],
             env: Vec::new(),
             stdin: false,
             file_limit_kb: FILE_LIMIT_KB,
@@ -1036,7 +1051,7 @@ not json"#;
         assert!(started.elapsed() < Duration::from_secs(60));
         let _ = std::fs::remove_dir_all(&dir);
         let lingering = Command::new("pgrep")
-            .args(["-f", "sleep 1000"])
+            .args(["-f", &format!("^{marker}$")])
             .output()
             .map(|out| !out.stdout.is_empty())
             .unwrap_or(false);

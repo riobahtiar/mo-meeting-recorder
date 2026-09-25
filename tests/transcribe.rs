@@ -1,7 +1,12 @@
 //! End-to-end: voice a fixture with `say`, run it through `transcribe-file`,
 //! expect the words back. Ignored by default (it downloads the tiny model on
-//! first use); CI runs it with `cargo test -- --ignored` and a cached models
-//! folder.
+//! first use); run it with `cargo test -- --ignored`. (CI would run it the
+//! same way with a cached models folder once the workflows are back on.)
+//!
+//! The run is local and hermetic: `--provider local` and a scratch config and
+//! state folder, so a developer's config.toml naming a cloud provider never
+//! uploads the fixture, and their settings never change the result. The
+//! models folder stays the real one, so the tiny model is downloaded once.
 
 use std::process::Command;
 
@@ -25,12 +30,21 @@ fn transcribe_say_fixture() {
         .arg("tiny")
         .arg("--language")
         .arg("en")
+        .arg("--provider")
+        .arg("local")
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_STATE_HOME", dir.join("state"))
         .output()
         .expect("transcribe-file runs");
-    assert!(transcribed.status.success());
+    assert!(
+        transcribed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&transcribed.stderr)
+    );
     let text = String::from_utf8_lossy(&transcribed.stdout).to_lowercase();
     assert!(text.contains("fox"), "{text}");
     assert!(text.contains("dog"), "{text}");
+    // Speaker labels are transcript content: English whatever the interface.
     assert!(text.contains("speaker 1"), "{text}");
     let _ = std::fs::remove_dir_all(&dir);
 }

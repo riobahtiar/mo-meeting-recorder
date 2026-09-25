@@ -6,8 +6,8 @@ MOM Recorder's identity is final before the first public DMG: the bundle identif
 
 ## Done when
 
-- [ ] `CFBundleIdentifier`, `APP_ID` and the UTI are confirmed (D13) and, if changed, changed everywhere in one commit.
-- [ ] `grep -rn -i "omarchy\|omacon\|hyprland\|quattro\|pacman\|parec\|pacat" --exclude-dir=.git --exclude-dir=target .` returns only the credit lines in `README.md`, `plans/00-overview.md` and `LICENSE`, plus this plan.
+- [x] `CFBundleIdentifier`, `APP_ID` and the UTI are confirmed (D13) and, if changed, changed everywhere in one commit.
+- [ ] `grep -rn -i "omarchy\|omacon\|hyprland\|quattro\|pacman\|parec\|pacat" --exclude-dir=.git --exclude-dir=target .` returns only the credit lines in `README.md`, `plans/00-overview.md` and `LICENSE`, this plan, the plans that record what replaced what, and `tests/fixtures/legacy/`, whose `"app"` value is upstream's on purpose (it proves an upstream manifest still opens).
 - [ ] `screenshots/` holds macOS screenshots of MOM Recorder; the upstream Linux images are gone.
 - [ ] `demo/` either documents how to shoot MOM Recorder on macOS or is reduced to the invented meeting scripts it exists to provide.
 - [ ] The `Cargo.toml` package version is bumped (the first MOMR release) and the README status table says "shipped" for phases 1 to 3.

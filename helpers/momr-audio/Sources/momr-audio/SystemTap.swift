@@ -2,6 +2,13 @@
 // read through a private aggregate device (macOS 14.2+). The shape follows
 // insidegui/AudioCap (MIT). The tap runs at the output device's rate in
 // Float32; AudioWriter resamples to the requested rate.
+//
+// Creating the tap is the step macOS gates on System Audio Recording, so its
+// failure exits 4 and the app points the user at that setting. Every later
+// step fails for Core Audio reasons the user cannot fix in System Settings,
+// so those exit 6 with the OSStatus on stderr, and the app can tell the two
+// apart instead of sending someone to a permission that is already granted.
+// Once running, buffers that keep failing to convert end in AudioWriter's 7.
 
 import AVFoundation
 import CoreAudio
@@ -60,11 +67,19 @@ func runSystem(rate: Double, channels: AVAudioChannelCount) -> Int32 {
         mElement: kAudioObjectPropertyElementMain)
     status = AudioObjectGetPropertyData(
         tapID, &formatAddr, 0, nil, &asbdSize, &tapASBD)
-    guard status == noErr, let tapFormat = AVAudioFormat(streamDescription: &tapASBD)
-    else {
-        fputs("momr-audio: could not read the tap format\n", stderr)
+    guard status == noErr else {
+        fputs(
+            "momr-audio: could not read the tap format (OSStatus \(status))\n",
+            stderr)
         cleanupTap()
-        return 4
+        return 6
+    }
+    guard let tapFormat = AVAudioFormat(streamDescription: &tapASBD) else {
+        fputs(
+            "momr-audio: the tap reported a format AVAudioFormat cannot describe (\(tapASBD.mSampleRate) Hz, \(tapASBD.mChannelsPerFrame) channels, format ID \(tapASBD.mFormatID))\n",
+            stderr)
+        cleanupTap()
+        return 6
     }
 
     let aggregate: [String: Any] = [
@@ -83,17 +98,25 @@ func runSystem(rate: Double, channels: AVAudioChannelCount) -> Int32 {
             "momr-audio: could not create the aggregate device (OSStatus \(status))\n",
             stderr)
         cleanupTap()
-        return 4
+        return 6
     }
 
     let writer = AudioWriter(rate: rate, channels: channels)
     status = AudioDeviceCreateIOProcIDWithBlock(
         &procID, aggregateID, nil
     ) { _, inputData, _, _, _ in
+        // A buffer list that does not match the tap format would otherwise
+        // vanish here without a trace; routing it through the writer's
+        // failure count makes a tap that only ever delivers such buffers end
+        // with exit 7 instead of a silent track.
         guard
             let pcm = AVAudioPCMBuffer(
                 pcmFormat: tapFormat, bufferListNoCopy: inputData)
-        else { return }
+        else {
+            writer.dropped(
+                "the tap delivered a buffer list that does not match its format (\(tapFormat))")
+            return
+        }
         writer.write(pcm)
     }
     guard status == noErr else {
@@ -101,7 +124,7 @@ func runSystem(rate: Double, channels: AVAudioChannelCount) -> Int32 {
             "momr-audio: could not attach to the tap (OSStatus \(status))\n",
             stderr)
         cleanupTap()
-        return 4
+        return 6
     }
 
     status = AudioDeviceStart(aggregateID, procID)
@@ -110,7 +133,7 @@ func runSystem(rate: Double, channels: AVAudioChannelCount) -> Int32 {
             "momr-audio: could not start the tap (OSStatus \(status))\n",
             stderr)
         cleanupTap()
-        return 4
+        return 6
     }
 
     signal(SIGTERM, tapCleanupHandler)

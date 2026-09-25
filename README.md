@@ -1,6 +1,6 @@
 # MOM Recorder
 
-**MOM Recorder** (short: **MOMR**) records your meetings on a Mac: your microphone and the computer audio as two tracks, and when you stop you get a transcript with speakers, chapters and a player. You can also drop in a recording you already have. Everything is transcribed on your own machine with [whisper.cpp](https://github.com/ggml-org/whisper.cpp). No bot joins your call, and no audio leaves your computer. It works with any meeting app, because it simply listens to what your Mac plays and what you say.
+**MOM Recorder** (short: **MOMR**) records your meetings on a Mac: your microphone and the computer audio as two tracks, and when you stop you get a transcript with speakers, chapters and a player. You can also drop in a recording you already have. By default everything is transcribed on your own machine with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), so no audio leaves your computer; the optional cloud providers you can switch on are described under [Privacy](#privacy). No bot joins your call. It works with any meeting app, because it simply listens to what your Mac plays and what you say.
 
 > **Status: in development.** MOM Recorder grew out of [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) by Jankees van Woezik, a Linux app. The Rust core is kept; the Linux integrations are being replaced by macOS ones. It builds and records on macOS from a terminal checkout; the double-clickable app and the on-screen polish are still landing. The plan, the porting map and the decisions live in [`plans/`](plans/README.md).
 
@@ -16,14 +16,17 @@
 | Native menu bar, window chrome, system font, Apple colours, Preferences, About | [07](plans/07-macos-look-and-feel.md) | in progress — actions+menu+About+Preferences coded, Apple palette with tests, Omarchy fully gone; icon and on-screen checks need a display session |
 | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | [08](plans/08-app-bundle-and-distribution.md) | in progress — bundle assembles and launches, formula + workflow staged; signing, DMG and install docs wait for cert and tag |
 | Live recording status in the menu bar | [09](plans/09-menu-bar-item.md) | in progress — SwiftBar script renders, native item builds with tested protocol, app spawns/kills it; on-screen check needs a display session |
-| Cloud transcription and Indonesian UI | [13](plans/13-transcription-providers.md) | in progress — ElevenLabs/Google routed with Keychain keys, full EN/ID locales; live cloud runs need user keys, UI walk needs a display session |
+| Tests and CI on macOS | [10](plans/10-testing-and-ci.md) | in progress — unit tests, the end-to-end `say` fixture, the meeting-folder fixture and the Swift tests are in place; CI workflows are written but disabled for now (commit ae48747); the smoke checklist needs a display session |
+| Identity: bundle id, UTI, folder names, brand sweep | [11](plans/11-identity.md) | in progress — `io.github.riobahtiar.MOMRecorder`, its UTI and the `momr` folders confirmed (D13), comment sweep and demo kit done; macOS screenshots and the release version bump remain |
+| Cloud transcription and Indonesian UI | [13](plans/13-transcription-providers.md) | in progress — ElevenLabs, Google and OpenRouter routed with Keychain keys, EN/ID locales; live cloud runs need user keys, UI walk needs a display session |
+
 Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: the app is GTK 4 and libadwaita. Screenshots come with the macOS look in plan 07.
 
 ## What it does
 
 - **Records both sides of the call** as two separate tracks, with live meters before you start so you can see both arrive. Pause freezes both.
 - **Stays out of the way.** The window shrinks to a strip with only the clock and the two waves.
-- **Transcribes on your own machine** when you stop, with an animation that shows the lines as they are recognised.
+- **Transcribes on your own machine** by default when you stop (cloud providers are opt-in, see [Privacy](#privacy)), with an animation that shows the lines as they are recognised.
 - **Tells the speakers apart.** Your side and the other side come from the two tracks; several people on the other side are told apart by voice.
 - **Imports any recording** you drop on the window, and separates up to eight voices with NVIDIA's [Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization), run locally.
 - **Gives you a transcript you can listen to**, edit in place, and copy. Click any line to play from there.
@@ -40,7 +43,7 @@ sh scripts/build-macos.sh   # Rust binary + momr-audio/momr-menubar helpers
 
 The first transcription downloads the whisper model (about 1.6 GB, once); telling voices apart in an imported file downloads the speaker model (about 120 MB) on first use.
 
-Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here. Models, settings and `config.toml` live under `~/Library/Application Support/momr`; staging, the cache and the live-state socket under `~/Library/Caches/momr`.
+Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here, and one recorded here opens there. The manifest differs in two small ways. New meetings write `"app": "momr"` where upstream wrote `"omarchy-meeting-recorder"`; no reader checks that field, so both open in both apps. A new optional `"provider"` field records which transcription engine made the transcript (`local`, `elevenlabs`, `google` or `openrouter`), and older readers ignore it. The speaker labels in `transcript.md` ("You", "Remote", "Remote N", "Speaker N") and its language line stay in English whatever the interface language, because scripts read them. Models, settings and `config.toml` live under `~/Library/Application Support/momr`; staging, the cache and the live-state socket under `~/Library/Caches/momr`.
 
 ## Command line
 
@@ -50,11 +53,11 @@ Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcrip
 | `momr <folder or .meeting-recorder file>` | Open a saved meeting |
 | `momr start` / `pause` / `stop` / `compact` | Control the running app |
 | `momr watch` | Stream the recorder state as NDJSON |
-| `momr transcribe <mic> <computer> [--language xx] [--model name]` | Transcribe two tracks to Markdown |
-| `momr transcribe-file <audio> [--speakers N] [--language xx] [--model name]` | Transcribe one file, telling voices apart |
+| `momr transcribe <mic> <computer> [--language xx] [--model name] [--provider id]` | Transcribe two tracks to Markdown |
+| `momr transcribe-file <audio> [--speakers N] [--language xx] [--model name] [--provider local\|elevenlabs\|google\|openrouter]` | Transcribe one file, telling voices apart |
 | `momr ask "<prompt>" < text` | Run a prompt through the agent, without tools |
 
-The `transcribe` commands need no window or audio device, so they are the first thing to try on a fresh build.
+The `transcribe` commands need no window or audio device, so they are the first thing to try on a fresh build. Both take short forms too (`-l`, `-m`, `-p`, and `-s` for `transcribe-file`). `--provider` (or `-p`) picks the transcription engine for that run only, overriding the `provider` key in `config.toml` without changing it; a cloud provider still needs its API key saved in Settings.
 
 ## Privacy
 
@@ -66,9 +69,21 @@ you set it up:
   already chose and pay for.
 - Cloud transcription (Settings › Transcription › ElevenLabs, Google or OpenRouter):
   the meeting audio goes to that provider for transcription. API keys stay
-  in your Keychain. ElevenLabs, Google and OpenRouter keep and process uploads under
-  their own terms — use the local default for anything sensitive. The OpenRouter
-  model is `openrouter_model` in config.toml (`openai/whisper-1` unless set).
+  in your macOS Keychain, under the services `momr-elevenlabs`, `momr-google`
+  and `momr-openrouter`, never in a config file. ElevenLabs, Google and
+  OpenRouter keep and process uploads under their own terms — use the local
+  default for anything sensitive. The OpenRouter model is `openrouter_model`
+  in config.toml (`openai/whisper-1` unless set).
+
+A cloud run behaves a little differently from the local one:
+
+- Google Cloud needs an explicit transcription language. Auto-detect is
+  refused for Google, because its v1 API has no language detection.
+- The audio is uploaded in chunks (about 10 minutes for ElevenLabs, 55
+  seconds for Google and OpenRouter), and the provider numbers speakers
+  afresh in each chunk. "Remote 2" in one chunk may be a different voice in
+  the next, so check the names on long meetings. OpenRouter returns no
+  speaker tags at all.
 
 ## Contributing
 

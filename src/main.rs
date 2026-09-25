@@ -1,6 +1,12 @@
 //! MOM Recorder: records a meeting in two tracks (mic and computer
-//! audio), transcribes it with whisper.cpp after the call, and streams live
-//! levels to a menu bar item or any other client.
+//! audio), transcribes it after the call with whisper.cpp on this Mac (or,
+//! on explicit opt-in, a cloud provider), and streams live levels to a menu
+//! bar item or any other client.
+//!
+//! The socket commands (`start`, `stop`, `pause`, `compact`, `watch`) only
+//! talk to a running app, so they skip the environment set-up: SwiftBar and
+//! keybindings run them without `TERM`, where the login-shell probe would
+//! cost every click up to three seconds.
 
 mod agent;
 mod animation;
@@ -27,9 +33,15 @@ use gtk::glib;
 pub const APP_ID: &str = "io.github.riobahtiar.MOMRecorder";
 pub const APP_NAME: &str = "momr";
 fn main() -> glib::ExitCode {
-    extend_path();
-    bundle_environment();
-    match std::env::args().nth(1).as_deref() {
+    let command = std::env::args().nth(1);
+    if !matches!(
+        command.as_deref(),
+        Some("start" | "stop" | "compact" | "pause" | "watch")
+    ) {
+        extend_path(login_shell_path);
+        bundle_environment();
+    }
+    match command.as_deref() {
         None => ui::run(None),
         Some("watch") => {
             ipc::watch();
@@ -60,6 +72,8 @@ fn main() -> glib::ExitCode {
             println!("  {}", crate::locales::t("cli.pause"));
             println!("  {}", crate::locales::t("cli.watch"));
             println!("  {}", crate::locales::t("cli.transcribe"));
+            println!("  {}", crate::locales::t("cli.transcribe_file"));
+            println!("  {}", crate::locales::t("cli.diarize_help"));
             println!("  {}", crate::locales::t("cli.ask"));
             glib::ExitCode::SUCCESS
         }
@@ -94,7 +108,8 @@ fn bundle_environment() {
     }
     let share = contents.join("Resources/share");
     let schemas = share.join("glib-2.0/schemas");
-    // SAFETY: first thing in main, single-threaded (see extend_path).
+    // SAFETY: first thing in main after extend_path, which leaves no thread
+    // behind; GTK has not started any yet.
     unsafe {
         std::env::set_var("XDG_DATA_DIRS", &share);
         std::env::set_var("GSETTINGS_SCHEMA_DIR", &schemas);
@@ -104,8 +119,9 @@ fn bundle_environment() {
 /// A Finder or Spotlight launch brings only `/usr/bin:/bin:/usr/sbin:/sbin`,
 /// without Homebrew, the helper's neighbours or the user's tool bins. Prepend
 /// them before GTK starts any thread, so `ffmpeg`, `momr-audio` and the agents
-/// resolve the same way they do from a terminal.
-fn extend_path() {
+/// resolve the same way they do from a terminal. `shell_path` asks the login
+/// shell for its PATH; tests pass their own.
+fn extend_path(shell_path: impl FnOnce() -> Option<String>) {
     use std::path::PathBuf;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut extra: Vec<PathBuf> = vec!["/opt/homebrew/bin".into(), "/usr/local/bin".into()];
@@ -126,26 +142,8 @@ fn extend_path() {
     {
         extra.insert(0, dir.to_path_buf());
     }
-    // A GUI launch has no login shell; ask it once for its PATH, best effort
-    // with a short timeout so a slow rc file cannot hang the launch.
-    if std::env::var_os("TERM").is_none()
-        && let Ok(shell) = std::env::var("SHELL")
-    {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let output = std::process::Command::new(&shell)
-                .args(["-lc", "printf %s \"$PATH\""])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output();
-            let _ = tx.send(output);
-        });
-        if let Ok(Ok(output)) = rx.recv_timeout(std::time::Duration::from_secs(3))
-            && output.status.success()
-        {
-            let shell_path = String::from_utf8_lossy(&output.stdout);
-            extra.extend(std::env::split_paths(&shell_path.into_owned()));
-        }
+    if let Some(shell_path) = shell_path() {
+        extra.extend(std::env::split_paths(&shell_path));
     }
     let current = std::env::var_os("PATH").unwrap_or_default();
     let keep: Vec<PathBuf> = std::env::split_paths(&current).collect();
@@ -156,28 +154,72 @@ fn extend_path() {
         .filter(|p| p.is_dir() && seen.insert(p.clone()))
         .collect();
     if let Ok(path) = std::env::join_paths(joined) {
-        // SAFETY: first thing in main, before any other thread exists; the
-        // environment is not read concurrently. (set_var is unsafe in edition
-        // 2024.)
+        // SAFETY: first thing in main; `login_shell_path` has reaped its
+        // child and started no thread, so nothing reads the environment
+        // concurrently. (set_var is unsafe in edition 2024.)
         unsafe { std::env::set_var("PATH", path) };
     }
+}
+
+/// The login shell's PATH, for a GUI launch that has no terminal (no `TERM`)
+/// and so none of the user's rc files. Polled on this thread with a short
+/// timeout, then killed, so a slow rc file cannot hang the launch and no
+/// thread is left running when `extend_path` changes the environment.
+fn login_shell_path() -> Option<String> {
+    use std::io::Read;
+    if std::env::var_os("TERM").is_some() {
+        return None;
+    }
+    let shell = std::env::var("SHELL").ok()?;
+    let mut child = std::process::Command::new(&shell)
+        .args(["-lc", "printf %s \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => break None,
+        }
+    };
+    if !status.is_some_and(|s| s.success()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let mut path = String::new();
+    child.stdout.take()?.read_to_string(&mut path).ok()?;
+    Some(path)
+}
+
+/// One lock for every test that changes the process environment: `set_var`
+/// racing a `getenv` elsewhere (GLib's included) is undefined behaviour, so
+/// such tests must not run alongside each other.
+#[cfg(test)]
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
-
-    /// `PATH` is process-global, so serialise with the other env-touching tests.
-    static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn extend_path_puts_the_exe_dir_first_and_keeps_the_original() {
-        let _guard: MutexGuard<'static, ()> = LOCK.lock().unwrap();
+        let _guard = env_lock();
         let saved = std::env::var_os("PATH");
         unsafe { std::env::set_var("PATH", "/usr/bin:/bin:/usr/bin") };
-        extend_path();
+        // No login shell in tests: its answer is passed in.
+        extend_path(|| Some("/usr/sbin:/bin".into()));
         let path = std::env::var_os("PATH").unwrap();
         let mut entries = std::env::split_paths(&path);
         let exe_dir = std::env::current_exe()
@@ -189,6 +231,8 @@ mod tests {
         let rest: Vec<PathBuf> = entries.collect();
         assert!(rest.contains(&PathBuf::from("/usr/bin")));
         assert!(rest.contains(&PathBuf::from("/bin")));
+        assert!(rest.contains(&PathBuf::from("/usr/sbin")));
+        assert_eq!(rest.iter().filter(|p| p.as_os_str() == "/bin").count(), 1);
         assert_eq!(
             rest.iter().filter(|p| p.as_os_str() == "/usr/bin").count(),
             1

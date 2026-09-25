@@ -38,7 +38,16 @@ done
 
 if [ -n "${APPLE_IDENTITY:-}" ]; then
   find "$C/Frameworks" -name '*.dylib' -exec codesign --force --timestamp --options runtime --sign "$APPLE_IDENTITY" {} \;
-  for b in momr-audio ffmpeg ffprobe; do
+  # Every executable in Contents/MacOS is signed on its own (--deep on the
+  # verify below rejects an unsigned one). The two that open the microphone,
+  # the helper's `mic` and ffmpeg's avfoundation fallback, run as their own
+  # processes under the hardened runtime, so they carry the audio-input
+  # entitlement themselves; the app's entitlement does not reach them.
+  for b in momr-audio ffmpeg; do
+    codesign --force --timestamp --options runtime \
+      --entitlements packaging/macos/entitlements.plist --sign "$APPLE_IDENTITY" "$C/MacOS/$b"
+  done
+  for b in ffprobe momr-menubar; do
     codesign --force --timestamp --options runtime --sign "$APPLE_IDENTITY" "$C/MacOS/$b"
   done
   codesign --force --timestamp --options runtime --entitlements packaging/macos/entitlements.plist --sign "$APPLE_IDENTITY" "$APP"

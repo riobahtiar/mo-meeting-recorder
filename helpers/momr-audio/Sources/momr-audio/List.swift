@@ -1,6 +1,11 @@
-// `list`: input devices, output devices, and whether a process tap can be
-// created here, as one JSON object. The Rust app reads it for the BlackHole
+// `list`: input devices, output devices, and whether this macOS supports
+// process taps, as one JSON object. The Rust app reads it for the BlackHole
 // fallback (a loopback device by name) and the ready-page banner.
+//
+// `tap` only says the OS is 14.2 or newer. Whether System Audio Recording is
+// allowed cannot be asked without creating a tap, which would prompt the user
+// from a listing, so permission is only known when `system` runs and exits 4.
+// The key keeps its name because the Rust side reads it.
 
 import CoreAudio
 import Foundation

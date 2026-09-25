@@ -129,4 +129,4 @@ Add a nightly job that runs `cargo test -- --ignored` with the model cache for t
 - [x] Step 3 meeting folder fixture
 - [x] Step 4 Swift tests
 - [ ] Step 5 smoke checklist walked
-- [x] Step 6 CI workflow
+- [x] Step 6 CI workflow (written; disabled 2026-09-25 in commit ae48747, so the Done when line for a green CI run stays open until it is uncommented)

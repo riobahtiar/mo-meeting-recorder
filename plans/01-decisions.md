@@ -56,7 +56,7 @@ Each entry: the context, the decision, what was rejected and why, and what follo
 
 **Context.** Three modules hand-roll `XDG_*` lookups with `~/.local/…` fallbacks. `glib::user_data_dir()` and friends return `~/Library/Application Support` and `~/Library/Caches` on macOS (Homebrew's GLib is built with Cocoa support) and still honour `XDG_*` when set.
 **Decision.** One `paths.rs` wraps GLib; the hand-rolled copies go. The folder name under each is `momr`.
-**Status.** Accepted.
+**Status.** Superseded by D22. Measured 2026-09-25, Homebrew's GLib 2.90 has no Cocoa support and returns the Linux `~/.local` paths, so `paths.rs` builds the `~/Library` locations itself. The single `paths.rs` and the `momr` folder name stand.
 
 ## D09 Agent chosen by a `config.toml` key
 
@@ -155,11 +155,11 @@ Confirmed 2026-09-25 (plan 11): the id stays
 
 ## D21 Optional transcription providers; English and Indonesian UI
 
-**Context.** After the core port, MOM Recorder should offer ElevenLabs speech-to-text, Google Cloud Speech-to-Text and the omnilingual-asr model alongside the built-in local transcription, and the UI should read in English and Indonesian.
-**Decision.** Local whisper.cpp stays the default: the README promises no audio leaves the Mac, so a provider that sends audio out only ever runs on explicit opt-in, chosen per install in Preferences with its credentials stored alongside. Each provider gets its credentials fields in Preferences plus short instructions naming where the key comes from (ElevenLabs dashboard, Google Cloud console, model download for omnilingual-asr). UI strings move behind a small locales module, English first with Indonesian next, switched in Preferences.
-**Rejected.** Replacing the local default, and scattering provider keys through config files without the app saying where each comes from.
-**Consequences.** A new plan after the core phases (11) specifies the provider backends, key storage and the locales module; the README privacy section gains a per-provider "what leaves your Mac" note when the first provider ships.
-**Status.** Accepted for direction; provider and locale details Open until the core phases land.
+**Context.** After the core port, MOM Recorder should offer cloud speech-to-text alongside the built-in local transcription, and the UI should read in English and Indonesian. The first sketch also named the omnilingual-asr model.
+**Decision.** Local whisper.cpp stays the default, and a provider that sends audio out runs only on explicit opt-in: the provider picker in Preferences, or `transcribe-file --provider` for one run. Plan 13 shipped three providers: ElevenLabs speech-to-text, Google Cloud Speech-to-Text, and OpenRouter's audio transcriptions endpoint, whose model is `openrouter_model` in `config.toml` (`openai/whisper-1` unless set). API keys live in the macOS Keychain, one service per provider (`momr-elevenlabs`, `momr-google`, `momr-openrouter`), written through `security -i` with the command on stdin so the key never appears in a process's argv where `ps` could read it; `config.toml` only names the provider. Preferences gives each provider a password row, short instructions naming where the key comes from, and a line saying what leaves the Mac. UI strings go through `locales.rs`, English and Indonesian, switched in Preferences.
+**Rejected.** Replacing the local default; keys in config files, where they end up in backups and dotfile repositories; omnilingual-asr, because it is a Python fairseq2 research stack with no local runtime this app can ship (plan 13 revisits it if an ONNX or CoreML export appears).
+**Consequences.** The README privacy section names what each provider receives. Cloud chunks number their speakers independently, which the README states rather than hides. Transcript content stays English (D23).
+**Status.** Accepted; implemented in plan 13.
 
 ## D22 `paths.rs` builds `~/Library` locations itself
 
@@ -179,4 +179,12 @@ and the plan 06 goal names `~/Library` explicitly.
 **Consequences.** Plan 06 steps 1 and 3 change shape (hardcoded defaults,
 same `XDG_*` overrides, so its tests still apply); the formula (plan 08)
 does not need to fix GLib.
+**Status.** Accepted.
+
+## D23 Transcript content stays English
+
+**Context.** Plan 13 translated the interface into Indonesian, and the first pass sent the default speaker labels and the language line of `transcript.md` through the locales table too, so a meeting recorded with the Indonesian interface wrote "Kamu" and "Pembicara 1" where upstream writes "You" and "Speaker 1", and its language line in Indonesian too. `transcript.md` is an interface: users' scripts read it and upstream's app opens the same folders.
+**Decision.** `transcript.md` speaker defaults ("You", "Remote", "Remote N", "Speaker N") and its language line are written in English whatever the interface language. Only the chrome translates; names a user types are kept as typed. On the command line the same line runs through stdout: `--help`, errors and progress on stderr translate, the transcript Markdown on stdout and the `watch` lines stay English. The interface language is resolved once per launch: `ui_language` in `settings.json`, else the first macOS preferred language (`AppleLanguages`), else `$LANG`. The app passes the result to `momr-menubar` as `MOMR_LANG`, so the menu bar item and the window always agree.
+**Rejected.** Localised transcript labels: every script that looks for a `You:` line breaks on an Indonesian install, and a meeting moved to upstream shows mixed labels. Letting `momr-menubar` read `AppleLanguages` on its own: it would ignore the Preferences choice and disagree with the window.
+**Consequences.** A meeting from either app, and from either interface language, carries the same default labels, so renaming and scripts behave the same way. A language change in Preferences takes effect on the next launch, for the window and the menu bar item together.
 **Status.** Accepted.

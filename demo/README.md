@@ -24,7 +24,9 @@ separate.
 On a Mac with a display, with the app built from this checkout:
 
 1. Play `maya.wav` and `tom.wav` from two players at once for the recording
-   shots, or record for real with a colleague who agrees to appear.
+   shots, or read Maya's lines from `script.txt` into the microphone while
+   a colleague reads Tom's over a call. Either way the words are the
+   invented meeting, never a real one.
 2. Ready, recording (strip too), transcribing, done, import dialog and
    Settings, in light and dark: `screenshots/` holds only what the README
    shows, as WebP.

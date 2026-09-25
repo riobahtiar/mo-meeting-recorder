@@ -21,16 +21,23 @@ const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
 const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
 
 type PositionCallback = Rc<RefCell<Option<Box<dyn Fn(i64)>>>>;
+type ErrorCallback = Rc<RefCell<Option<Box<dyn Fn(&str)>>>>;
+
+/// How long a stopped playback gets to end on SIGTERM before SIGKILL.
+const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// A running ffmpeg playback, stopped when dropped.
 struct Playback {
     ffmpeg: Child,
     started: Instant,
     from_us: i64,
+    /// The last line ffmpeg wrote to stderr, read on its own thread so a
+    /// chatty ffmpeg never fills the pipe.
+    last_error: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl Playback {
-    fn start(files: &[PathBuf], from_us: i64) -> Option<Playback> {
+    fn start(files: &[PathBuf], from_us: i64) -> Result<Playback, String> {
         let at = format!("{:.3}", from_us as f64 / 1_000_000.0);
         let mut command = guarded("ffmpeg", crate::helper::path().as_deref());
         command.args(["-v", "error", "-nostdin"]);
@@ -43,17 +50,30 @@ impl Playback {
                 &format!("amix=inputs={}:normalize=0", files.len()),
             ]);
         }
-        let ffmpeg = command
+        let mut ffmpeg = command
             .args(["-f", "audiotoolbox", "-"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
-            .ok()?;
-        Some(Playback {
+            .map_err(|e| e.to_string())?;
+        let last_error = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(pipe) = ffmpeg.stderr.take() {
+            let last_error = last_error.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                    if !line.trim().is_empty() {
+                        *last_error.lock().unwrap() = line.trim().to_owned();
+                    }
+                }
+            });
+        }
+        Ok(Playback {
             ffmpeg,
             started: Instant::now(),
             from_us,
+            last_error,
         })
     }
 
@@ -61,16 +81,52 @@ impl Playback {
         self.from_us + self.started.elapsed().as_micros() as i64
     }
 
-    fn ended(&mut self) -> bool {
-        matches!(self.ffmpeg.try_wait(), Ok(Some(_)))
+    /// None while playing; once ended, Ok for the end of the file or Err
+    /// with ffmpeg's reason (no audio output, an unreadable file).
+    fn ended(&mut self) -> Option<Result<(), String>> {
+        let status = self.ffmpeg.try_wait().ok()??;
+        if status.success() {
+            return Some(Ok(()));
+        }
+        // Give the reader thread a moment to take the last line.
+        std::thread::sleep(Duration::from_millis(50));
+        let reason = self.last_error.lock().unwrap().clone();
+        Some(Err(if reason.is_empty() {
+            format!("ffmpeg exit {}", status.code().unwrap_or(-1))
+        } else {
+            reason
+        }))
     }
 }
 
 impl Drop for Playback {
+    /// SIGTERM first: with the helper, `ffmpeg` is really the `momr-audio run`
+    /// wrapper, which forwards SIGTERM to the real ffmpeg but cannot catch
+    /// SIGKILL, so a bare kill would leave the meeting playing. SIGKILL only
+    /// follows when the grace period runs out.
     fn drop(&mut self) {
-        let _ = self.ffmpeg.kill();
-        let _ = self.ffmpeg.wait();
+        stop(&mut self.ffmpeg, STOP_GRACE);
     }
+}
+
+/// Ends `child` with SIGTERM, then SIGKILL after `grace`, and reaps it.
+fn stop(child: &mut Child, grace: Duration) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    // SAFETY: kill(2) with a pid we own and have not reaped yet.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// A command for `program` whose process dies when this app does, even after
@@ -132,6 +188,8 @@ pub struct Player {
     state: Rc<RefCell<State>>,
     /// Called with the position in ms while playing, for the transcript highlight.
     on_position: PositionCallback,
+    /// Called with ffmpeg's reason when playback fails, so the app can say so.
+    on_error: ErrorCallback,
     ticking: Rc<Cell<bool>>,
 }
 
@@ -169,6 +227,7 @@ impl Player {
             time,
             state: Rc::default(),
             on_position: Rc::default(),
+            on_error: Rc::default(),
             ticking: Rc::default(),
         };
 
@@ -212,6 +271,16 @@ impl Player {
 
     pub fn widget(&self) -> &gtk::Box {
         &self.root
+    }
+
+    pub fn connect_error(&self, callback: impl Fn(&str) + 'static) {
+        *self.on_error.borrow_mut() = Some(Box::new(callback));
+    }
+
+    fn report(&self, reason: &str) {
+        if let Some(callback) = self.on_error.borrow().as_ref() {
+            callback(reason);
+        }
     }
 
     pub fn connect_position(&self, callback: impl Fn(i64) + 'static) {
@@ -343,9 +412,14 @@ impl Player {
                 state.paused_at_us = 0;
             }
             state.playback = None;
-            state.playback = Playback::start(&state.files, state.paused_at_us);
-            state.playback.is_some()
+            Playback::start(&state.files, state.paused_at_us).map(|playback| {
+                state.playback = Some(playback);
+            })
         };
+        if let Err(reason) = &started {
+            self.report(reason);
+        }
+        let started = started.is_ok();
         self.set_playing_icon(started);
         if started {
             self.start_ticking();
@@ -409,10 +483,13 @@ impl Player {
                 .borrow_mut()
                 .playback
                 .as_mut()
-                .is_some_and(Playback::ended);
-            if ended {
+                .and_then(Playback::ended);
+            if let Some(result) = ended {
                 this.pause();
                 this.state.borrow_mut().paused_at_us = 0;
+                if let Err(reason) = result {
+                    this.report(&reason);
+                }
             }
             this.refresh();
             if this.is_playing() {
@@ -559,6 +636,32 @@ mod tests {
             helper.display().to_string()
         );
         assert_eq!(args, ["run", "--", "ffmpeg"]);
+    }
+
+    /// The wrapper cannot pass on a SIGKILL, so stopping must reach the real
+    /// child through SIGTERM.
+    #[test]
+    fn stopping_a_guarded_child_stops_what_it_runs() {
+        // The helper as scripts/build-macos.sh or `swift build` leaves it.
+        let built = ["release", "debug"]
+            .iter()
+            .map(|profile| PathBuf::from(format!("helpers/momr-audio/.build/{profile}/momr-audio")))
+            .find(|p| p.is_file());
+        let Some(helper) = crate::helper::path().or(built) else {
+            eprintln!("skipped: no momr-audio helper built");
+            return;
+        };
+        let marker = format!("{}", 424_200 + std::process::id() % 1000);
+        let mut command = guarded("sleep", Some(&helper));
+        let mut child = command.arg(&marker).spawn().expect("wrapper starts");
+        std::thread::sleep(Duration::from_millis(300));
+        stop(&mut child, STOP_GRACE);
+        std::thread::sleep(Duration::from_millis(700));
+        let survivors = Command::new("pgrep")
+            .args(["-f", &format!("^sleep {marker}$")])
+            .output()
+            .expect("pgrep runs");
+        assert!(survivors.stdout.is_empty(), "sleep outlived its wrapper");
     }
 
     #[test]

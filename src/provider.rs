@@ -1,175 +1,322 @@
 //! Optional cloud transcription providers: ElevenLabs speech-to-text, Google
 //! Cloud Speech-to-Text, and any speech-to-text model on OpenRouter. Local
 //! whisper stays the default; a provider only runs on explicit opt-in in
-//! Preferences (or `--provider` on the command line), and only the audio
-//! leaves the Mac (never the whole meeting folder). API keys live in the
-//! macOS Keychain, never in config files; the config only names the provider.
-//! The OpenRouter model is `openrouter_model` in config.toml, Whisper-1
-//! unless set to another transcription-capable slug.
+//! Settings (or `--provider` on the command line), and only the audio leaves
+//! the Mac (never the whole meeting folder). API keys live in the macOS
+//! Keychain, never in config files; the config only names the provider. Keys
+//! reach `security` on stdin, never in its arguments, where any local process
+//! could read them from the process list. The OpenRouter model is
+//! `openrouter_model` in config.toml, Whisper-1 unless set to another
+//! transcription-capable slug.
 //!
 //! Every provider takes audio files and returns words with times, so they
 //! slot into `transcribe.rs` where whisper regions become segments: chunked
 //! audio in (ffmpeg, offsets kept), word lists out, mapped to absolute times.
+//! Speaker ids only mean something within one request, so "speaker 2" of one
+//! chunk need not be the same voice in the next.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use crate::locales::{t, tf};
 
 pub const ELEVEN_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 pub const GOOGLE_URL: &str = "https://speech.googleapis.com/v1/speech:recognize";
 pub const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 /// ElevenLabs takes long files; ten minutes keeps one request small.
 pub const ELEVEN_CHUNK_MS: u64 = 10 * 60 * 1000;
-/// Google's synchronous call caps audio at 60 seconds.
+/// Google's synchronous `recognize` caps audio at 60 seconds.
 pub const GOOGLE_CHUNK_MS: u64 = 55 * 1000;
-/// OpenRouter times out after about a minute upstream.
+/// Short chunks keep one OpenRouter request well inside the request limits of
+/// the models it routes to, whichever the user picks.
 pub const OPENROUTER_CHUNK_MS: u64 = 55 * 1000;
+/// How often one chunk is tried before the run fails: a dropped connection or
+/// a 5xx mid-meeting should not throw away the chunks already paid for.
+const ATTEMPTS: u32 = 3;
+/// Security's exit status for "the item could not be found".
+const ERR_SEC_ITEM_NOT_FOUND: i32 = 44;
 
+/// Which engine transcribes: whisper on this Mac, or a cloud service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provider {
     Local,
+    Cloud(Cloud),
+}
+
+/// The cloud services. Only these have keys, chunk sizes and requests, so the
+/// functions that need one take a `Cloud`, and local whisper cannot reach them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cloud {
     ElevenLabs,
     Google,
     OpenRouter,
 }
 
-static OVERRIDE: std::sync::Mutex<Option<Provider>> = std::sync::Mutex::new(None);
+impl Provider {
+    /// Every provider in Settings order.
+    pub const ALL: [Provider; 4] = [
+        Provider::Local,
+        Provider::Cloud(Cloud::ElevenLabs),
+        Provider::Cloud(Cloud::Google),
+        Provider::Cloud(Cloud::OpenRouter),
+    ];
 
-/// The `transcribe-file --provider` flag for one run, without touching config.
-pub fn set_override(provider: Provider) {
-    *OVERRIDE.lock().unwrap() = Some(provider);
-}
+    /// The id in config.toml, on the command line and in the manifest.
+    pub fn id(self) -> &'static str {
+        match self {
+            Provider::Local => "local",
+            Provider::Cloud(Cloud::ElevenLabs) => "elevenlabs",
+            Provider::Cloud(Cloud::Google) => "google",
+            Provider::Cloud(Cloud::OpenRouter) => "openrouter",
+        }
+    }
 
-/// Parses the config/flag ids: `local`, `elevenlabs`, `google`, `openrouter`.
-pub fn from_id(id: &str) -> Option<Provider> {
-    match id.trim() {
-        "local" => Some(Provider::Local),
-        "elevenlabs" => Some(Provider::ElevenLabs),
-        "google" => Some(Provider::Google),
-        "openrouter" => Some(Provider::OpenRouter),
-        _ => None,
+    pub fn from_id(id: &str) -> Option<Provider> {
+        let id = id.trim();
+        Provider::ALL.into_iter().find(|p| p.id() == id)
+    }
+
+    /// The name in Settings, in the interface language.
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::Local => t("provider.name_local"),
+            Provider::Cloud(Cloud::ElevenLabs) => t("provider.name_eleven"),
+            Provider::Cloud(Cloud::Google) => t("provider.name_google"),
+            Provider::Cloud(Cloud::OpenRouter) => t("provider.name_openrouter"),
+        }
     }
 }
 
-/// The configured provider: `elevenlabs`, `google` or `openrouter` in
-/// config.toml, local whisper otherwise.
-pub fn selected() -> Provider {
-    if let Some(provider) = OVERRIDE.lock().unwrap().to_owned() {
-        return provider;
+impl Cloud {
+    /// The brand name in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Cloud::ElevenLabs => "ElevenLabs",
+            Cloud::Google => "Google",
+            Cloud::OpenRouter => "OpenRouter",
+        }
     }
-    crate::models::config_value("provider")
-        .as_deref()
-        .and_then(from_id)
-        .unwrap_or(Provider::Local)
-}
 
-pub fn label(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Local => crate::locales::t("provider.name_local"),
-        Provider::ElevenLabs => crate::locales::t("provider.name_eleven"),
-        Provider::Google => crate::locales::t("provider.name_google"),
-        Provider::OpenRouter => crate::locales::t("provider.name_openrouter"),
+    pub fn chunk_ms(self) -> u64 {
+        match self {
+            Cloud::ElevenLabs => ELEVEN_CHUNK_MS,
+            Cloud::Google => GOOGLE_CHUNK_MS,
+            Cloud::OpenRouter => OPENROUTER_CHUNK_MS,
+        }
     }
-}
 
-pub fn chunk_ms(provider: Provider) -> u64 {
-    match provider {
-        Provider::Local => u64::MAX,
-        Provider::ElevenLabs => ELEVEN_CHUNK_MS,
-        Provider::Google => GOOGLE_CHUNK_MS,
-        Provider::OpenRouter => OPENROUTER_CHUNK_MS,
+    fn service(self) -> &'static str {
+        match self {
+            Cloud::ElevenLabs => "momr-elevenlabs",
+            Cloud::Google => "momr-google",
+            Cloud::OpenRouter => "momr-openrouter",
+        }
     }
 }
 
-fn service(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Local => "momr-local",
-        Provider::ElevenLabs => "momr-elevenlabs",
-        Provider::Google => "momr-google",
-        Provider::OpenRouter => "momr-openrouter",
+/// The provider named in config.toml, local whisper when none is. An id that
+/// names no provider is an error, not a quiet fall back: the user believes
+/// audio goes one way while it goes the other.
+pub fn configured() -> Result<Provider, String> {
+    match crate::models::config_value("provider") {
+        None => Ok(Provider::Local),
+        Some(id) => Provider::from_id(&id).ok_or_else(|| tf("provider.unknown_id", &[&id])),
     }
 }
 
-/// The API key from the Keychain, or why there is none, for the UI.
-pub fn api_key(provider: Provider) -> Result<String, String> {
-    api_key_with(provider, run_security)
+pub fn save_configured(provider: Provider) -> std::io::Result<()> {
+    crate::models::save_config_value("provider", provider.id())
+}
+
+/// Why a key cannot be used. Missing is the case the user fixes in Settings;
+/// anything else (a locked keychain, a refused access prompt) is the
+/// Keychain's own message, since re-entering the key would not help.
+#[derive(Debug, PartialEq)]
+pub enum KeyError {
+    Missing(Cloud),
+    Keychain(Cloud, String),
+}
+
+impl std::fmt::Display for KeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            KeyError::Missing(cloud) => f.write_str(&tf("provider.key_missing", &[cloud.name()])),
+            KeyError::Keychain(cloud, detail) => {
+                f.write_str(&tf("provider.key_unreadable", &[cloud.name(), detail]))
+            }
+        }
+    }
+}
+
+/// A failed `security` run: its exit status and what it said on stderr.
+#[derive(Debug)]
+pub struct SecurityFailure {
+    code: Option<i32>,
+    stderr: String,
+}
+
+impl SecurityFailure {
+    fn detail(&self) -> String {
+        let line = self.stderr.lines().rev().find(|l| !l.trim().is_empty());
+        match (line, self.code) {
+            (Some(line), _) => line.trim().to_owned(),
+            (None, Some(code)) => format!("exit {code}"),
+            (None, None) => "killed".to_owned(),
+        }
+    }
+}
+
+/// The API key from the Keychain.
+pub fn api_key(cloud: Cloud) -> Result<String, KeyError> {
+    api_key_with(cloud, run_security)
 }
 
 fn api_key_with(
-    provider: Provider,
-    run: impl Fn(&str, &[&str]) -> Result<String, String>,
-) -> Result<String, String> {
+    cloud: Cloud,
+    run: impl Fn(&[&str], Option<&str>) -> Result<String, SecurityFailure>,
+) -> Result<String, KeyError> {
     let key = run(
-        "security",
-        &["find-generic-password", "-s", service(provider), "-w"],
+        &["find-generic-password", "-s", cloud.service(), "-w"],
+        None,
     )
-    .map_err(|_| {
-        format!(
-            "No API key saved for {}. Add one in Settings › Transcription.",
-            label(provider)
-        )
-    })?;
+    .map_err(|e| key_error(cloud, e))?;
     let key = key.trim().to_owned();
     if key.is_empty() {
-        return Err(format!(
-            "No API key saved for {}. Add one in Settings › Transcription.",
-            label(provider)
-        ));
+        return Err(KeyError::Missing(cloud));
     }
     Ok(key)
 }
 
-/// Stores the API key in the Keychain (updated when one exists).
-pub fn save_api_key(provider: Provider, key: &str) -> Result<(), String> {
-    save_api_key_with(provider, key, run_security)
+/// Whether a key is saved, without reading the secret itself.
+pub fn key_status(cloud: Cloud) -> Result<(), KeyError> {
+    key_status_with(cloud, run_security)
+}
+
+fn key_status_with(
+    cloud: Cloud,
+    run: impl Fn(&[&str], Option<&str>) -> Result<String, SecurityFailure>,
+) -> Result<(), KeyError> {
+    run(&["find-generic-password", "-s", cloud.service()], None)
+        .map(|_| ())
+        .map_err(|e| key_error(cloud, e))
+}
+
+fn key_error(cloud: Cloud, failure: SecurityFailure) -> KeyError {
+    if failure.code == Some(ERR_SEC_ITEM_NOT_FOUND) {
+        KeyError::Missing(cloud)
+    } else {
+        KeyError::Keychain(cloud, failure.detail())
+    }
+}
+
+/// Stores the API key in the Keychain, replacing one that exists. The key
+/// goes to `security -i` as a quoted command on stdin; an empty key is
+/// refused, since it would read back as "no key saved" anyway.
+pub fn save_api_key(cloud: Cloud, key: &str) -> Result<(), String> {
+    save_api_key_with(cloud, key, run_security)
 }
 
 fn save_api_key_with(
-    provider: Provider,
+    cloud: Cloud,
     key: &str,
-    run: impl Fn(&str, &[&str]) -> Result<String, String>,
+    run: impl Fn(&[&str], Option<&str>) -> Result<String, SecurityFailure>,
 ) -> Result<(), String> {
-    run(
-        "security",
-        &[
-            "add-generic-password",
-            "-s",
-            service(provider),
-            "-a",
-            "momr",
-            "-w",
-            key,
-            "-U",
-        ],
-    )
-    .map(|_| ())
-    .map_err(|e| format!("Could not save the API key: {e}"))
-}
-
-pub fn has_api_key(provider: Provider) -> bool {
-    api_key(provider).is_ok()
-}
-
-fn run_security(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(format!("exit {}", output.status.code().unwrap_or(-1)));
+    let key = key.trim();
+    if key.is_empty() || key.contains(['\n', '\r']) {
+        return Err(t("provider.key_empty").to_owned());
     }
-    String::from_utf8(output.stdout).map_err(|e| e.to_string())
+    let quoted = key.replace('\\', "\\\\").replace('"', "\\\"");
+    let command = format!(
+        "add-generic-password -U -s {} -a momr -w \"{quoted}\"\n",
+        cloud.service()
+    );
+    run(&["-i"], Some(&command))
+        .map(|_| ())
+        .map_err(|e| tf("provider.key_save_failed", &[&e.detail()]))
 }
 
-/// One recognised word with absolute times, the common shape of both
-/// providers' answers.
+/// Runs `/usr/bin/security` by its full path: `extend_path` puts user-writable
+/// folders ahead of `/usr/bin`, and this program handles the keys.
+fn run_security(args: &[&str], stdin: Option<&str>) -> Result<String, SecurityFailure> {
+    use std::io::Write;
+    let failure = |stderr: String| SecurityFailure { code: None, stderr };
+    let mut child = Command::new("/usr/bin/security")
+        .args(args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| failure(e.to_string()))?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(text.as_bytes())
+            .map_err(|e| failure(e.to_string()))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| failure(e.to_string()))?;
+    if !output.status.success() {
+        return Err(SecurityFailure {
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|e| failure(e.to_string()))
+}
+
+/// One recognised word, the common shape of every provider's answer. Times
+/// are within the chunk as parsed and absolute once `transcribe.rs` adds the
+/// chunk's offset.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Word {
     pub text: String,
     pub start_ms: u64,
     pub end_ms: u64,
+    /// The provider's voice id, meaningful within one request only.
     pub speaker: Option<String>,
+}
+
+impl Word {
+    /// A word with its end never before its start, whatever the reply said.
+    fn new(text: &str, start_ms: u64, end_ms: u64, speaker: Option<String>) -> Word {
+        Word {
+            text: text.to_owned(),
+            start_ms,
+            end_ms: end_ms.max(start_ms),
+            speaker,
+        }
+    }
+}
+
+/// What one chunk came back as.
+#[derive(Debug, PartialEq)]
+pub struct Chunk {
+    pub words: Vec<Word>,
+    /// The language the provider detected, when it says.
+    pub language: Option<String>,
+    /// False when the model gave text without times (some OpenRouter models):
+    /// the caller then spreads it over the chunk.
+    pub timed: bool,
+}
+
+/// A failed chunk, and whether trying it again could help.
+#[derive(Debug)]
+pub struct ChunkError {
+    pub message: String,
+    pub transient: bool,
+}
+
+impl ChunkError {
+    fn permanent(message: String) -> ChunkError {
+        ChunkError {
+            message,
+            transient: false,
+        }
+    }
 }
 
 /// Our language codes to ElevenLabs' `language_code` (ISO-639-1); "auto" is
@@ -178,118 +325,246 @@ pub fn eleven_language(code: &str) -> Option<&str> {
     if code == "auto" { None } else { Some(code) }
 }
 
-/// Our language codes to Google's BCP-47 `languageCode`; "auto" falls back to
-/// US English, which Google requires to be explicit.
-pub fn google_language(code: &str) -> &str {
+/// Our language codes to Google's BCP-47 `languageCode`. None for "auto" and
+/// codes Google is not given here: its v1 API has no detection, and guessing
+/// US English would hand back confident nonsense for another language.
+pub fn google_language(code: &str) -> Option<&'static str> {
     match code {
-        "en" | "auto" => "en-US",
-        "id" => "id-ID",
-        "nl" => "nl-NL",
-        "de" => "de-DE",
-        "fr" => "fr-FR",
-        "es" => "es-ES",
-        "it" => "it-IT",
-        "pt" => "pt-PT",
-        _ => "en-US",
+        "en" => Some("en-US"),
+        "id" => Some("id-ID"),
+        "nl" => Some("nl-NL"),
+        "de" => Some("de-DE"),
+        "fr" => Some("fr-FR"),
+        "es" => Some("es-ES"),
+        "it" => Some("it-IT"),
+        "pt" => Some("pt-PT"),
+        _ => None,
     }
 }
 
-fn agent() -> ureq::Agent {
-    // Read error bodies ourselves, so a rejected key or quota comes back as
-    // the provider's message rather than a bare status code.
+/// Refuses a run that cannot work before any audio is uploaded.
+pub fn check_language(cloud: Cloud, language: &str) -> Result<(), String> {
+    if cloud == Cloud::Google && google_language(language).is_none() {
+        return Err(t("provider.google_needs_language").to_owned());
+    }
+    Ok(())
+}
+
+/// An HTTP agent whose calls end: a stalled upload would otherwise hold the
+/// Transcribing screen forever, since Cancel is only checked between chunks.
+/// The overall limit grows with the chunk, which is uploaded and then
+/// transcribed in one call.
+fn agent(cloud: Cloud) -> ureq::Agent {
+    let chunk = Duration::from_millis(cloud.chunk_ms());
     ureq::Agent::new_with_config(
         ureq::config::Config::builder()
+            // Read error bodies ourselves, so a rejected key or quota comes
+            // back as the provider's message rather than a bare status code.
             .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_global(Some(Duration::from_secs(120) + chunk))
             .build(),
     )
 }
 
-fn check_status(provider: &str, status: u16, body: &str) -> Result<serde_json::Value, String> {
-    // The provider's own message when it gives one, else the status.
-    let detail = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            v["error"]["message"]
-                .as_str()
-                .or_else(|| v["detail"]["message"].as_str())
-                .or_else(|| v["detail"].as_str())
-                .or_else(|| v["message"].as_str())
-                .map(str::to_owned)
-        })
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| format!("HTTP {status}"));
+/// The provider's own message when it gives one, else the start of the body.
+fn error_detail(status: u16, body: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let structured = parsed.as_ref().and_then(|v| {
+        v["error"]["message"]
+            .as_str()
+            .or_else(|| v["error"].as_str())
+            .or_else(|| v["detail"]["message"].as_str())
+            .or_else(|| v["detail"][0]["msg"].as_str())
+            .or_else(|| v["detail"].as_str())
+            .or_else(|| v["message"].as_str())
+            .filter(|m| !m.is_empty())
+            .map(str::to_owned)
+    });
+    structured.unwrap_or_else(|| {
+        let snippet: String = body.trim().chars().take(200).collect();
+        if snippet.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            format!("HTTP {status}: {snippet}")
+        }
+    })
+}
+
+fn check_status(cloud: Cloud, status: u16, body: &str) -> Result<serde_json::Value, ChunkError> {
+    let name = cloud.name();
+    let detail = || error_detail(status, body);
     match status {
-        200..=299 => serde_json::from_str(body)
-            .map_err(|e| format!("{provider} returned text that is not JSON: {e}")),
-        401 | 403 => Err(format!("{provider} rejected the API key: {detail}")),
-        402 => Err(format!("{provider} is out of credits: {detail}")),
-        429 => Err(format!("{provider} is out of quota: {detail}")),
-        _ => Err(format!("{provider} failed: {detail}")),
+        200..=299 => {
+            let value: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+                ChunkError::permanent(tf("provider.err_not_json", &[name, &e.to_string()]))
+            })?;
+            // OpenRouter can answer 200 with an error object from the model.
+            if value.get("error").is_some_and(|e| !e.is_null()) {
+                return Err(ChunkError {
+                    message: tf("provider.err_failed", &[name, &detail()]),
+                    transient: true,
+                });
+            }
+            Ok(value)
+        }
+        401 | 403 => Err(ChunkError::permanent(tf(
+            "provider.err_rejected",
+            &[name, &detail()],
+        ))),
+        // Google answers a bad key with 400 and this reason.
+        400 if body.contains("API_KEY_INVALID") || body.contains("API key not valid") => Err(
+            ChunkError::permanent(tf("provider.err_rejected", &[name, &detail()])),
+        ),
+        402 => Err(ChunkError::permanent(tf(
+            "provider.err_credits",
+            &[name, &detail()],
+        ))),
+        429 => Err(ChunkError {
+            message: tf("provider.err_quota", &[name, &detail()]),
+            transient: true,
+        }),
+        _ => Err(ChunkError {
+            message: tf("provider.err_failed", &[name, &detail()]),
+            transient: status >= 500,
+        }),
     }
 }
 
-/// One ElevenLabs chunk: mono WAV in, words and the detected language code out.
-pub fn transcribe_eleven(
-    key: &str,
-    wav: &Path,
-    language: &str,
-) -> Result<(Vec<Word>, Option<String>), String> {
-    let audio = std::fs::read(wav).map_err(|e| format!("{}: {e}", wav.display()))?;
-    let mut form = ureq::unversioned::multipart::Form::new()
-        .text("model_id", "scribe_v1")
-        .text("diarize", "true");
-    if let Some(code) = eleven_language(language) {
-        form = form.text("language_code", code);
-    }
-    let part = ureq::unversioned::multipart::Part::bytes(&audio)
-        .mime_str("audio/wav")
-        .map_err(|e| format!("multipart: {e}"))?
-        .file_name("chunk.wav");
-    form = form.part("file", part);
-    let mut response = agent()
-        .post(ELEVEN_URL)
-        .header("xi-api-key", key)
-        .send(form)
-        .map_err(|e| format!("ElevenLabs request failed: {e}"))?;
+/// Sends one request and reads its reply. Transport failures (timeouts,
+/// dropped connections) are worth another try; a reply is judged by status.
+fn send(
+    cloud: Cloud,
+    request: impl FnOnce(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<serde_json::Value, ChunkError> {
+    let name = cloud.name();
+    let mut response = request(&agent(cloud)).map_err(|e| ChunkError {
+        message: tf("provider.err_request", &[name, &e.to_string()]),
+        transient: true,
+    })?;
     let status = response.status().as_u16();
     let body = response
         .body_mut()
         .read_to_string()
-        .map_err(|e| format!("ElevenLabs reply unreadable: {e}"))?;
-    let value = check_status("ElevenLabs", status, &body)?;
-    let language = value["language_code"].as_str().map(str::to_owned);
-    Ok((parse_eleven_words(&value)?, language))
+        .map_err(|e| ChunkError {
+            message: tf("provider.err_request", &[name, &e.to_string()]),
+            transient: true,
+        })?;
+    check_status(cloud, status, &body)
+}
+
+/// One chunk through `cloud`, tried up to `ATTEMPTS` times while the failure
+/// is transient, waiting a little longer each time. `aborted` is checked
+/// before each retry, so Cancel does not wait out the back-off.
+pub fn transcribe_chunk(
+    cloud: Cloud,
+    key: &str,
+    wav: &Path,
+    language: &str,
+    aborted: &dyn Fn() -> bool,
+) -> Result<Chunk, String> {
+    let mut attempt = 1;
+    loop {
+        let result = match cloud {
+            Cloud::ElevenLabs => transcribe_eleven(key, wav, language),
+            Cloud::Google => transcribe_google(key, wav, language),
+            Cloud::OpenRouter => transcribe_openrouter(key, wav, language),
+        };
+        match result {
+            Ok(chunk) => return Ok(chunk),
+            Err(e) if e.transient && attempt < ATTEMPTS && !aborted() => {
+                eprintln!(
+                    "{}: {} (attempt {attempt} of {ATTEMPTS}), retrying",
+                    crate::APP_NAME,
+                    e.message
+                );
+                std::thread::sleep(Duration::from_secs(2u64.pow(attempt)));
+                attempt += 1;
+            }
+            Err(e) => return Err(e.message),
+        }
+    }
+}
+
+fn read_audio(wav: &Path) -> Result<Vec<u8>, ChunkError> {
+    std::fs::read(wav).map_err(|e| ChunkError::permanent(format!("{}: {e}", wav.display())))
+}
+
+/// One ElevenLabs chunk: mono WAV in, words and the detected language code out.
+fn transcribe_eleven(key: &str, wav: &Path, language: &str) -> Result<Chunk, ChunkError> {
+    let audio = read_audio(wav)?;
+    let value = send(Cloud::ElevenLabs, |agent| {
+        let mut form = ureq::unversioned::multipart::Form::new()
+            .text("model_id", "scribe_v1")
+            .text("diarize", "true");
+        if let Some(code) = eleven_language(language) {
+            form = form.text("language_code", code);
+        }
+        let part = ureq::unversioned::multipart::Part::bytes(&audio)
+            .mime_str("audio/wav")?
+            .file_name("chunk.wav");
+        agent
+            .post(ELEVEN_URL)
+            .header("xi-api-key", key)
+            .send(form.part("file", part))
+    })?;
+    Ok(Chunk {
+        words: parse_eleven_words(&value).map_err(ChunkError::permanent)?,
+        language: value["language_code"].as_str().map(str::to_owned),
+        timed: true,
+    })
 }
 
 /// `words[]` (`text`, `start`/`end` seconds, `speaker_id` when diarized) to
-/// `Word`s. Silence transcribes to no words, which is a fine empty result.
+/// `Word`s. The list also carries `spacing` entries (the blanks between
+/// words, which the grouping puts back) and `audio_event` entries such as
+/// "(laughter)", which are left out like whisper's noise markers. Silence is
+/// an empty list; a reply with no list at all is an error, not silence.
 pub fn parse_eleven_words(value: &serde_json::Value) -> Result<Vec<Word>, String> {
-    let words = value["words"].as_array().cloned().unwrap_or_default();
+    let Some(words) = value["words"].as_array() else {
+        return Err(tf("provider.err_shape", &["ElevenLabs", "words"]));
+    };
     let mut out = Vec::with_capacity(words.len());
-    for w in &words {
+    let mut untimed = 0;
+    for w in words {
+        if matches!(w["type"].as_str(), Some("spacing" | "audio_event")) {
+            continue;
+        }
         let (Some(text), Some(start), Some(end)) =
             (w["text"].as_str(), w["start"].as_f64(), w["end"].as_f64())
         else {
+            untimed += 1;
             continue;
         };
-        out.push(Word {
-            text: text.to_owned(),
-            start_ms: (start.max(0.0) * 1000.0).round() as u64,
-            end_ms: (end.max(0.0) * 1000.0).round() as u64,
-            speaker: w["speaker_id"].as_str().map(str::to_owned),
-        });
+        if text.trim().is_empty() {
+            continue;
+        }
+        out.push(Word::new(
+            text.trim(),
+            seconds_to_ms(start),
+            seconds_to_ms(end),
+            w["speaker_id"].as_str().map(str::to_owned),
+        ));
+    }
+    if untimed > out.len() {
+        return Err(tf("provider.err_shape", &["ElevenLabs", "start/end"]));
     }
     Ok(out)
 }
 
+fn seconds_to_ms(secs: f64) -> u64 {
+    (secs.max(0.0) * 1000.0).round() as u64
+}
+
 /// The request body for one Google chunk: 16 kHz mono LINEAR16, base64.
-/// Pure, so tests cover it without the network.
+/// Pure, so tests cover it without the network. The language must already
+/// have passed `check_language`.
 pub fn google_body(audio: &[u8], language: &str) -> serde_json::Value {
     serde_json::json!({
         "config": {
             "encoding": "LINEAR16",
             "sampleRateHertz": 16000,
-            "languageCode": google_language(language),
+            "languageCode": google_language(language).unwrap_or("en-US"),
             "enableWordTimeOffsets": true,
             "diarizationConfig": {"enableSpeakerDiarization": true, "minSpeakerCount": 1, "maxSpeakerCount": 6},
         },
@@ -339,29 +614,28 @@ pub fn write_wav_mono(path: &Path, samples: &[f32], rate: u32) -> std::io::Resul
     std::fs::write(path, wav)
 }
 
-/// One Google chunk: 16 kHz mono WAV in, words out. Google needs an explicit
-pub fn transcribe_google(
-    key: &str,
-    wav_16k: &Path,
-    language: &str,
-) -> Result<(Vec<Word>, Option<String>), String> {
-    let raw = wav_to_mono16k_raw(wav_16k)?;
-    let mut response = agent()
-        .post(format!("{GOOGLE_URL}?key={key}"))
-        .send_json(google_body(&raw, language))
-        .map_err(|e| format!("Google request failed: {e}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("Google reply unreadable: {e}"))?;
-    Ok((
-        parse_google_words(&check_status("Google", status, &body)?)?,
-        None,
-    ))
+/// One Google chunk: 16 kHz mono WAV in, words out. Google takes raw
+/// LINEAR16 without the WAV header, so the chunk is converted once more
+/// through ffmpeg. The key goes in the `x-goog-api-key` header rather than
+/// the URL, which ends up in error messages.
+fn transcribe_google(key: &str, wav_16k: &Path, language: &str) -> Result<Chunk, ChunkError> {
+    let raw = wav_to_mono16k_raw(wav_16k).map_err(ChunkError::permanent)?;
+    let body = google_body(&raw, language);
+    let value = send(Cloud::Google, |agent| {
+        agent
+            .post(GOOGLE_URL)
+            .header("x-goog-api-key", key)
+            .send_json(&body)
+    })?;
+    Ok(Chunk {
+        words: parse_google_words(&value),
+        language: None,
+        timed: true,
+    })
 }
-/// The transcription model on OpenRouter, `openrouter_model` in config.toml.
-/// Whisper-1 is the cheap default; any transcription-capable slug works
+
+/// The transcription model on OpenRouter, `openrouter_model` in config.toml,
+/// Whisper-1 unless set; any transcription-capable slug works
 /// (whisper-large-v3, gpt-4o-transcribe, chirp-3, …).
 pub fn openrouter_model() -> String {
     crate::models::config_value("openrouter_model")
@@ -386,100 +660,137 @@ pub fn openrouter_body(audio: &[u8], language: &str, model: &str) -> serde_json:
 
 /// One OpenRouter chunk: WAV in, words out. No diarization: every word comes
 /// back without a speaker, so multi-voice audio lands on one speaker label.
-pub fn transcribe_openrouter(
-    key: &str,
-    wav: &Path,
-    language: &str,
-) -> Result<(Vec<Word>, Option<String>), String> {
-    let audio = std::fs::read(wav).map_err(|e| format!("{}: {e}", wav.display()))?;
-    let mut response = agent()
-        .post(OPENROUTER_URL)
-        .header("Authorization", format!("Bearer {key}"))
-        .send_json(openrouter_body(&audio, language, &openrouter_model()))
-        .map_err(|e| format!("OpenRouter request failed: {e}"))?;
-    let status = response.status().as_u16();
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("OpenRouter reply unreadable: {e}"))?;
-    let value = check_status("OpenRouter", status, &body)?;
-    let detected = value["language"].as_str().map(str::to_owned);
-    Ok((parse_openrouter_words(&value)?, detected))
+fn transcribe_openrouter(key: &str, wav: &Path, language: &str) -> Result<Chunk, ChunkError> {
+    let audio = read_audio(wav)?;
+    let body = openrouter_body(&audio, language, &openrouter_model());
+    let value = send(Cloud::OpenRouter, |agent| {
+        agent
+            .post(OPENROUTER_URL)
+            .header("Authorization", format!("Bearer {key}"))
+            .send_json(&body)
+    })?;
+    let (words, timed) = parse_openrouter_words(&value);
+    Ok(Chunk {
+        words,
+        language: value["language"].as_str().map(str::to_owned),
+        timed,
+    })
 }
 
 /// verbose_json `segments[].words[]` (`word`, `start`/`end` seconds) to
-/// `Word`s; falls back to whole segments, then to plain `text` with no times.
-pub fn parse_openrouter_words(value: &serde_json::Value) -> Result<Vec<Word>, String> {
+/// `Word`s; falls back to whole segments, then to plain `text`, which has no
+/// times (the `bool` is false then, and the caller spreads it over the chunk).
+pub fn parse_openrouter_words(value: &serde_json::Value) -> (Vec<Word>, bool) {
     let mut out = Vec::new();
-    for segment in value["segments"].as_array().cloned().unwrap_or_default() {
+    for segment in value["segments"].as_array().into_iter().flatten() {
         let seg_start = segment["start"].as_f64().unwrap_or(0.0).max(0.0);
         let seg_end = segment["end"].as_f64().unwrap_or(seg_start).max(seg_start);
-        let words = segment["words"].as_array().cloned().unwrap_or_default();
+        let words = segment["words"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if words.is_empty() {
             if let Some(text) = segment["text"].as_str().filter(|t| !t.trim().is_empty()) {
-                out.push(Word {
-                    text: text.trim().to_owned(),
-                    start_ms: (seg_start * 1000.0).round() as u64,
-                    end_ms: (seg_end * 1000.0).round() as u64,
-                    speaker: None,
-                });
+                out.push(Word::new(
+                    text.trim(),
+                    seconds_to_ms(seg_start),
+                    seconds_to_ms(seg_end),
+                    None,
+                ));
             }
             continue;
         }
-        for w in &words {
+        for w in words {
             let (Some(text), Some(start), Some(end)) =
                 (w["word"].as_str(), w["start"].as_f64(), w["end"].as_f64())
             else {
                 continue;
             };
-            out.push(Word {
-                text: text.to_owned(),
-                start_ms: (start.max(0.0) * 1000.0).round() as u64,
-                end_ms: (end.max(0.0) * 1000.0).round() as u64,
-                speaker: None,
-            });
+            out.push(Word::new(
+                text.trim(),
+                seconds_to_ms(start),
+                seconds_to_ms(end),
+                None,
+            ));
         }
     }
     if out.is_empty()
         && let Some(text) = value["text"].as_str().filter(|t| !t.trim().is_empty())
     {
-        out.push(Word {
-            text: text.trim().to_owned(),
-            start_ms: 0,
-            end_ms: 0,
-            speaker: None,
-        });
+        return (vec![Word::new(text.trim(), 0, 0, None)], false);
     }
-    Ok(out)
+    (out, true)
 }
+
+/// Runs ffmpeg and keeps the last line it printed, so a failure says why.
+fn run_ffmpeg(args: &[&std::ffi::OsStr], what: &str) -> Result<(), String> {
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-nostdin"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| tf("provider.ffmpeg_missing", &[&e.to_string()]))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    Err(format!("{what}: {}", reason.trim()))
+}
+
 fn wav_to_mono16k_raw(wav: &Path) -> Result<Vec<u8>, String> {
     let out = wav.with_extension("g16.s16");
-    let status = Command::new("ffmpeg")
-        .args(["-v", "error", "-y", "-nostdin", "-i"])
-        .arg(wav)
-        .args(["-f", "s16le", "-ar", "16000", "-ac", "1"])
-        .arg(&out)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("ffmpeg not found: {e}"))?;
-    if !status.success() {
-        return Err("ffmpeg could not prepare the audio for Google".into());
-    }
+    run_ffmpeg(
+        &[
+            "-i".as_ref(),
+            wav.as_os_str(),
+            "-f".as_ref(),
+            "s16le".as_ref(),
+            "-ar".as_ref(),
+            "16000".as_ref(),
+            "-ac".as_ref(),
+            "1".as_ref(),
+            out.as_os_str(),
+        ],
+        t("provider.ffmpeg_google"),
+    )?;
     let bytes = std::fs::read(&out).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&out);
     Ok(bytes)
 }
 
 /// `results[].alternatives[0].words[]` (`word`, `startTime`/`endTime` like
-/// `"1.200s"`, `speakerTag`) to `Word`s.
-pub fn parse_google_words(value: &serde_json::Value) -> Result<Vec<Word>, String> {
+/// `"1.200s"`, `speakerTag`) to `Word`s. With diarization on, Google repeats
+/// every word of the request in the last result, this time with speaker
+/// tags, so then only that result is read; reading them all would give each
+/// word twice.
+pub fn parse_google_words(value: &serde_json::Value) -> Vec<Word> {
+    let results: Vec<&serde_json::Value> =
+        value["results"].as_array().into_iter().flatten().collect();
+    let words_of = |result: &serde_json::Value| -> Vec<serde_json::Value> {
+        result["alternatives"][0]["words"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let tagged = |result: &&serde_json::Value| {
+        words_of(result)
+            .iter()
+            .any(|w| w["speakerTag"].as_u64().is_some_and(|tag| tag > 0))
+    };
+    let chosen: Vec<&serde_json::Value> = match results.last() {
+        Some(last) if tagged(last) => vec![*last],
+        _ => results,
+    };
     let mut out = Vec::new();
-    for result in value["results"].as_array().cloned().unwrap_or_default() {
-        let Some(alternative) = result["alternatives"].as_array().and_then(|a| a.first()) else {
-            continue;
-        };
-        for w in alternative["words"].as_array().cloned().unwrap_or_default() {
+    for result in chosen {
+        for w in words_of(result) {
             let (Some(text), Some(start), Some(end)) = (
                 w["word"].as_str(),
                 w["startTime"].as_str().and_then(parse_google_time),
@@ -487,15 +798,18 @@ pub fn parse_google_words(value: &serde_json::Value) -> Result<Vec<Word>, String
             ) else {
                 continue;
             };
-            out.push(Word {
-                text: text.to_owned(),
-                start_ms: start,
-                end_ms: end,
-                speaker: w["speakerTag"].as_u64().map(|tag| format!("speaker_{tag}")),
-            });
+            out.push(Word::new(
+                text,
+                start,
+                end,
+                w["speakerTag"]
+                    .as_u64()
+                    .filter(|tag| *tag > 0)
+                    .map(|tag| format!("speaker_{tag}")),
+            ));
         }
     }
-    Ok(out)
+    out
 }
 
 /// `"1.200s"` to milliseconds.
@@ -540,76 +854,61 @@ pub fn chunk_ranges(total_ms: u64, chunk_ms: u64) -> Vec<(u64, u64)> {
     ranges
 }
 
-/// Cuts mono WAV chunks from `src` into `dir`, one file per range, at `rate`.
-/// Returns `(chunk file, absolute offset ms)`.
-pub fn write_wav_chunks(
-    src: &Path,
-    ranges: &[(u64, u64)],
-    dir: &Path,
-    rate: u32,
-) -> Result<Vec<(PathBuf, u64)>, String> {
-    let mut chunks = Vec::with_capacity(ranges.len());
-    for (i, (start, end)) in ranges.iter().enumerate() {
-        let out = dir.join(format!("chunk-{i:03}.wav"));
-        let status = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-nostdin"])
-            .arg("-ss")
-            .arg(format!("{:.3}", *start as f64 / 1000.0))
-            .arg("-t")
-            .arg(format!("{:.3}", (*end - *start) as f64 / 1000.0))
-            .arg("-i")
-            .arg(src)
-            .arg("-ar")
-            .arg(rate.to_string())
-            .arg("-ac")
-            .arg("1")
-            .arg(&out)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| format!("ffmpeg not found: {e}"))?;
-        if !status.success() {
-            return Err("ffmpeg could not cut the audio for upload".into());
-        }
-        chunks.push((out, *start));
-    }
-    Ok(chunks)
+/// Cuts one mono WAV chunk, `range` in ms, from `src` into `out` at `rate`.
+pub fn write_wav_chunk(src: &Path, range: (u64, u64), out: &Path, rate: u32) -> Result<(), String> {
+    let (start, end) = range;
+    let seconds = |ms: u64| format!("{:.3}", ms as f64 / 1000.0);
+    let (start_s, length_s, rate_s) = (seconds(start), seconds(end - start), rate.to_string());
+    run_ffmpeg(
+        &[
+            "-ss".as_ref(),
+            start_s.as_ref(),
+            "-t".as_ref(),
+            length_s.as_ref(),
+            "-i".as_ref(),
+            src.as_os_str(),
+            "-ar".as_ref(),
+            rate_s.as_ref(),
+            "-ac".as_ref(),
+            "1".as_ref(),
+            out.as_os_str(),
+        ],
+        t("provider.ffmpeg_cut"),
+    )
 }
 
-/// Groups words into segments: same speaker, split on gaps past `max_gap_ms`
-/// or 60 characters, so a cloud reply reads like transcript lines.
-pub fn group_words(words: &[Word], max_gap_ms: u64) -> Vec<(String, u64, u64, Option<String>)> {
-    let mut groups: Vec<(String, u64, u64, Option<String>)> = Vec::new();
+/// The longest a grouped line grows before a new one starts, in characters.
+const LINE_CHARS: usize = 60;
+
+/// Groups words into lines: same speaker, split on gaps past `max_gap_ms` or
+/// once the next word would take the line past `LINE_CHARS`, so a cloud reply
+/// reads like transcript lines. Each line is a `Word` spanning its words.
+pub fn group_words(words: &[Word], max_gap_ms: u64) -> Vec<Word> {
+    let mut lines: Vec<Word> = Vec::new();
     for word in words {
-        let separate = match groups.last() {
-            None => true,
-            Some((text, _, end, speaker)) => {
-                speaker != &word.speaker
-                    || word.start_ms.saturating_sub(*end) > max_gap_ms
-                    || text.len() > 60
+        match lines.last_mut() {
+            Some(line)
+                if line.speaker == word.speaker
+                    && word.start_ms.saturating_sub(line.end_ms) <= max_gap_ms
+                    && line.text.chars().count() + 1 + word.text.chars().count() <= LINE_CHARS =>
+            {
+                line.text.push(' ');
+                line.text.push_str(&word.text);
+                line.end_ms = line.end_ms.max(word.end_ms);
             }
-        };
-        if separate {
-            groups.push((
-                word.text.clone(),
-                word.start_ms,
-                word.end_ms,
-                word.speaker.clone(),
-            ));
-        } else if let Some((text, _, end, _)) = groups.last_mut() {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(&word.text);
-            *end = word.end_ms;
+            _ => lines.push(word.clone()),
         }
     }
-    groups
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn word(text: &str, start_ms: u64, end_ms: u64, speaker: Option<&str>) -> Word {
+        Word::new(text, start_ms, end_ms, speaker.map(str::to_owned))
+    }
 
     #[test]
     fn base64_vectors() {
@@ -634,8 +933,10 @@ mod tests {
         let value = serde_json::json!({
             "text": "hi there",
             "words": [
-                {"text": "hi", "start": 0.1, "end": 0.3, "speaker_id": "speaker_0"},
-                {"text": "there", "start": 0.4, "end": 0.7, "speaker_id": "speaker_1"},
+                {"text": "hi", "start": 0.1, "end": 0.3, "type": "word", "speaker_id": "speaker_0"},
+                {"text": " ", "start": 0.3, "end": 0.4, "type": "spacing", "speaker_id": "speaker_0"},
+                {"text": "(laughter)", "start": 0.3, "end": 0.4, "type": "audio_event"},
+                {"text": "there", "start": 0.4, "end": 0.7, "type": "word", "speaker_id": "speaker_1"},
             ],
         });
         let words = parse_eleven_words(&value).unwrap();
@@ -644,9 +945,25 @@ mod tests {
         assert_eq!(words[1].speaker.as_deref(), Some("speaker_1"));
         // Silence is an empty word list, not an error.
         assert_eq!(
-            parse_eleven_words(&serde_json::json!({"text": ""})).unwrap(),
+            parse_eleven_words(&serde_json::json!({"text": "", "words": []})).unwrap(),
             vec![]
         );
+        // A reply without the list is a changed API, not silence.
+        assert!(parse_eleven_words(&serde_json::json!({"text": "hi"})).is_err());
+    }
+
+    /// Spacing entries used to become words of their own, and the grouping
+    /// joined them with more blanks: "hi   there".
+    #[test]
+    fn eleven_spacing_does_not_double_blanks() {
+        let value = serde_json::json!({"words": [
+            {"text": "hi", "start": 0.0, "end": 0.2, "type": "word"},
+            {"text": " ", "start": 0.2, "end": 0.3, "type": "spacing"},
+            {"text": "there", "start": 0.3, "end": 0.5, "type": "word"},
+        ]});
+        let lines = group_words(&parse_eleven_words(&value).unwrap(), 700);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "hi there");
     }
 
     #[test]
@@ -658,38 +975,129 @@ mod tests {
                     {"word": "dunia", "startTime": "0.400s", "endTime": "0.800s", "speakerTag": 2},
                 ]}]}],
         });
-        let words = parse_google_words(&value).unwrap();
+        let words = parse_google_words(&value);
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].speaker.as_deref(), Some("speaker_1"));
         assert_eq!(words[1].end_ms, 800);
     }
 
+    /// With diarization Google sends the words once per result without tags,
+    /// then all of them again, tagged, in the last result.
+    #[test]
+    fn google_diarized_words_come_once() {
+        let untagged = |w: &str, s: &str, e: &str| serde_json::json!({"word": w, "startTime": s, "endTime": e});
+        let tagged = |w: &str, s: &str, e: &str, tag: u64| serde_json::json!({"word": w, "startTime": s, "endTime": e, "speakerTag": tag});
+        let value = serde_json::json!({"results": [
+            {"alternatives": [{"words": [untagged("halo", "0s", "0.5s")]}]},
+            {"alternatives": [{"words": [untagged("dunia", "1s", "1.5s")]}]},
+            {"alternatives": [{"words": [
+                tagged("halo", "0s", "0.5s", 1),
+                tagged("dunia", "1s", "1.5s", 2),
+            ]}]},
+        ]});
+        let words = parse_google_words(&value);
+        let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["halo", "dunia"]);
+        assert!(words.iter().all(|w| w.speaker.is_some()));
+        // Without diarization every result counts.
+        let plain = serde_json::json!({"results": [
+            {"alternatives": [{"words": [untagged("a", "0s", "1s")]}]},
+            {"alternatives": [{"words": [untagged("b", "1s", "2s")]}]},
+        ]});
+        assert_eq!(parse_google_words(&plain).len(), 2);
+        // Google answers silence with an empty object.
+        assert!(parse_google_words(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn google_languages_are_explicit() {
+        assert_eq!(google_language("id"), Some("id-ID"));
+        assert_eq!(google_language("en"), Some("en-US"));
+        assert_eq!(google_language("auto"), None);
+        assert!(check_language(Cloud::Google, "auto").is_err());
+        assert!(check_language(Cloud::Google, "id").is_ok());
+        assert!(check_language(Cloud::ElevenLabs, "auto").is_ok());
+        // Every language offered in the app has its own Google locale.
+        for code in crate::transcribe::LANGUAGE_CODES {
+            if code != "auto" {
+                assert!(google_language(code).is_some(), "{code}");
+            }
+        }
+        let body = google_body(&[0, 0], "id");
+        assert_eq!(body["config"]["languageCode"], "id-ID");
+        assert_eq!(body["config"]["sampleRateHertz"], 16000);
+        assert_eq!(body["audio"]["content"], "AAA=");
+    }
+
     #[test]
     fn status_errors_name_the_cause() {
+        let err = |cloud, status, body| check_status(cloud, status, body).unwrap_err();
         assert!(
-            check_status("ElevenLabs", 401, r#"{"detail":{"message":"x"}}"#)
-                .unwrap_err()
+            err(Cloud::ElevenLabs, 401, r#"{"detail":{"message":"x"}}"#)
+                .message
                 .contains("rejected the API key")
         );
         assert!(
-            check_status("Google", 429, "{}")
-                .unwrap_err()
-                .contains("quota")
+            err(Cloud::Google, 403, "{}")
+                .message
+                .contains("rejected the API key")
         );
-        assert!(check_status("Google", 200, r#"{"results":[]}"#).is_ok());
+        let bad_google_key = r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}"#;
         assert!(
-            check_status("Google", 500, "boom")
-                .unwrap_err()
-                .contains("HTTP 500")
+            err(Cloud::Google, 400, bad_google_key)
+                .message
+                .contains("rejected the API key")
         );
+        let quota = err(Cloud::Google, 429, "{}");
+        assert!(quota.message.contains("quota") && quota.transient);
+        assert!(check_status(Cloud::Google, 200, r#"{"results":[]}"#).is_ok());
+        let boom = err(Cloud::Google, 500, "boom");
+        assert!(boom.message.contains("HTTP 500: boom") && boom.transient);
+        assert!(!err(Cloud::Google, 400, "{}").transient);
         assert!(
-            check_status(
-                "OpenRouter",
+            err(
+                Cloud::OpenRouter,
                 402,
                 r#"{"error":{"message":"insufficient credits"}}"#
             )
-            .unwrap_err()
+            .message
             .contains("out of credits")
+        );
+        // ElevenLabs validation errors and plain-string details.
+        assert!(
+            err(
+                Cloud::ElevenLabs,
+                422,
+                r#"{"detail":[{"msg":"file too large"}]}"#
+            )
+            .message
+            .contains("file too large")
+        );
+        assert!(
+            err(Cloud::ElevenLabs, 400, r#"{"detail":"bad"}"#)
+                .message
+                .contains("bad")
+        );
+        // An empty message falls back to the body.
+        assert!(
+            err(Cloud::OpenRouter, 400, r#"{"error":{"message":""}}"#)
+                .message
+                .contains("HTTP 400")
+        );
+        // A 200 that is not JSON, or carries an error object, is no transcript.
+        assert!(
+            err(Cloud::OpenRouter, 200, "<html>")
+                .message
+                .contains("not JSON")
+        );
+        assert!(
+            err(
+                Cloud::OpenRouter,
+                200,
+                r#"{"error":{"message":"model busy"}}"#
+            )
+            .message
+            .contains("model busy")
         );
     }
 
@@ -704,62 +1112,121 @@ mod tests {
     }
 
     #[test]
-    fn words_group_by_speaker_and_gap() {
+    fn words_group_by_speaker_gap_and_length() {
         let words = vec![
-            Word {
-                text: "a".into(),
-                start_ms: 0,
-                end_ms: 100,
-                speaker: Some("s0".into()),
-            },
-            Word {
-                text: "b".into(),
-                start_ms: 150,
-                end_ms: 250,
-                speaker: Some("s0".into()),
-            },
-            Word {
-                text: "c".into(),
-                start_ms: 5000,
-                end_ms: 5100,
-                speaker: Some("s0".into()),
-            },
-            Word {
-                text: "d".into(),
-                start_ms: 5150,
-                end_ms: 5250,
-                speaker: Some("s1".into()),
-            },
+            word("a", 0, 100, Some("s0")),
+            word("b", 150, 250, Some("s0")),
+            word("c", 5000, 5100, Some("s0")),
+            word("d", 5150, 5250, Some("s1")),
         ];
-        let groups = group_words(&words, 700);
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].0, "a b");
-        assert_eq!(groups[2].3.as_deref(), Some("s1"));
+        let lines = group_words(&words, 700);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "a b");
+        assert_eq!((lines[0].start_ms, lines[0].end_ms), (0, 250));
+        assert_eq!(lines[2].speaker.as_deref(), Some("s1"));
+        // A line never grows past LINE_CHARS.
+        let long: Vec<Word> = (0..40)
+            .map(|i| word("word", i * 100, i * 100 + 50, None))
+            .collect();
+        assert!(
+            group_words(&long, 700)
+                .iter()
+                .all(|l| l.text.chars().count() <= LINE_CHARS)
+        );
     }
 
     #[test]
-    fn keychain_wiring_passes_service_and_key() {
-        let saved = std::cell::RefCell::new(Vec::new());
-        let run = |program: &str, args: &[&str]| {
-            saved
+    fn words_never_end_before_they_start() {
+        assert_eq!(Word::new("x", 500, 100, None).end_ms, 500);
+    }
+
+    fn security_fake<'a>(
+        calls: &'a std::cell::RefCell<Vec<(String, Option<String>)>>,
+        answer: Result<&'static str, (Option<i32>, &'static str)>,
+    ) -> impl Fn(&[&str], Option<&str>) -> Result<String, SecurityFailure> + 'a {
+        move |args, stdin| {
+            calls
                 .borrow_mut()
-                .push((program.to_owned(), args.join(" ")));
-            Ok("key-123\n".to_owned())
-        };
+                .push((args.join(" "), stdin.map(str::to_owned)));
+            answer
+                .map(str::to_owned)
+                .map_err(|(code, stderr)| SecurityFailure {
+                    code,
+                    stderr: stderr.to_owned(),
+                })
+        }
+    }
+
+    #[test]
+    fn keychain_reads_tell_missing_from_broken() {
+        let calls = std::cell::RefCell::new(Vec::new());
         assert_eq!(
-            api_key_with(Provider::ElevenLabs, run).as_deref(),
+            api_key_with(Cloud::ElevenLabs, security_fake(&calls, Ok("key-123\n"))).as_deref(),
             Ok("key-123")
         );
-        let calls = saved.borrow();
-        assert!(calls[0].1.contains("momr-elevenlabs"));
-        let failing = |_: &str, _: &[&str]| Err::<String, String>("nope".into());
-        assert!(api_key_with(Provider::Google, failing).is_err());
+        assert!(calls.borrow()[0].0.contains("momr-elevenlabs"));
+        assert_eq!(
+            api_key_with(
+                Cloud::Google,
+                security_fake(&calls, Err((Some(44), "not found")))
+            ),
+            Err(KeyError::Missing(Cloud::Google))
+        );
+        assert_eq!(
+            api_key_with(
+                Cloud::Google,
+                security_fake(&calls, Err((Some(51), "User interaction is not allowed.")))
+            ),
+            Err(KeyError::Keychain(
+                Cloud::Google,
+                "User interaction is not allowed.".into()
+            ))
+        );
+        assert_eq!(
+            api_key_with(Cloud::OpenRouter, security_fake(&calls, Ok("\n"))),
+            Err(KeyError::Missing(Cloud::OpenRouter))
+        );
+        // The existence check never asks for the secret.
+        calls.borrow_mut().clear();
+        assert!(key_status_with(Cloud::Google, security_fake(&calls, Ok("attrs"))).is_ok());
+        assert!(!calls.borrow()[0].0.contains("-w"));
+    }
+
+    #[test]
+    fn keys_are_saved_through_stdin() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        save_api_key_with(
+            Cloud::OpenRouter,
+            "  sk-\"a\\b  ",
+            security_fake(&calls, Ok("")),
+        )
+        .unwrap();
+        let (args, stdin) = calls.borrow()[0].clone();
+        assert_eq!(args, "-i");
+        assert!(!args.contains("sk-"));
+        assert_eq!(
+            stdin.as_deref(),
+            Some("add-generic-password -U -s momr-openrouter -a momr -w \"sk-\\\"a\\\\b\"\n")
+        );
+        // Empty keys and keys with line breaks never reach the Keychain.
+        calls.borrow_mut().clear();
+        assert!(save_api_key_with(Cloud::Google, "   ", security_fake(&calls, Ok(""))).is_err());
+        assert!(save_api_key_with(Cloud::Google, "a\nb", security_fake(&calls, Ok(""))).is_err());
+        assert!(calls.borrow().is_empty());
+        // A failed save carries security's reason.
+        let err = save_api_key_with(
+            Cloud::Google,
+            "k",
+            security_fake(&calls, Err((Some(2), "add-generic-password: returned 2"))),
+        )
+        .unwrap_err();
+        assert!(err.contains("returned 2"));
     }
 
     #[test]
     fn wav_header_round_trips() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("momr-wav-test.wav");
+        let dir = workdir().unwrap();
+        let path = dir.join("test.wav");
         write_wav_mono(&path, &[0.0, 0.5, -0.5, 1.0, -1.0], 16000).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");
@@ -773,7 +1240,7 @@ mod tests {
             .map(|c| i16::from_le_bytes(*c))
             .collect();
         assert_eq!(samples, vec![0, 16384, -16384, 32767, -32767]);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -794,37 +1261,34 @@ mod tests {
             "language": "id",
             "segments": [
                 {"text": "halo", "start": 0.1, "end": 0.3,
-                 "words": [{"word": "halo", "start": 0.1, "end": 0.3}]},
+                 "words": [{"word": " halo", "start": 0.1, "end": 0.3}]},
                 {"text": "dunia", "start": 0.4, "end": 0.8, "words": []},
             ],
         });
-        let words = parse_openrouter_words(&value).unwrap();
+        let (words, timed) = parse_openrouter_words(&value);
+        assert!(timed);
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].text, "halo");
         assert_eq!(words[0].start_ms, 100);
         assert_eq!(words[1].text, "dunia");
         assert_eq!(words[1].end_ms, 800);
         assert!(words.iter().all(|w| w.speaker.is_none()));
-        let bare = parse_openrouter_words(&serde_json::json!({"text": "hi"})).unwrap();
+        let (bare, timed) = parse_openrouter_words(&serde_json::json!({"text": "hi"}));
         assert_eq!(bare.len(), 1);
-        assert!(
-            parse_openrouter_words(&serde_json::json!({}))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!timed);
+        assert!(parse_openrouter_words(&serde_json::json!({})).0.is_empty());
     }
 
     #[test]
     fn ids_round_trip() {
-        assert_eq!(from_id("local"), Some(Provider::Local));
-        assert_eq!(from_id(" elevenlabs "), Some(Provider::ElevenLabs));
-        assert_eq!(from_id("google"), Some(Provider::Google));
-        assert_eq!(from_id("openrouter"), Some(Provider::OpenRouter));
-        assert_eq!(from_id("whisper"), None);
-        assert_eq!(from_id(""), None);
-        // The flag wins for one run, without touching config.
-        set_override(Provider::OpenRouter);
-        assert_eq!(selected(), Provider::OpenRouter);
-        *OVERRIDE.lock().unwrap() = None;
+        for provider in Provider::ALL {
+            assert_eq!(Provider::from_id(provider.id()), Some(provider));
+        }
+        assert_eq!(
+            Provider::from_id(" elevenlabs "),
+            Some(Provider::Cloud(Cloud::ElevenLabs))
+        );
+        assert_eq!(Provider::from_id("whisper"), None);
+        assert_eq!(Provider::from_id(""), None);
     }
 }

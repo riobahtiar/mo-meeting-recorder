@@ -1,6 +1,9 @@
 //! The recorder window. It has one page per phase: recording (which can shrink
 //! to a compact strip with only the waves and the clock), transcribing (the
 //! animation, edge to edge) and done (the transcript and what to do with it).
+//! Around it: the native menu bar and the actions behind it, the Settings
+//! dialog, the About window, and the menu bar item launched next to the app.
+//! Every other module is a leaf this one calls.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -18,9 +21,10 @@ use crate::audio::{Device, HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
-use crate::locales::t;
+use crate::locales::{Lang, t, tf};
 use crate::meeting::{self, Manifest};
 use crate::player::Player;
+use crate::provider::{Cloud, Provider};
 use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGE_CODES, language_label};
 use crate::{APP_ID, APP_NAME, settings};
 
@@ -141,8 +145,10 @@ fn menu_model() -> gio::Menu {
 
 /// The native menu bar: GTK's quartz backend turns this `GMenuModel` into the
 /// NSMenu bar, and adds the standard app menu when `app.about`,
-/// `app.preferences` and `app.quit` exist. Every item is a `GAction` from
-/// `install_actions`, so enabled state is shared with the buttons.
+/// `app.preferences` and `app.quit` exist. The app's own items are `GAction`s
+/// from `install_actions`, so enabled state is shared with the buttons; the
+/// Edit items are GTK's built-in `text.*`, `clipboard.*` and `selection.*`
+/// actions, and Close Window is `window.close`.
 fn install_menubar(app: &adw::Application) {
     app.set_menubar(Some(&menu_model()));
 }
@@ -236,21 +242,26 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
 }
 
 /// The menu bar item, launched once next to the app. `menubar = "false"` in
-/// config.toml disables it; a missing binary is silently skipped.
+/// config.toml disables it; a missing binary is skipped (a terminal build
+/// without the helpers has none). It gets the socket path and the interface
+/// language from here, so the two processes cannot disagree on either.
 fn spawn_menubar(slot: &Rc<RefCell<Option<std::process::Child>>>) {
-    if crate::models::config_value("menubar").as_deref() == Some("false") {
+    if !crate::models::menubar_enabled() {
         return;
     }
     let Some(binary) = crate::helper::menubar_path() else {
         return;
     };
-    if let Ok(child) = std::process::Command::new(binary)
+    match std::process::Command::new(&binary)
+        .env("MOMR_SOCKET", ipc::socket_path())
+        .env("MOMR_LANG", crate::locales::current().code())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
     {
-        *slot.borrow_mut() = Some(child);
+        Ok(child) => *slot.borrow_mut() = Some(child),
+        Err(e) => eprintln!("{APP_NAME}: could not start {}: {e}", binary.display()),
     }
 }
 
@@ -319,8 +330,6 @@ struct Recorder {
     animation_since: Cell<Option<std::time::Instant>>,
     paused_secs: Cell<i64>,
     pause_began: Cell<i64>,
-    /// Fullscreen toggled through the View menu, for the label.
-    fullscreen: Cell<bool>,
     /// The `caffeinate` child keeping the Mac awake while recording.
     caffeinate: RefCell<Option<std::process::Child>>,
     pause_button: gtk::Button,
@@ -349,7 +358,14 @@ impl Recorder {
             ..Default::default()
         }));
         let (commands_tx, commands_rx) = async_channel::unbounded();
-        ipc::serve(shared.clone(), mic.clone(), system.clone(), commands_tx);
+        let (mic_peaks, system_peaks) = (mic.clone(), system.clone());
+        let socket_error = ipc::serve(
+            &ipc::socket_path(),
+            shared.clone(),
+            move || (mic_peaks.recent_peak(3), system_peaks.recent_peak(3)),
+            commands_tx,
+        )
+        .err();
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -770,7 +786,6 @@ impl Recorder {
             animation_since: Cell::new(None),
             paused_secs: Cell::new(0),
             pause_began: Cell::new(0),
-            fullscreen: Cell::new(false),
             caffeinate: RefCell::default(),
             pause_button,
             import_button,
@@ -807,6 +822,9 @@ impl Recorder {
             }
         });
         recorder.render();
+        if let Some(e) = socket_error {
+            recorder.toast(&tf("help.socket_failed", &[&e]));
+        }
         recorder
     }
 
@@ -822,11 +840,11 @@ impl Recorder {
         });
 
         // Import: a file dropped anywhere on the window, or picked from a dialog.
-        // File managers offer a file list (Nautilus), some a single file.
+        // Finder offers a file list; other sources a single file.
         let drop = gtk::DropTarget::new(glib::Type::INVALID, gtk::gdk::DragAction::COPY);
         drop.set_types(&[gtk::gdk::FileList::static_type(), gio::File::static_type()]);
-        // GTK's own check turns the drag down when the compositor offers the
-        // source's preferred action (move) rather than copy, so decide on
+        // GTK's own check turns the drag down when the source prefers to
+        // move rather than copy, so decide on
         // the content alone. The file is only read; it is always a copy.
         drop.connect_accept(|_, offer| {
             let formats = offer.formats();
@@ -900,7 +918,7 @@ impl Recorder {
             if let Some(r) = weak.upgrade()
                 && !r.loading.get()
             {
-                settings::save_format(r.selected_format());
+                Self::saved(&weak, settings::save_format(r.selected_format()));
             }
         });
 
@@ -909,7 +927,7 @@ impl Recorder {
         self.language_row.connect_selected_notify(move |row| {
             if let Some(r) = weak.upgrade() {
                 if !r.loading.get() {
-                    settings::save_language(r.selected_language());
+                    Self::saved(&weak, settings::save_language(r.selected_language()));
                 }
                 if r.again_language_row.selected() != row.selected() {
                     r.again_language_row.set_selected(row.selected());
@@ -938,6 +956,13 @@ impl Recorder {
                 .map(|(_, ms)| *ms);
             if let Some(ms) = start {
                 r.player.play_from(ms);
+            }
+        });
+
+        let weak = Rc::downgrade(self);
+        self.player.connect_error(move |reason| {
+            if let Some(r) = weak.upgrade() {
+                r.toast(&tf("player.failed", &[reason]));
             }
         });
 
@@ -1263,10 +1288,10 @@ impl Recorder {
         });
     }
 
+    /// Asks the window, not a copy of its state: the green button, ⌃⌘F and
+    /// Esc change it too.
     fn toggle_fullscreen(&self) {
-        let fullscreen = !self.fullscreen.get();
-        self.fullscreen.set(fullscreen);
-        if fullscreen {
+        if !self.window.is_fullscreen() {
             self.window.fullscreen();
         } else {
             self.window.unfullscreen();
@@ -1300,20 +1325,30 @@ impl Recorder {
         let uri = "https://github.com/riobahtiar/mo-meeting-recorder";
         let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
     }
-    /// What leaves the Mac per transcription provider, for the Preferences row.
-    fn provider_privacy(provider: crate::provider::Provider) -> &'static str {
-        use crate::locales::t;
+    /// What leaves the Mac per transcription provider, for the Settings row.
+    fn provider_privacy(provider: Provider) -> &'static str {
         match provider {
-            crate::provider::Provider::Local => t("prefs.provider_local_note"),
-            crate::provider::Provider::ElevenLabs => t("prefs.provider_eleven_note"),
-            crate::provider::Provider::Google => t("prefs.provider_google_note"),
-            crate::provider::Provider::OpenRouter => t("prefs.provider_openrouter_note"),
+            Provider::Local => t("prefs.provider_local_note"),
+            Provider::Cloud(Cloud::ElevenLabs) => t("prefs.provider_eleven_note"),
+            Provider::Cloud(Cloud::Google) => t("prefs.provider_google_note"),
+            Provider::Cloud(Cloud::OpenRouter) => t("prefs.provider_openrouter_note"),
         }
     }
 
-    /// App settings (⌘,): model, agent, format, language, name, meetings
-    /// folder and audio status. Values apply at once; the ready page re-reads
-    /// the model banner and the language on close.
+    /// Tells the user a setting did not stick, for the rows below: a toast
+    /// with the reason, since the row itself already shows the new value.
+    fn saved(weak: &std::rc::Weak<Self>, result: std::io::Result<()>) {
+        if let (Err(e), Some(r)) = (result, weak.upgrade()) {
+            r.toast(&crate::locales::tf("prefs.save_failed", &[&e.to_string()]));
+        }
+    }
+
+    /// App settings (⌘,): the interface language, transcription (model,
+    /// language, provider and API keys), the chapters agent, recording
+    /// (format, your name, the meetings folder), the audio status and the
+    /// menu bar item. Most values apply at once; the interface language and
+    /// the menu bar item on the next launch, as their rows say. The ready page
+    /// re-reads the model banner and the language on close.
     fn show_preferences(self: &Rc<Self>) {
         let dialog = adw::PreferencesDialog::builder()
             .title(t("prefs.title"))
@@ -1327,14 +1362,19 @@ impl Recorder {
             .title(t("prefs.ui_language"))
             .subtitle(t("prefs.ui_language_hint"))
             .model(&gtk::StringList::new(&["English", "Bahasa Indonesia"]))
-            .selected(if crate::settings::load_ui_language() == "id" {
-                1
-            } else {
-                0
+            .selected(match crate::locales::current() {
+                Lang::English => 0,
+                Lang::Indonesian => 1,
             })
             .build();
-        ui_language.connect_selected_notify(|row| {
-            crate::settings::save_ui_language(if row.selected() == 1 { "id" } else { "en" });
+        let weak = Rc::downgrade(self);
+        ui_language.connect_selected_notify(move |row| {
+            let lang = if row.selected() == 1 {
+                Lang::Indonesian
+            } else {
+                Lang::English
+            };
+            Self::saved(&weak, crate::settings::save_ui_language(lang));
         });
         general.add(&ui_language);
         page.add(&general);
@@ -1373,7 +1413,10 @@ impl Recorder {
         model_row.connect_selected_notify(move |row| {
             let Some(r) = weak.upgrade() else { return };
             let name = model_names[row.selected() as usize];
-            crate::models::save_config_value("model", name);
+            Self::saved(
+                &Rc::downgrade(&r),
+                crate::models::save_config_value("model", name),
+            );
             row.set_subtitle(&model_subtitle(name));
             r.update_model_banner();
         });
@@ -1397,7 +1440,7 @@ impl Recorder {
         prefs_language.connect_selected_notify(move |row| {
             let Some(r) = weak.upgrade() else { return };
             let code = LANGUAGE_CODES[row.selected() as usize];
-            settings::save_language(code);
+            Self::saved(&Rc::downgrade(&r), settings::save_language(code));
             // The ready page owns the default: keep its dropdown in step.
             r.loading.set(true);
             r.language_row.set_selected(row.selected());
@@ -1405,65 +1448,56 @@ impl Recorder {
             r.loading.set(false);
         });
         transcription.add(&prefs_language);
-        let provider_names: Vec<&str> = [
-            crate::provider::Provider::Local,
-            crate::provider::Provider::ElevenLabs,
-            crate::provider::Provider::Google,
-            crate::provider::Provider::OpenRouter,
-        ]
-        .iter()
-        .map(|p| crate::provider::label(*p))
-        .collect();
+        let provider_names: Vec<&str> = Provider::ALL.iter().map(|p| p.label()).collect();
         let provider_row = adw::ComboRow::builder()
             .title(t("prefs.provider"))
             .model(&gtk::StringList::new(&provider_names))
             .build();
-        let current_provider = crate::provider::selected();
-        provider_row.set_selected(match current_provider {
-            crate::provider::Provider::Local => 0,
-            crate::provider::Provider::ElevenLabs => 1,
-            crate::provider::Provider::Google => 2,
-            crate::provider::Provider::OpenRouter => 3,
-        });
-        provider_row.set_subtitle(Self::provider_privacy(current_provider));
-        provider_row.connect_selected_notify(|row| {
-            let provider = match row.selected() {
-                1 => crate::provider::Provider::ElevenLabs,
-                2 => crate::provider::Provider::Google,
-                3 => crate::provider::Provider::OpenRouter,
-                _ => crate::provider::Provider::Local,
-            };
-            let id = match provider {
-                crate::provider::Provider::Local => "local",
-                crate::provider::Provider::ElevenLabs => "elevenlabs",
-                crate::provider::Provider::Google => "google",
-                crate::provider::Provider::OpenRouter => "openrouter",
-            };
-            crate::models::save_config_value("provider", id);
+        // An id in config.toml that names no provider shows as local here and
+        // says so, rather than looking like a choice that was made.
+        let (current_provider, provider_problem) = match crate::provider::configured() {
+            Ok(provider) => (provider, None),
+            Err(e) => (Provider::Local, Some(e)),
+        };
+        provider_row.set_selected(
+            Provider::ALL
+                .iter()
+                .position(|p| *p == current_provider)
+                .unwrap_or(0) as u32,
+        );
+        provider_row.set_subtitle(
+            provider_problem
+                .as_deref()
+                .unwrap_or(Self::provider_privacy(current_provider)),
+        );
+        let weak = Rc::downgrade(self);
+        provider_row.connect_selected_notify(move |row| {
+            let provider = Provider::ALL[row.selected() as usize];
+            Self::saved(&weak, crate::provider::save_configured(provider));
             row.set_subtitle(Self::provider_privacy(provider));
         });
         transcription.add(&provider_row);
-        for (provider, title, hint) in [
+        for (cloud, title, hint) in [
             (
-                crate::provider::Provider::ElevenLabs,
+                Cloud::ElevenLabs,
                 t("prefs.eleven_key"),
                 t("prefs.key_hint_eleven"),
             ),
             (
-                crate::provider::Provider::Google,
+                Cloud::Google,
                 t("prefs.google_key"),
                 t("prefs.key_hint_google"),
             ),
             (
-                crate::provider::Provider::OpenRouter,
+                Cloud::OpenRouter,
                 t("prefs.openrouter_key"),
                 t("prefs.key_hint_openrouter"),
             ),
         ] {
-            let state = if crate::provider::has_api_key(provider) {
-                t("prefs.key_saved").to_owned()
-            } else {
-                hint.to_owned()
+            let state = match crate::provider::key_status(cloud) {
+                Ok(()) => t("prefs.key_saved").to_owned(),
+                Err(crate::provider::KeyError::Missing(_)) => hint.to_owned(),
+                Err(e) => e.to_string(),
             };
             let key_row = adw::PasswordEntryRow::builder()
                 .title(format!("{title} — {state}"))
@@ -1474,7 +1508,7 @@ impl Recorder {
             key_row.connect_apply(move |row| {
                 let key = row.text().to_string();
                 row.set_text("");
-                match crate::provider::save_api_key(provider, key.trim()) {
+                match crate::provider::save_api_key(cloud, &key) {
                     Ok(()) => {
                         row.set_title(&format!("{title} — {}", t("prefs.key_saved")));
                         if let Some(r) = weak.upgrade() {
@@ -1502,7 +1536,7 @@ impl Recorder {
             .title(t("prefs.agent"))
             .model(&gtk::StringList::new(&agent_names))
             .build();
-        let current_agent = crate::models::config_value("agent").unwrap_or_default();
+        let current_agent = crate::agent::configured_id().unwrap_or_default();
         agent_row.set_selected(
             agents
                 .iter()
@@ -1510,14 +1544,14 @@ impl Recorder {
                 .map(|i| i + 1)
                 .unwrap_or(0) as u32,
         );
+        let weak = Rc::downgrade(self);
         agent_row.connect_selected_notify(move |row| {
             let selected = row.selected() as usize;
-            let id = if selected == 0 {
-                String::new()
-            } else {
-                agents[selected - 1].id.clone()
+            let id = match selected {
+                0 => "",
+                n => agents[n - 1].id,
             };
-            crate::models::save_config_value("agent", &id);
+            Self::saved(&weak, crate::agent::save_configured_id(id));
         });
         chapters.add(&agent_row);
         page.add(&chapters);
@@ -1535,19 +1569,24 @@ impl Recorder {
                 .position(|f| *f == settings::load_format())
                 .unwrap_or(0) as u32,
         );
-        format_row.connect_selected_notify(|row| {
-            settings::save_format(Format::ALL[row.selected() as usize]);
+        let weak = Rc::downgrade(self);
+        format_row.connect_selected_notify(move |row| {
+            Self::saved(
+                &weak,
+                settings::save_format(Format::ALL[row.selected() as usize]),
+            );
         });
         recording.add(&format_row);
         let name_row = adw::EntryRow::builder()
             .title(t("prefs.name"))
             .text(settings::load_your_name())
             .build();
-        name_row.connect_apply(|row| {
-            settings::save_your_name(&row.text());
+        let weak = Rc::downgrade(self);
+        name_row.connect_apply(move |row| {
+            Self::saved(&weak, settings::save_your_name(&row.text()));
         });
         recording.add(&name_row);
-        let meetings_path = settings::load_meetings_dir().unwrap_or_else(crate::paths::meetings);
+        let meetings_path = settings::meetings_dir();
         let meetings_row = adw::ActionRow::builder()
             .title(t("prefs.meetings"))
             .subtitle(meetings_path.display().to_string())
@@ -1563,11 +1602,15 @@ impl Recorder {
             let folders = gtk::FileDialog::builder()
                 .title(t("prefs.meetings"))
                 .build();
-            let (row, window) = (row.clone(), this.window.clone());
+            let (row, window, this) = (row.clone(), this.window.clone(), this.clone());
             folders.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
                 if let Some(path) = result.ok().and_then(|f| f.path()) {
-                    settings::save_meetings_dir(&path);
-                    row.set_subtitle(&path.display().to_string());
+                    match settings::save_meetings_dir(&path) {
+                        Ok(()) => row.set_subtitle(&path.display().to_string()),
+                        Err(e) => {
+                            this.toast(&crate::locales::tf("prefs.save_failed", &[&e.to_string()]))
+                        }
+                    }
                 }
             });
         });
@@ -1576,23 +1619,31 @@ impl Recorder {
         let audio = adw::PreferencesGroup::builder()
             .title(t("prefs.audio"))
             .build();
-        let audio_status = crate::helper::path().and_then(|h| crate::helper::list_info(&h));
+        let audio_status = match crate::helper::path() {
+            Some(helper) => crate::helper::list_info(&helper),
+            None => Err(t("banner.audio_helper_missing").to_owned()),
+        };
         let mic_row = adw::ActionRow::builder().title(t("prefs.mic")).build();
-        let mic_subtitle = match audio_status {
-            Some((_, _, inputs, _)) if inputs > 0 => {
-                t("prefs.mic_inputs").replace("{}", &inputs.to_string())
+        let mic_subtitle = match &audio_status {
+            Ok(devices) if devices.inputs > 0 => {
+                crate::locales::tf("prefs.mic_inputs", &[&devices.inputs.to_string()])
             }
-            _ => t("prefs.mic_none").to_owned(),
+            Ok(_) => t("prefs.mic_none").to_owned(),
+            Err(e) => crate::locales::tf("prefs.devices_unknown", &[e]),
         };
         mic_row.set_subtitle(&mic_subtitle);
         audio.add(&mic_row);
         let computer_row = adw::ActionRow::builder().title(t("prefs.computer")).build();
-        match audio_status {
-            Some((true, _, _, _)) => {
+        match &audio_status {
+            Ok(devices) if devices.tap => {
                 computer_row.set_subtitle(t("prefs.computer_tap"));
             }
-            Some((false, Some(device), _, _)) => {
-                computer_row.set_subtitle(&t("prefs.computer_blackhole").replace("{}", &device));
+            Ok(crate::helper::AudioDevices {
+                blackhole: Some(device),
+                ..
+            }) => {
+                computer_row
+                    .set_subtitle(&crate::locales::tf("prefs.computer_blackhole", &[device]));
             }
             _ => {
                 computer_row.set_subtitle(t("prefs.computer_unavailable"));
@@ -1618,13 +1669,11 @@ impl Recorder {
         let menubar_row = adw::SwitchRow::builder()
             .title(t("prefs.menubar_show"))
             .subtitle(t("prefs.menubar_restart"))
-            .active(crate::models::config_value("menubar").as_deref() != Some("false"))
+            .active(crate::models::menubar_enabled())
             .build();
-        menubar_row.connect_active_notify(|row| {
-            crate::models::save_config_value(
-                "menubar",
-                if row.is_active() { "true" } else { "false" },
-            );
+        let weak = Rc::downgrade(self);
+        menubar_row.connect_active_notify(move |row| {
+            Self::saved(&weak, crate::models::save_menubar_enabled(row.is_active()));
         });
         menubar_group.add(&menubar_row);
         page.add(&menubar_group);
@@ -1660,7 +1709,7 @@ impl Recorder {
     fn title(&self) -> String {
         let typed = self.title_row.text().trim().to_owned();
         if typed.is_empty() {
-            "Meeting".to_owned()
+            t("done.fallback_title").to_owned()
         } else {
             typed
         }
@@ -1739,7 +1788,13 @@ impl Recorder {
             State::Recording if self.paused.get() => t("ready.status_paused").to_owned(),
             State::Recording => t("ready.status_recording").to_owned(),
             State::Stopping => t("ready.status_stopping").to_owned(),
-            State::Transcribing => t("ready.status_transcribing").to_owned(),
+            // Where the audio goes is a privacy question: say it.
+            State::Transcribing => match crate::provider::configured() {
+                Ok(Provider::Cloud(cloud)) => {
+                    tf("ready.status_transcribing_cloud", &[cloud.name()])
+                }
+                _ => t("ready.status_transcribing").to_owned(),
+            },
             State::Done => String::new(),
         };
         self.status_label.set_label(&text);
@@ -1802,9 +1857,14 @@ impl Recorder {
             self.dot.set_opacity(opacity);
             self.compact_dot.set_opacity(opacity);
         }
-        // Computer capture may fall back to BlackHole or go idle (tap refused,
-        // helper missing); say so under the meters until it captures again.
-        match self.system.note() {
+        // Either source may fail or fall back (a refused permission, no
+        // device, a tap refused and BlackHole used instead, a full disk);
+        // say so under the meters until it captures again.
+        let notes: Vec<String> = [self.mic.note(), self.system.note()]
+            .into_iter()
+            .flatten()
+            .collect();
+        match (!notes.is_empty()).then(|| notes.join(" ")) {
             Some(note) => {
                 if self.audio_banner.title() != note {
                     self.audio_banner.set_title(&note);
@@ -1975,6 +2035,7 @@ impl Recorder {
             imported: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             speaker_count: speakers,
             model: None,
+            provider: None,
             chapters: Vec::new(),
             chapters_by: None,
         });
@@ -1990,7 +2051,7 @@ impl Recorder {
             let staging = crate::paths::cache().join(format!("import-{}", ipc::now()));
             let converted = gio::spawn_blocking(move || import_audio(&source, &target, &staging))
                 .await
-                .unwrap_or_else(|_| Err("the import stopped unexpectedly".into()));
+                .unwrap_or_else(|_| Err(t("help.stopped_unexpectedly").into()));
             let result = match converted {
                 Ok(duration) => {
                     if let Some(m) = this.manifest.borrow_mut().as_mut() {
@@ -2167,9 +2228,9 @@ impl Recorder {
         // A name typed before starting is kept; otherwise one from the time.
         if self.title_row.text().trim().is_empty() {
             let title = glib::DateTime::now_local()
-                .and_then(|now| now.format("Meeting %H:%M"))
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| "Meeting".to_owned());
+                .and_then(|now| now.format("%H:%M"))
+                .map(|time| format!("{} {time}", t("done.fallback_title")))
+                .unwrap_or_else(|_| t("done.fallback_title").to_owned());
             self.title_row.set_text(&title);
         }
         self.paused.set(false);
@@ -2181,8 +2242,8 @@ impl Recorder {
             .and_then(|_| self.mic.start_recording(&staging.join("mic.raw")))
             .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
         {
-            self.mic.stop_recording();
-            self.system.stop_recording();
+            let _ = self.mic.stop_recording();
+            let _ = self.system.stop_recording();
             self.status_label
                 .set_label(&t("help.could_not_start").replace("{}", &e.to_string()));
             return;
@@ -2203,14 +2264,16 @@ impl Recorder {
         self.set_state(State::Recording);
         // Keep the Mac from idle-sleeping while recording. `-w` ties the
         // assertion to this process, so it dies with the app even on a crash.
-        if let Ok(child) = std::process::Command::new("caffeinate")
+        match std::process::Command::new("caffeinate")
             .args(["-i", "-w", &std::process::id().to_string()])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            *self.caffeinate.borrow_mut() = Some(child);
+            Ok(child) => *self.caffeinate.borrow_mut() = Some(child),
+            // Recording still works; only idle sleep is no longer held off.
+            Err(e) => eprintln!("{APP_NAME}: caffeinate: {e}"),
         }
     }
 
@@ -2225,8 +2288,12 @@ impl Recorder {
         }
         self.freeze_meters(false);
         self.animation_since.set(Some(std::time::Instant::now()));
-        self.mic.stop_recording();
-        self.system.stop_recording();
+        // A write that failed mid-recording (a full disk) lost audio; say so
+        // now, since the meeting is saved from what did reach the disk.
+        let lost = [self.mic.stop_recording(), self.system.stop_recording()];
+        if let Some(e) = lost.iter().flatten().next() {
+            self.toast(&tf("banner.audio_write_failed", &[e]));
+        }
         if let Some(mut caffeinate) = self.caffeinate.borrow_mut().take() {
             let _ = caffeinate.kill();
             let _ = caffeinate.wait();
@@ -2272,6 +2339,7 @@ impl Recorder {
                 imported: None,
                 speaker_count: None,
                 model: None,
+                provider: None,
                 chapters: Vec::new(),
                 chapters_by: None,
             };
@@ -2298,7 +2366,7 @@ impl Recorder {
         language: &'static str,
     ) -> Result<(), String> {
         let Some(out) = self.result_dir.borrow().clone() else {
-            return Err("no meeting folder".into());
+            return Err(t("help.no_meeting_folder").into());
         };
         self.set_compact(false);
         if self.animation_since.get().is_none() {
@@ -2311,6 +2379,8 @@ impl Recorder {
         self.animation.set_progress(0.0);
         self.animation.set_running(true);
 
+        // Read once per run: the thread and the manifest must agree on it.
+        let provider = crate::provider::configured()?;
         let abort = Abort::default();
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
@@ -2318,7 +2388,9 @@ impl Recorder {
         std::thread::spawn(move || {
             let result = match tracks {
                 Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
-                    transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
+                    transcribe::transcribe_single(
+                        &track, language, speakers, provider, &events_tx, &abort,
+                    )
                 }),
                 Tracks::Raw(dir) | Tracks::Kept(dir) => {
                     let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
@@ -2328,7 +2400,9 @@ impl Recorder {
                     };
                     transcribe::load_track(&mic_path).and_then(|mic| {
                         let computer = transcribe::load_track(&computer_path)?;
-                        transcribe::transcribe(&mic, &computer, language, &events_tx, &abort)
+                        transcribe::transcribe(
+                            &mic, &computer, language, provider, &events_tx, &abort,
+                        )
                     })
                 }
             };
@@ -2366,7 +2440,7 @@ impl Recorder {
         let result = done_rx
             .recv()
             .await
-            .unwrap_or_else(|_| Err("transcription stopped unexpectedly".into()));
+            .unwrap_or_else(|_| Err(t("help.transcription_stopped").into()));
         *self.abort.borrow_mut() = None;
 
         let transcript = result?;
@@ -2395,7 +2469,7 @@ impl Recorder {
                 // Remote 2, ...: one name each, after your own.
                 let remotes = speakers_in(&markdown)
                     .iter()
-                    .filter_map(|s| s.strip_prefix("Remote ")?.parse::<usize>().ok())
+                    .filter_map(|s| meeting::parse_remote_n(s))
                     .max()
                     .unwrap_or(0);
                 if remotes > 1 {
@@ -2424,7 +2498,9 @@ impl Recorder {
                 .collect();
             markdown = meeting::relabel_all(&markdown, &renames);
             manifest.language = language.to_owned();
-            manifest.model = Some(crate::models::configured());
+            // The model only means something for a local transcript.
+            manifest.model = (provider == Provider::Local).then(crate::models::configured);
+            manifest.provider = Some(provider.id().to_owned());
             manifest.title = self.title();
             // Chapters of a previous transcript would point at lines that are gone.
             manifest.chapters.clear();
@@ -2709,11 +2785,11 @@ impl Recorder {
         });
         let description = match &agent {
             Some(agent) if self.generating.get() => {
-                t("done.chapters_writing").replace("{}", agent.name)
+                t("done.chapters_writing").replace("{}", agent.name())
             }
-            Some(agent) if has_chapters => t("chapters.made_with").replace("{}", agent.name),
+            Some(agent) if has_chapters => t("chapters.made_with").replace("{}", agent.name()),
             Some(agent) if self.can_have_chapters() => {
-                t("chapters.let_divide").replace("{}", agent.name)
+                t("chapters.let_divide").replace("{}", agent.name())
             }
             Some(_) => t("done.chapters_hint").to_owned(),
             None => String::new(),
@@ -2768,8 +2844,9 @@ impl Recorder {
                 Err(message) => {
                     eprintln!("{APP_NAME}: chapters: {message}");
                     this.update_chapters_header(!this.chapter_starts.borrow().is_empty());
-                    this.chapters_group
-                        .set_description(Some(&t("chapters.could_not").replace("{}", agent.name)));
+                    this.chapters_group.set_description(Some(
+                        &t("chapters.could_not").replace("{}", agent.name()),
+                    ));
                 }
             }
         });
@@ -2778,7 +2855,7 @@ impl Recorder {
     fn store_chapters(self: &Rc<Self>, dir: &std::path::Path, list: &[Chapter], agent: &Agent) {
         if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
             manifest.chapters = list.to_vec();
-            manifest.chapters_by = Some(agent.id.clone());
+            manifest.chapters_by = Some(agent.id().to_owned());
             let _ = meeting::write(dir, manifest);
         }
         let transcript = dir.join("transcript.md");
@@ -3179,7 +3256,7 @@ impl Recorder {
                     t("speaker.row_computer_n").replace("{}", &i.to_string())
                 }
                 (false, _) => t("speaker.row_computer").to_owned(),
-                (true, _) => t("speaker.import_default").replace("{}", &(i + 1).to_string()),
+                (true, _) => tf("speaker.row_import", &[&(i + 1).to_string()]),
             };
             let row = adw::EntryRow::builder()
                 .title(title)
@@ -3263,8 +3340,11 @@ impl Recorder {
             m.speakers = names.clone();
             let _ = meeting::write(&dir, m);
         }
-        if you_changed && let Some(you) = names.first() {
-            settings::save_your_name(you);
+        if you_changed
+            && let Some(you) = names.first()
+            && let Err(e) = settings::save_your_name(you)
+        {
+            self.toast(&tf("prefs.save_failed", &[&e.to_string()]));
         }
         let text = std::fs::read_to_string(&transcript).ok();
         self.redraw_transcript(text.as_deref().unwrap_or(""));
@@ -3392,7 +3472,7 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    let root = settings::load_meetings_dir().unwrap_or_else(crate::paths::meetings);
+    let root = settings::meetings_dir();
     root.join(format!("{stamp} {}", safe_name(title)))
 }
 
@@ -3524,7 +3604,7 @@ fn import_audio(
     let bytes = std::fs::metadata(&raw).map(|m| m.len()).unwrap_or(0);
     if !decoded || bytes == 0 {
         let _ = std::fs::remove_dir_all(staging);
-        return Err("this file has no audio ffmpeg can read".into());
+        return Err(t("import.no_audio").into());
     }
     let _ = std::fs::write(&silence, []);
     let listened = export_audio(&raw, &silence, out, Format::Mono);
@@ -3540,7 +3620,7 @@ fn import_audio(
         .unwrap_or(false);
     let _ = std::fs::remove_dir_all(staging);
     if !listened || !kept {
-        return Err("could not convert the audio".into());
+        return Err(t("import.no_convert").into());
     }
     Ok((bytes / (48_000 * 2 * 2)) as i64)
 }

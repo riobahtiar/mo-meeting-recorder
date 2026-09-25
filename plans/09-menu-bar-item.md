@@ -62,7 +62,7 @@ done
 
 A second executable target in the Swift package (rename the package to `helpers/momr-helpers` with two products, or keep it as `helpers/momr-audio` with a second target): an `LSUIElement` (no Dock icon) that:
 
-- connects to the socket path the app uses (same rule as `ipc.rs` `socket_path()`: `~/Library/Caches/momr.sock`, or `$XDG_RUNTIME_DIR` when set), retries every second while the app is off;
+- connects to the socket path the app uses, which the app resolves (`ipc.rs` `socket_path()`: `~/Library/Caches/momr/momr.sock`, or `momr.sock` under an absolute `$XDG_CACHE_HOME`, falling back to `$TMPDIR/momr.sock` when the path would exceed 100 bytes, inside the 104-byte `sun_path` limit) and passes to `momr-menubar` as `MOMR_SOCKET`, so the two cannot disagree; an item started by hand, without `MOMR_SOCKET`, applies the same rule itself (`MomrWatch` `socketPath()`, tested against the Rust rule); retries every second while the app is off;
 - keeps a 3-second history of `mic` and `computer` and draws them in a `NSStatusItem` custom view: 60 × 18 pt, mic above the midline and computer below, in the accent colour, a red dot pulsing at 1 Hz, the time in monospaced digits (`NSFont.monospacedDigitSystemFont`);
 - shows a menu on click: Show MOM Recorder (`momr compact` when compact, else activates the app through `NSRunningApplication`), Pause/Resume, Stop, and Quit Item;
 - hides itself (`isVisible = false`) when the state is `off` or `idle`, unless an "Always show" default is set.

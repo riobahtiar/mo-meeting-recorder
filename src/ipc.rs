@@ -1,6 +1,7 @@
 //! Live state for a menu bar item or any other client.
 //!
-//! The app listens on a Unix socket in `~/Library/Caches` and writes one JSON
+//! The app listens on a Unix socket, `~/Library/Caches/momr/momr.sock` (or
+//! `$TMPDIR/momr.sock` when that path is too long for a socket), and writes one JSON
 //! line per tick to every connected client: 20 times a second while recording,
 //! once a second otherwise. `momr watch` connects to it and
 //! copies those lines to stdout, printing `{"state":"off"}` while the app is not
@@ -19,7 +20,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::APP_NAME;
-use crate::audio::{Source, to_meter};
+use crate::audio::to_meter;
 
 const MAX_LINE: usize = 4096;
 
@@ -37,7 +38,9 @@ pub struct Status {
 
 pub type SharedStatus = Arc<Mutex<Status>>;
 
-fn socket_path() -> PathBuf {
+/// Where the app listens. `momr-menubar` gets it as `MOMR_SOCKET`, so the
+/// two can never disagree about the rule below.
+pub fn socket_path() -> PathBuf {
     socket_path_in(&crate::paths::cache())
 }
 
@@ -63,28 +66,26 @@ pub fn now() -> i64 {
 /// Commands a client may send, one per line.
 pub const COMMANDS: [&str; 4] = ["start", "stop", "compact", "pause"];
 
-/// Starts the socket server. Called once, from the primary instance. Clients
-/// get the state lines; a line a client writes that names one of `COMMANDS` is
-/// passed on to `commands`.
+/// Starts the socket server at `path`. Called once, from the primary
+/// instance. Clients get the state lines; a line a client writes that names
+/// one of `COMMANDS` is passed on to `commands`. `peaks` gives the latest
+/// (mic, computer) peaks. An error means no menu bar item or `momr stop`
+/// can reach this app, which the caller tells the user.
 pub fn serve(
+    path: &Path,
     status: SharedStatus,
-    mic: Source,
-    system: Source,
+    peaks: impl Fn() -> (f32, f32) + Send + 'static,
     commands: async_channel::Sender<&'static str>,
-) {
-    let path = socket_path();
+) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         // First run: ~/Library/Caches/momr does not exist yet.
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     // A socket file left behind by a crash refuses new binds; nobody answers on it.
-    if UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path);
+    if UnixStream::connect(path).is_err() {
+        let _ = std::fs::remove_file(path);
     }
-    let Ok(listener) = UnixListener::bind(&path) else {
-        eprintln!("{APP_NAME}: could not listen on {}", path.display());
-        return;
-    };
+    let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
 
     let accepted = clients.clone();
@@ -116,12 +117,13 @@ pub fn serve(
                 now()
             };
             let busy = recording || snapshot.state == "transcribing";
+            let (mic, computer) = peaks();
             let line = serde_json::json!({
                 "state": snapshot.state,
                 "elapsed": if taking { (until - snapshot.started_at - snapshot.paused_secs).max(0) } else { 0 },
                 "title": snapshot.title,
-                "mic": round(to_meter(mic.recent_peak(3))),
-                "computer": round(to_meter(system.recent_peak(3))),
+                "mic": round(to_meter(mic)),
+                "computer": round(to_meter(computer)),
                 "progress": round(snapshot.progress),
             })
             .to_string()
@@ -143,6 +145,7 @@ pub fn serve(
             }));
         }
     });
+    Ok(())
 }
 
 fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static str>) {
@@ -215,6 +218,32 @@ mod tests {
     fn short_base_keeps_the_socket_next_to_the_cache() {
         let base = Path::new("/Users/someone/Library/Caches/momr");
         assert_eq!(socket_path_in(base), base.join(format!("{APP_NAME}.sock")));
+    }
+
+    /// `momr start` connects, writes one line and hangs up at once; the
+    /// command must still arrive, and the state lines must flow to a reader.
+    #[test]
+    fn fire_and_forget_commands_arrive() {
+        let dir = std::env::temp_dir().join(format!("momr-ipc-{}", std::process::id()));
+        let path = dir.join("t.sock");
+        let (tx, rx) = async_channel::unbounded();
+        let status: SharedStatus = Arc::new(Mutex::new(Status {
+            state: "idle",
+            ..Default::default()
+        }));
+        serve(&path, status, || (0.5, 0.0), tx).expect("listens");
+        let mut client = UnixStream::connect(&path).expect("connects");
+        client.write_all(b"stop\nnot-a-command\n").unwrap();
+        drop(client);
+        let command = rx.recv_blocking().expect("the command reaches the app");
+        assert_eq!(command, "stop");
+        let reader = UnixStream::connect(&path).unwrap();
+        let mut line = String::new();
+        BufReader::new(reader).read_line(&mut line).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["state"], "idle");
+        assert!(value["mic"].as_f64().unwrap() > 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

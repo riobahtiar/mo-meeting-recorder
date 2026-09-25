@@ -2,7 +2,8 @@
 //! match the appearance libadwaita already follows. Window, text and accent
 //! colours stay libadwaita's own; this module only supplies the waves, the
 //! speakers, the recording dot and the transcription animation, plus the
-//! `macos.css` layer for window chrome.
+//! `macos.css` layer for window chrome. The palette's own `accent` is fixed
+//! systemBlue: it follows light and dark, not the user's accent colour.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ fn load_for(dark: bool) -> Theme {
     colors.insert("green".into(), c("#28cd41", "#32d74b"));
     colors.insert("red".into(), c("#ff3b30", "#ff453a"));
     colors.insert("yellow".into(), c("#ffcc00", "#ffd60a"));
+    // systemPurple and the pre-2020 systemTeal, under the names the speaker
+    // classes and the animation use.
     colors.insert("magenta".into(), c("#af52de", "#bf5af2"));
     colors.insert("cyan".into(), c("#55bef0", "#5ac8f5"));
     // Aliases for the transcription animation, which needs a scene background
@@ -110,9 +113,10 @@ fn css(theme: &Theme) -> String {
 /// run` and the `.app` load the same rules.
 const MACOS_CSS: &str = include_str!("../data/macos.css");
 
-/// Applies the current palette and keeps following the system appearance and
-/// accent. `changed` runs after every switch, so custom-drawn widgets can
-/// repaint.
+/// Applies the current palette and keeps following the system appearance.
+/// An accent colour change also repaints (libadwaita's widgets pick it up),
+/// though the palette itself stays systemBlue. `changed` runs after every
+/// switch, so custom-drawn widgets can repaint.
 pub fn follow(changed: impl Fn() + 'static) {
     let provider = gtk::CssProvider::new();
     if let Some(display) = gtk::gdk::Display::default() {

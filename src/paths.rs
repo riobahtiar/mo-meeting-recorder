@@ -1,6 +1,8 @@
 //! Where the app keeps things: `~/Library/Application Support/momr` for config,
 //! settings and models, `~/Library/Caches/momr` for staging and the socket,
-//! `~/Documents/Meetings` for meetings. Every path is under `APP_NAME`.
+//! `~/Documents/Meetings` for meetings (or the folder picked in Settings,
+//! see `settings::meetings_dir`). Every path but the meetings is under
+//! `APP_NAME`.
 //!
 //! GLib's `user_data_dir()` and friends return Linux-style `~/.local` paths
 //! from Homebrew's build (measured, no Cocoa support), so the macOS locations
@@ -59,7 +61,8 @@ pub fn models() -> PathBuf {
     data().join("models")
 }
 
-/// `config.toml` with the `model` and `agent` keys.
+/// `config.toml`: `model`, `agent`, `provider`, `openrouter_model` and
+/// `menubar`, the settings users edit by hand.
 pub fn config_file() -> PathBuf {
     config().join("config.toml")
 }
@@ -79,13 +82,9 @@ pub fn meetings() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
 
-    /// The environment is process-global, so serialise the tests that touch it.
-    static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn lock() -> MutexGuard<'static, ()> {
-        LOCK.lock().unwrap()
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::env_lock()
     }
 
     #[test]

@@ -9,7 +9,7 @@ Models, config, settings and the cache live where macOS keeps them (`~/Library/A
 - [x] `ls ~/Library/Application\ Support/momr/` shows `models/`, `config.toml` (when written) and `settings.json` after a run.
 - [x] The app started with `open target/release/momr` (Finder-like environment) records, plays back and finds the configured agent.
 - [x] `momr watch` works from a second terminal.
-- [x] `grep -n "XDG_" src/` matches only the `XDG_*` variables the agent runner sets *for the agent* (its private data and state dirs).
+- [x] No module hand-rolls an `XDG_*` lookup any more. `grep -n "XDG_" src/` matches `paths.rs`, which honours an absolute `XDG_*` on purpose (D22) so power users and tests stay hermetic; `agent.rs`, which sets private data and state dirs *for the agent* and puts the agent's working directory under `$XDG_RUNTIME_DIR` when it exists (else `$TMPDIR`); and `main.rs`, which inside the app bundle points `XDG_DATA_DIRS` at `Contents/Resources/share` so GTK finds the bundled schemas, icons and data.
 
 Observed 2026-09-25: fresh `~/Library/Caches/momr` is created on first run
 (the socket bind made its own parent dir first); staging, socket and watch
@@ -31,13 +31,13 @@ Plan 02.
 
 ## Background
 
-Three modules compute directories by hand: `settings.rs` `path()` (state), `models.rs` `config_file()` (config) and `data_dir()` (data), `transcribe.rs` `data_dir()` (data). Each reads an `XDG_*` variable and falls back to `~/.local/share`, `~/.config` or `~/.local/state`. GLib's `g_get_user_data_dir()` and friends return `~/Library/Application Support` and `~/Library/Caches` on macOS (Homebrew's GLib is built with Cocoa support), still honouring `XDG_*` when set. `ipc.rs` and the staging code in `ui.rs` already use `glib::user_runtime_dir()` and `glib::user_cache_dir()`. `theme.rs` has its own state-dir lookup for Omarchy's theme folder; plan 07 deletes that module's reader, so leave it alone here.
+Three modules compute directories by hand: `settings.rs` `path()` (state), `models.rs` `config_file()` (config) and `data_dir()` (data), `transcribe.rs` `data_dir()` (data). Each reads an `XDG_*` variable and falls back to `~/.local/share`, `~/.config` or `~/.local/state`. GLib's `g_get_user_data_dir()` and friends do not help: Homebrew's GLib has no Cocoa support and returns those same `~/.local` paths on macOS (measured, D22), so `paths.rs` builds the `~/Library` locations from the home directory itself and still honours an absolute `XDG_*` when set. `ipc.rs` and the staging code in `ui.rs` used `glib::user_runtime_dir()` and `glib::user_cache_dir()` and move to `paths::cache()` for the same reason. `theme.rs` has its own state-dir lookup for Omarchy's theme folder; plan 07 deletes that module's reader, so leave it alone here.
 
 `ui.rs` `output_dir()` hardcodes `~/Documents/Meetings`, which is right but should come from `glib::user_special_dir(Documents)` so a relocated Documents folder is respected.
 
 A GUI app launched from Finder or Spotlight gets a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`). Homebrew's `/opt/homebrew/bin` (Apple silicon) or `/usr/local/bin` (Intel) is not on it, nor are npm's or the user's bin directories. Every `Command::new("ffmpeg")` in the app would fail. This is the most common reason a GTK app "works from the terminal and not from the Dock".
 
-Unix socket paths on macOS are limited to 104 bytes. `~/Library/Caches/momr.sock` is about 40 for a short user name; long names still fit, but check it.
+Unix socket paths on macOS are limited to 104 bytes. `~/Library/Caches/momr/momr.sock` is about 45 for a short user name; long names still fit, but check it.
 
 ## Steps
 
@@ -66,7 +66,7 @@ pub fn meetings() -> PathBuf {
 }
 ```
 
-On macOS, GLib's config and state dirs both resolve to `~/Library/Application Support`, so `config.toml` and `settings.json` end up side by side in `momr/`, which is what a Mac user expects. Replace the hand-rolled functions in the three modules with calls into `paths`. Keep the voxtype lookup in `models.rs` `find()` as `glib::user_data_dir().join("voxtype/models")`.
+The sketch above is the first shape; D22 replaced the GLib calls, because Homebrew's GLib returns `~/.local` paths on macOS. The shipped `paths.rs` resolves config, data and state to `~/Library/Application Support` and the cache to `~/Library/Caches`, each overridable by an absolute `XDG_*`, so `config.toml` and `settings.json` end up side by side in `momr/`, which is what a Mac user expects. Replace the hand-rolled functions in the three modules with calls into `paths`. Keep the voxtype lookup in `models.rs` `find()` as `glib::user_data_dir().join("voxtype/models")`.
 
 ### 2. Meetings folder
 

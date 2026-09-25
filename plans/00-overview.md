@@ -68,10 +68,10 @@ One row per seam. "Remove" means the Linux code is deleted when the macOS replac
 | Chapters agent | `agent.rs` `status()` | `omarchy-default-agent` prints the id | `agent = "…"` in `config.toml`. Remove the Omarchy lookup and its message. | 05 |
 | Agent process group and timeout | `agent.rs` `run()` | `setsid sh -c 'ulimit -f … && exec timeout …'` | `pre_exec(setsid)`, `ulimit -f` through `sh`, in-process timeout; `gtimeout` used when present | 05 |
 | Bounded reads | `agent.rs` `read_bounded()` | Linux literals for `O_NOFOLLOW`, `O_NONBLOCK` | `libc::O_NOFOLLOW`, `libc::O_NONBLOCK` | 02 |
-| Directories | `settings.rs`, `models.rs`, `transcribe.rs` | Hand-rolled `XDG_*` with `~/.local/…` fallbacks | `glib::user_*_dir()` through one `paths.rs`: `~/Library/Application Support/momr`, `~/Library/Caches/momr` | 06 |
+| Directories | `settings.rs`, `models.rs`, `transcribe.rs` | Hand-rolled `XDG_*` with `~/.local/…` fallbacks | One `paths.rs` that builds `~/Library/Application Support/momr` and `~/Library/Caches/momr` from the home directory (Homebrew's GLib has no Cocoa support, D22), an absolute `XDG_*` still winning | 06 |
 | PATH for GUI launches | `main.rs` | inherited from the session | Finder launches with `/usr/bin:/bin:…`; prepend Homebrew and user bin dirs before GTK starts | 06 |
 | Meetings folder | `ui.rs` `output_dir()` | `~/Documents/Meetings` | Same, through `glib::user_special_dir(Documents)` | 06 |
-| Live state socket | `ipc.rs` | Unix socket in `$XDG_RUNTIME_DIR` | Same code; `momr.sock` in `~/Library/Caches`; mind the 104-byte `sun_path` limit | 06 |
+| Live state socket | `ipc.rs` | Unix socket in `$XDG_RUNTIME_DIR` | Same code; `~/Library/Caches/momr/momr.sock` (under an absolute `$XDG_CACHE_HOME` when set), falling back to `$TMPDIR/momr.sock` past the 104-byte `sun_path` limit | 06 |
 | Theme | `theme.rs` | Reads Omarchy's `colors.toml`, followed live | libadwaita follows system appearance and accent; speaker and wave colours from Apple's system palette. Remove the `colors.toml` reader. | 07 |
 | Menu bar, chrome, controls | `ui.rs` | libadwaita defaults | Native `GMenuModel` menubar, window buttons left, `macos.css`, About and Preferences dialogs | 07 |
 | File panels | `ui.rs` `gtk::FileDialog` | GTK dialog | Native `NSOpenPanel` through GTK's quartz file chooser; nothing to change, verify filters | 07 |

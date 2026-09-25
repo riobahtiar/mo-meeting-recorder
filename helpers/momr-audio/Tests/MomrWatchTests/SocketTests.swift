@@ -18,6 +18,8 @@ final class SocketTests: XCTestCase {
             at: dir.appendingPathComponent("momr"),
             withIntermediateDirectories: true)
         setenv("XDG_CACHE_HOME", dir.path, 1)
+        // A socket passed down by a running app would win over the test's.
+        unsetenv("MOMR_SOCKET")
     }
 
     override func tearDown() {

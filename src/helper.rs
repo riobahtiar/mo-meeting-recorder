@@ -2,8 +2,10 @@
 //!
 //! The helper ships next to the Rust binary (see `scripts/build-macos.sh`),
 //! so it is looked up beside the running executable first, then on `PATH`.
-//! `blackhole_name` runs `momr-audio list` once per lookup and returns the
-//! loopback device the computer source falls back to.
+//! `list_info` runs `momr-audio list` for the Settings audio rows;
+//! `blackhole_name` reads the loopback device the computer source falls back
+//! to from the same output. `menubar_path` finds the status item shipped
+//! beside the helper.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,35 +35,54 @@ pub fn menubar_path() -> Option<PathBuf> {
     is_executable(&candidate).then_some(candidate)
 }
 
-/// The full `momr-audio list` picture: tap support, the BlackHole device when
-/// one is installed, and the input/output device counts.
-pub fn list_info(helper: &Path) -> Option<(bool, Option<String>, usize, usize)> {
+/// What `momr-audio list` reports.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioDevices {
+    /// macOS is new enough for a process tap. Whether it is permitted is only
+    /// known once `system` runs.
+    pub tap: bool,
+    /// The BlackHole loopback device, when one is installed.
+    pub blackhole: Option<String>,
+    pub inputs: usize,
+    pub outputs: usize,
+}
+
+/// The full `momr-audio list` picture, or why the helper could not give it:
+/// "no microphones" would be wrong when the question simply failed.
+pub fn list_info(helper: &Path) -> Result<AudioDevices, String> {
     let output = Command::new(helper)
         .arg("list")
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
-        .ok()?;
+        .map_err(|e| e.to_string())?;
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr.lines().rev().find(|l| !l.trim().is_empty());
+        return Err(reason.map_or_else(
+            || format!("exit {}", output.status.code().unwrap_or(-1)),
+            |l| l.trim().to_owned(),
+        ));
     }
-    Some(parse_list(&String::from_utf8_lossy(&output.stdout)))
+    parse_list(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The BlackHole loopback device from `momr-audio list`, if one is installed.
 pub fn blackhole_name(helper: &Path) -> Option<String> {
-    list_info(helper).and_then(|(_, blackhole, _, _)| blackhole)
+    list_info(helper).ok().and_then(|devices| devices.blackhole)
 }
 
-/// (tap supported, BlackHole device, inputs, outputs) from one `list` JSON
-/// object. Hand-parsed with serde_json, the way the rest of the app reads
-/// small JSON.
-fn parse_list(text: &str) -> (bool, Option<String>, usize, usize) {
-    let value: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
-    let tap = value["tap"].as_bool().unwrap_or(false);
-    let blackhole = value["blackhole"].as_str().map(str::to_owned);
+/// One `list` JSON object. Hand-parsed with serde_json, the way the rest of
+/// the app reads small JSON.
+fn parse_list(text: &str) -> Result<AudioDevices, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let count = |key: &str| value[key].as_array().map_or(0, Vec::len);
-    (tap, blackhole, count("inputs"), count("outputs"))
+    Ok(AudioDevices {
+        tap: value["tap"].as_bool().unwrap_or(false),
+        blackhole: value["blackhole"].as_str().map(str::to_owned),
+        inputs: count("inputs"),
+        outputs: count("outputs"),
+    })
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -83,32 +104,46 @@ mod tests {
 
     #[test]
     fn list_parses_tap_blackhole_and_counts() {
-        let (tap, blackhole, inputs, outputs) = parse_list(
+        let devices = parse_list(
             r#"{"blackhole":"BlackHole 2ch","inputs":[{"name":"Mic"}],"outputs":[],"tap":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            devices,
+            AudioDevices {
+                tap: true,
+                blackhole: Some("BlackHole 2ch".into()),
+                inputs: 1,
+                outputs: 0,
+            }
         );
-        assert!(tap);
-        assert_eq!(blackhole.as_deref(), Some("BlackHole 2ch"));
-        assert_eq!((inputs, outputs), (1, 0));
     }
 
     #[test]
     fn list_without_a_loopback_leaves_it_empty() {
-        let (tap, blackhole, _, _) = parse_list(r#"{"inputs":[],"outputs":[],"tap":true}"#);
-        assert!(tap);
-        assert_eq!(blackhole, None);
+        let devices = parse_list(r#"{"inputs":[],"outputs":[],"tap":true}"#).unwrap();
+        assert!(devices.tap);
+        assert_eq!(devices.blackhole, None);
     }
 
     #[test]
-    fn garbage_is_no_tap_and_no_loopback() {
-        assert_eq!(parse_list("not json"), (false, None, 0, 0));
-        assert_eq!(parse_list(""), (false, None, 0, 0));
+    fn garbage_is_an_error_not_an_empty_list() {
+        assert!(parse_list("not json").is_err());
+        assert!(parse_list("").is_err());
     }
 
     #[test]
-    fn found_helper_is_executable() {
-        // Environment-dependent: only the shape is asserted.
-        if let Some(path) = path() {
-            assert!(is_executable(&path));
-        }
+    fn only_executable_files_count() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("momr-helper-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tool");
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&file));
+        assert!(!is_executable(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

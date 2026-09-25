@@ -1,27 +1,50 @@
 // momr-menubar: the recording status in the menu bar (plan 09). A pulsing
 // dot, the clock and a two-lane waveform while recording, "paused" while
 // paused, the percentage while transcribing, hidden otherwise. Clicking shows
-// a menu with Pause, Stop and Compact. Reads `momr watch` state through
-// MomrWatch and sends commands back over the same socket.
+// a menu with Pause, Stop and Compact. It does not run `momr watch`: it
+// connects to the app's socket itself through MomrWatch, reads the same
+// NDJSON state lines `momr watch` prints, and sends commands back over the
+// same socket.
 //
 // No Dock icon: the activation policy is set to accessory at launch, so no
 // bundle with LSUIElement is needed.
 //
-// Strings in English and Indonesian from the system locale. (The Rust app
-// holds the full tables in src/locales.rs; the status item needs its dozen.)
+// Strings in English and Indonesian. The app passes its own UI language in
+// `MOMR_LANG` (`en` or `id`) when it spawns the item, so the menu matches the
+// window even when the app's language differs from the system's. Started by
+// hand, without it, the item falls back to the first of AppleLanguages. The
+// choice is made once at launch, since neither source changes under a
+// running item. (The Rust app holds the full tables in src/locales.rs; the
+// status item needs its dozen.)
+
+/// Whether to speak Indonesian, from `MOMR_LANG` and then the system.
+private func menubarUsesIndonesian(
+    environment: [String: String], appleLanguages: [String]?
+) -> Bool {
+    switch environment["MOMR_LANG"] {
+    case "id": return true
+    case "en": return false
+    default: return appleLanguages?.first?.hasPrefix("id") ?? false
+    }
+}
+
+private let indonesian = menubarUsesIndonesian(
+    environment: ProcessInfo.processInfo.environment,
+    appleLanguages: UserDefaults.standard.array(forKey: "AppleLanguages")
+        as? [String])
+
+private let menubarTable: [String: (en: String, id: String)] = [
+    "show": ("Show MOM Recorder", "Tampilkan MOM Recorder"),
+    "pause": ("Pause", "Jeda"),
+    "resume": ("Resume", "Lanjutkan"),
+    "stop": ("Stop", "Hentikan"),
+    "compact": ("Compact Strip", "Strip Ringkas"),
+    "quit": ("Quit Item", "Keluar"),
+    "paused": ("paused", "dijeda"),
+]
+
 private func menubarText(_ key: String) -> String {
-    let indonesian = (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?
-        .first?.hasPrefix("id") ?? false
-    let table: [String: (en: String, id: String)] = [
-        "show": ("Show MOM Recorder", "Tampilkan MOM Recorder"),
-        "pause": ("Pause", "Jeda"),
-        "resume": ("Resume", "Lanjutkan"),
-        "stop": ("Stop", "Hentikan"),
-        "compact": ("Compact Strip", "Strip Ringkas"),
-        "quit": ("Quit Item", "Keluar"),
-        "paused": ("paused", "dijeda"),
-    ]
-    guard let entry = table[key] else { return key }
+    guard let entry = menubarTable[key] else { return key }
     return indonesian ? entry.id : entry.en
 }
 

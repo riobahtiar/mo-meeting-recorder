@@ -1,6 +1,11 @@
 // Default-microphone capture through AVAudioEngine. Restarts on
 // AVAudioEngineConfigurationChange so a headset plugged in mid-call is
 // followed without restarting the process.
+//
+// Exit codes (the table is in main.swift): 4 when the Microphone privacy
+// setting refuses us, 5 when there is no input device or the engine will not
+// start or restart, 7 from AudioWriter when its buffers keep failing to
+// convert.
 
 import AVFoundation
 import Darwin
@@ -27,6 +32,11 @@ func runMic(rate: Double, channels: AVAudioChannelCount) -> Int32 {
             stderr)
         return 4
     @unknown default:
+        // A status this build does not know is treated as a refusal, since
+        // recording without knowing we may is worse than asking the user.
+        fputs(
+            "momr-audio: unknown microphone authorization status; check System Settings > Privacy & Security > Microphone\n",
+            stderr)
         return 4
     }
 

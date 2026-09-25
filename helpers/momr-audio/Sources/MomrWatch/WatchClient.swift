@@ -1,19 +1,54 @@
-// Shared watch-protocol code for momr-menubar: the socket path rule (same as
-// src/ipc.rs), one NDJSON line in, commands out.
+// Shared watch-protocol code for momr-menubar: the socket path rule (the app's
+// `MOMR_SOCKET`, else the same rule as src/paths.rs and src/ipc.rs), one
+// NDJSON line in, commands out.
 
 import Darwin
 import Foundation
 
-/// The app's live-state socket: `~/Library/Caches/momr/momr.sock`, or under
-/// `XDG_CACHE_HOME` when that is set, the same rule as the Rust side.
+/// The app's live-state socket, from this process's environment. See
+/// `socketPath(environment:home:)` for the rule.
 public func socketPath() -> String {
-    if let xdg = ProcessInfo.processInfo.environment["XDG_CACHE_HOME"],
-        !xdg.isEmpty
-    {
-        return (xdg as NSString).appendingPathComponent("momr/momr.sock")
+    let env = ProcessInfo.processInfo.environment
+    // GLib's home_dir(), which the Rust side builds on, prefers $HOME.
+    let home = env["HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? NSHomeDirectory()
+    return socketPath(environment: env, home: home)
+}
+
+/// Where the app listens. The app passes the path it resolved in
+/// `MOMR_SOCKET` when it spawns the menu bar item, and that wins, so the two
+/// can never disagree about a path the app computed. Without it (the item
+/// started by hand) this ports src/paths.rs and src/ipc.rs exactly:
+/// `$XDG_CACHE_HOME` when it is an absolute path, else `~/Library/Caches`,
+/// then `momr/momr.sock`; and when that is longer than 100 bytes, which
+/// would not fit `sun_path`, `momr.sock` directly in the temp dir (`$TMPDIR`,
+/// else `/tmp`, as Rust's `std::env::temp_dir()`). A relative
+/// `XDG_CACHE_HOME` is ignored, as Rust's `is_absolute()` check does.
+public func socketPath(environment env: [String: String], home: String)
+    -> String
+{
+    if let given = env["MOMR_SOCKET"], !given.isEmpty {
+        return given
     }
-    return (NSHomeDirectory() as NSString)
-        .appendingPathComponent("Library/Caches/momr/momr.sock")
+    let base: String
+    if let xdg = env["XDG_CACHE_HOME"], xdg.hasPrefix("/") {
+        base = xdg
+    } else {
+        base = joinPath(home, "Library/Caches")
+    }
+    let path = joinPath(joinPath(base, "momr"), "momr.sock")
+    if path.utf8.count > 100 {
+        let tmp = env["TMPDIR"].flatMap { $0.isEmpty ? nil : $0 } ?? "/tmp"
+        return joinPath(tmp, "momr.sock")
+    }
+    return path
+}
+
+/// Joins the way Rust's `PathBuf::push` does for a relative component: one
+/// separator, none added when the base already ends in one, and nothing else
+/// normalised. NSString's path methods also collapse and trim, which would
+/// make the byte count differ from the Rust side's for odd inputs.
+private func joinPath(_ base: String, _ component: String) -> String {
+    base.hasSuffix("/") ? base + component : base + "/" + component
 }
 
 /// One state line from `momr watch`.

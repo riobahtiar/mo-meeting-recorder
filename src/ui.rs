@@ -1301,14 +1301,12 @@ impl Recorder {
     }
     /// What leaves the Mac per transcription provider, for the Preferences row.
     fn provider_privacy(provider: crate::provider::Provider) -> &'static str {
+        use crate::locales::t;
         match provider {
-            crate::provider::Provider::Local => "Nothing leaves this Mac",
-            crate::provider::Provider::ElevenLabs => {
-                "Sends meeting audio to ElevenLabs when transcribing"
-            }
-            crate::provider::Provider::Google => {
-                "Sends meeting audio to Google Cloud when transcribing"
-            }
+            crate::provider::Provider::Local => t("prefs.provider_local_note"),
+            crate::provider::Provider::ElevenLabs => t("prefs.provider_eleven_note"),
+            crate::provider::Provider::Google => t("prefs.provider_google_note"),
+            crate::provider::Provider::OpenRouter => t("prefs.provider_openrouter_note"),
         }
     }
 
@@ -1410,6 +1408,7 @@ impl Recorder {
             crate::provider::Provider::Local,
             crate::provider::Provider::ElevenLabs,
             crate::provider::Provider::Google,
+            crate::provider::Provider::OpenRouter,
         ]
         .iter()
         .map(|p| crate::provider::label(*p))
@@ -1423,18 +1422,21 @@ impl Recorder {
             crate::provider::Provider::Local => 0,
             crate::provider::Provider::ElevenLabs => 1,
             crate::provider::Provider::Google => 2,
+            crate::provider::Provider::OpenRouter => 3,
         });
         provider_row.set_subtitle(Self::provider_privacy(current_provider));
         provider_row.connect_selected_notify(|row| {
             let provider = match row.selected() {
                 1 => crate::provider::Provider::ElevenLabs,
                 2 => crate::provider::Provider::Google,
+                3 => crate::provider::Provider::OpenRouter,
                 _ => crate::provider::Provider::Local,
             };
             let id = match provider {
                 crate::provider::Provider::Local => "local",
                 crate::provider::Provider::ElevenLabs => "elevenlabs",
                 crate::provider::Provider::Google => "google",
+                crate::provider::Provider::OpenRouter => "openrouter",
             };
             crate::models::save_config_value("provider", id);
             row.set_subtitle(Self::provider_privacy(provider));
@@ -1444,18 +1446,23 @@ impl Recorder {
             (
                 crate::provider::Provider::ElevenLabs,
                 t("prefs.eleven_key"),
-                "Dashboard › profile › API Keys (elevenlabs.io/app/settings/api-keys)",
+                t("prefs.key_hint_eleven"),
             ),
             (
                 crate::provider::Provider::Google,
                 t("prefs.google_key"),
-                "Console › project › Speech-to-Text API › Credentials, restricted to the API",
+                t("prefs.key_hint_google"),
+            ),
+            (
+                crate::provider::Provider::OpenRouter,
+                t("prefs.openrouter_key"),
+                t("prefs.key_hint_openrouter"),
             ),
         ] {
             let state = if crate::provider::has_api_key(provider) {
-                "Saved in the Keychain"
+                t("prefs.key_saved").to_owned()
             } else {
-                hint
+                hint.to_owned()
             };
             let key_row = adw::PasswordEntryRow::builder()
                 .title(format!("{title} — {state}"))
@@ -1468,7 +1475,7 @@ impl Recorder {
                 row.set_text("");
                 match crate::provider::save_api_key(provider, key.trim()) {
                     Ok(()) => {
-                        row.set_title(&format!("{title} — Saved in the Keychain"));
+                        row.set_title(&format!("{title} — {}", t("prefs.key_saved")));
                         if let Some(r) = weak.upgrade() {
                             r.toast(t("prefs.key_saved_toast"));
                         }

@@ -64,10 +64,11 @@ you set it up:
 
 - Chapters: the transcript text goes to the agent's service, the one you
   already chose and pay for.
-- Cloud transcription (Settings › Transcription › ElevenLabs or Google):
+- Cloud transcription (Settings › Transcription › ElevenLabs, Google or OpenRouter):
   the meeting audio goes to that provider for transcription. API keys stay
-  in your Keychain. ElevenLabs and Google keep and process uploads under
-  their own terms — use the local default for anything sensitive.
+  in your Keychain. ElevenLabs, Google and OpenRouter keep and process uploads under
+  their own terms — use the local default for anything sensitive. The OpenRouter
+  model is `openrouter_model` in config.toml (`openai/whisper-1` unless set).
 
 ## Contributing
 

@@ -716,6 +716,7 @@ fn transcribe_provider_sides(
                     let (words, _) = P::transcribe_google(key, chunk, language)?;
                     (words, None)
                 }
+                P::Provider::OpenRouter => P::transcribe_openrouter(key, chunk, language)?,
                 P::Provider::Local => unreachable!("routed only for cloud providers"),
             };
             if detected.is_none() {
@@ -804,6 +805,7 @@ fn transcribe_single_provider(
                     let (words, _) = P::transcribe_google(&key, chunk, language)?;
                     (words, None)
                 }
+                P::Provider::OpenRouter => P::transcribe_openrouter(&key, chunk, language)?,
                 P::Provider::Local => unreachable!("routed only for cloud providers"),
             };
             if detected.is_none() {
@@ -1509,7 +1511,7 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
     })
 }
 
-/// `momr transcribe-file <audio> [--speakers N] [--language xx]`
+/// `momr transcribe-file <audio> [--speakers N] [--language xx] [--provider openrouter]`
 pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let mut files = Vec::new();
     let mut language = "auto".to_owned();
@@ -1528,6 +1530,10 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
             "--speakers" | "-s" => match iter.next().and_then(|n| n.parse::<usize>().ok()) {
                 Some(n) if n > 0 => speakers = Some(n),
                 _ => return usage(),
+            },
+            "--provider" | "-p" => match iter.next().and_then(|id| crate::provider::from_id(id)) {
+                Some(provider) => crate::provider::set_override(provider),
+                None => return usage(),
             },
             _ => files.push(PathBuf::from(arg)),
         }
@@ -1595,7 +1601,7 @@ fn usage() -> glib::ExitCode {
         "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name]"
     );
     eprintln!(
-        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name]"
+        "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name] [--provider local|elevenlabs|google|openrouter]"
     );
     glib::ExitCode::from(2)
 }

@@ -252,8 +252,13 @@ fn en(key: &str) -> &'static str {
             "prefs.provider_google_note",
             "Sends meeting audio to Google Cloud when transcribing"
         ),
+        (
+            "prefs.provider_openrouter_note",
+            "Sends meeting audio to the chosen OpenRouter model when transcribing"
+        ),
         ("prefs.eleven_key", "ElevenLabs API key"),
         ("prefs.google_key", "Google API key"),
+        ("prefs.openrouter_key", "OpenRouter API key"),
         (
             "prefs.key_hint_eleven",
             "Dashboard › profile › API Keys (elevenlabs.io/app/settings/api-keys)"
@@ -261,6 +266,10 @@ fn en(key: &str) -> &'static str {
         (
             "prefs.key_hint_google",
             "Console › project › Speech-to-Text API › Credentials, restricted to the API"
+        ),
+        (
+            "prefs.key_hint_openrouter",
+            "OpenRouter dashboard › Keys (openrouter.ai/settings/keys)"
         ),
         ("prefs.key_saved", "Saved in the Keychain"),
         ("prefs.key_saved_toast", "API key saved"),
@@ -421,6 +430,7 @@ fn en(key: &str) -> &'static str {
         ("provider.name_local", "On this Mac (whisper)"),
         ("provider.name_eleven", "ElevenLabs"),
         ("provider.name_google", "Google Cloud Speech-to-Text"),
+        ("provider.name_openrouter", "OpenRouter"),
         ("misc.keep", "Keep"),
         ("misc.undo", "Undo"),
         (
@@ -600,6 +610,17 @@ fn id(key: &str) -> Option<&'static str> {
         ("done.chapters_added", "{} bab ditambahkan"),
         ("done.chapters_none", "Belum ada bab"),
         ("done.chapters_writing", "Menulis bab dengan {}…"),
+        ("done.speakers", "Pembicara"),
+        ("done.rename_meeting", "Nama rapat"),
+        ("done.your_name", "Namamu"),
+        (
+            "done.recovery_title",
+            "Rekaman yang belum selesai ditemukan"
+        ),
+        (
+            "done.recovery_body",
+            "Rekaman dari {} ({}) tidak dihentikan dengan benar, mungkin karena aplikasi keluar. Simpan sebagai rapat?"
+        ),
         ("done.recovery_discard", "Buang"),
         ("done.recovery_later", "Nanti"),
         ("done.recovery_save", "Simpan"),
@@ -705,11 +726,24 @@ fn id(key: &str) -> Option<&'static str> {
             "prefs.provider_google_note",
             "Mengirim audio rapat ke Google Cloud saat transkripsi"
         ),
+        (
+            "prefs.provider_openrouter_note",
+            "Mengirim audio rapat ke model OpenRouter pilihan saat transkripsi"
+        ),
         ("prefs.eleven_key", "Kunci API ElevenLabs"),
         ("prefs.google_key", "Kunci API Google"),
+        ("prefs.openrouter_key", "Kunci API OpenRouter"),
         (
             "prefs.key_hint_eleven",
             "Dasbor › profil › API Keys (elevenlabs.io/app/settings/api-keys)"
+        ),
+        (
+            "prefs.key_hint_google",
+            "Konsol › proyek › Speech-to-Text API › Credentials, dibatasi untuk API itu"
+        ),
+        (
+            "prefs.key_hint_openrouter",
+            "Dasbor OpenRouter › Keys (openrouter.ai/settings/keys)"
         ),
         ("prefs.key_saved", "Tersimpan di Keychain"),
         ("prefs.key_saved_toast", "Kunci API tersimpan"),
@@ -952,6 +986,7 @@ fn id(key: &str) -> Option<&'static str> {
         ("provider.name_local", "Di Mac ini (whisper)"),
         ("provider.name_eleven", "ElevenLabs"),
         ("provider.name_google", "Google Cloud Speech-to-Text"),
+        ("provider.name_openrouter", "OpenRouter"),
     ];
     lookup(key)
 }
@@ -1076,10 +1111,13 @@ mod tests {
         "prefs.provider_local_note",
         "prefs.provider_eleven_note",
         "prefs.provider_google_note",
+        "prefs.provider_openrouter_note",
         "prefs.eleven_key",
         "prefs.google_key",
+        "prefs.openrouter_key",
         "prefs.key_hint_eleven",
         "prefs.key_hint_google",
+        "prefs.key_hint_openrouter",
         "prefs.key_saved",
         "prefs.key_saved_toast",
         "prefs.chapters",
@@ -1166,6 +1204,7 @@ mod tests {
         "provider.name_local",
         "provider.name_eleven",
         "provider.name_google",
+        "provider.name_openrouter",
         "prefs.mic",
         "prefs.mic_inputs",
         "prefs.mic_none",
@@ -1232,12 +1271,14 @@ mod tests {
     fn both_tables_cover_every_key() {
         let mut missing = Vec::new();
         for key in KEYS {
-            // Neither the key itself nor the missing-string marker: a real text.
-            for lang in [Lang::English, Lang::Indonesian] {
-                let text = t_in(lang, key);
-                if text == *key || text == "missing string" {
-                    missing.push((lang == Lang::English, key));
-                }
+            // English needs a real text, not the key or the missing marker.
+            let en_text = t_in(Lang::English, key);
+            if en_text == *key || en_text == "missing string" {
+                missing.push(("en", key));
+            }
+            // Indonesian needs its own entry, not a silent fall back to English.
+            if id(key).is_none() {
+                missing.push(("id", key));
             }
         }
         assert!(missing.is_empty(), "untranslated keys: {missing:?}");

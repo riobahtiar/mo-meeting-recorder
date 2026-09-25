@@ -3,17 +3,21 @@
 ## Goal
 
 `transcribe-file`, imports and meetings can run through ElevenLabs
-speech-to-text or Google Cloud Speech-to-Text instead of the local whisper
-model, picked in Preferences with the credentials entered there, and the
-whole UI reads in English or Indonesian, switched in Preferences. Local
-whisper stays the default: without an explicit choice no audio leaves the
-Mac.
+speech-to-text, Google Cloud Speech-to-Text, or any speech-to-text model on
+OpenRouter instead of the local whisper model, picked in Preferences (or
+`transcribe-file --provider` for one run) with the credentials entered
+there, and the whole UI reads in English or Indonesian, switched in
+Preferences. Local whisper stays the default: without an explicit choice no
+audio leaves the Mac. The OpenRouter model is `openrouter_model` in
+config.toml (`openai/whisper-1` unless set to another transcription-capable
+slug); OpenRouter returns no speaker tags, so its words transcribe without
+speaker attribution.
 
 ## Done when
 
 - [x] Preferences has a Transcription provider row (Local, ElevenLabs,
-      Google), key fields with where-to-get instructions, and a privacy line
-      per provider.
+      Google, OpenRouter), key fields with where-to-get instructions, and a
+      privacy line per provider.
 - [~] `transcribe-file` and a two-track meeting transcribe end to end through
       each provider, with You/Remote and Speaker N attribution intact.
 - [~] `momr` in Indonesian: every user-visible string through the locales
@@ -22,10 +26,12 @@ Mac.
 - [x] `cargo test` covers request building, response parsing, chunk math and
       locale completeness (every key in both languages).
 
-Implemented 2026-09-25: `provider.rs` (Keychain keys, chunked ElevenLabs and
-Google passes with word-level segments, speaker numbering like the local
-path), routing in `transcribe()`/`transcribe_single()`, Preferences picker +
-password rows + per-provider privacy, `locales.rs` (English + Indonesian,
+Implemented 2026-09-25: `provider.rs` (Keychain keys, chunked ElevenLabs,
+Google and OpenRouter passes with word-level segments, speaker numbering
+like the local path where the provider returns tags), routing in
+`transcribe()`/`transcribe_single()`, `transcribe-file --provider` flag for
+one run without touching config, Preferences picker + password rows +
+per-provider privacy, `locales.rs` (English + Indonesian,
 completeness-tested) with the whole UI converted including menus, dialogs,
 toasts, stages, agent messages, CLI help and the menu-bar item. Omnilingual
 stays out (Python fairseq2 stack, no shippable runtime). Live provider runs

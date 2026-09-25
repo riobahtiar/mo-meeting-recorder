@@ -1,38 +1,65 @@
-//! Optional cloud transcription providers: ElevenLabs speech-to-text and
-//! Google Cloud Speech-to-Text. Local whisper stays the default; a provider
-//! only runs on explicit opt-in in Preferences, and only the audio leaves the
-//! Mac (never the whole meeting folder). API keys live in the macOS Keychain,
-//! never in config files; the config only names the provider.
+//! Optional cloud transcription providers: ElevenLabs speech-to-text, Google
+//! Cloud Speech-to-Text, and any speech-to-text model on OpenRouter. Local
+//! whisper stays the default; a provider only runs on explicit opt-in in
+//! Preferences (or `--provider` on the command line), and only the audio
+//! leaves the Mac (never the whole meeting folder). API keys live in the
+//! macOS Keychain, never in config files; the config only names the provider.
+//! The OpenRouter model is `openrouter_model` in config.toml, Whisper-1
+//! unless set to another transcription-capable slug.
 //!
-//! Both providers take audio files and return words with times, so they slot
-//! into `transcribe.rs` where whisper regions become segments: chunked audio
-//! in (ffmpeg, offsets kept), word lists out, mapped back to absolute times.
+//! Every provider takes audio files and returns words with times, so they
+//! slot into `transcribe.rs` where whisper regions become segments: chunked
+//! audio in (ffmpeg, offsets kept), word lists out, mapped to absolute times.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const ELEVEN_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 pub const GOOGLE_URL: &str = "https://speech.googleapis.com/v1/speech:recognize";
+pub const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 /// ElevenLabs takes long files; ten minutes keeps one request small.
 pub const ELEVEN_CHUNK_MS: u64 = 10 * 60 * 1000;
 /// Google's synchronous call caps audio at 60 seconds.
 pub const GOOGLE_CHUNK_MS: u64 = 55 * 1000;
+/// OpenRouter times out after about a minute upstream.
+pub const OPENROUTER_CHUNK_MS: u64 = 55 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provider {
     Local,
     ElevenLabs,
     Google,
+    OpenRouter,
 }
 
-/// The configured provider: `elevenlabs` or `google` in config.toml, local
-/// whisper otherwise.
-pub fn selected() -> Provider {
-    match crate::models::config_value("provider").as_deref() {
-        Some("elevenlabs") => Provider::ElevenLabs,
-        Some("google") => Provider::Google,
-        _ => Provider::Local,
+static OVERRIDE: std::sync::Mutex<Option<Provider>> = std::sync::Mutex::new(None);
+
+/// The `transcribe-file --provider` flag for one run, without touching config.
+pub fn set_override(provider: Provider) {
+    *OVERRIDE.lock().unwrap() = Some(provider);
+}
+
+/// Parses the config/flag ids: `local`, `elevenlabs`, `google`, `openrouter`.
+pub fn from_id(id: &str) -> Option<Provider> {
+    match id.trim() {
+        "local" => Some(Provider::Local),
+        "elevenlabs" => Some(Provider::ElevenLabs),
+        "google" => Some(Provider::Google),
+        "openrouter" => Some(Provider::OpenRouter),
+        _ => None,
     }
+}
+
+/// The configured provider: `elevenlabs`, `google` or `openrouter` in
+/// config.toml, local whisper otherwise.
+pub fn selected() -> Provider {
+    if let Some(provider) = OVERRIDE.lock().unwrap().to_owned() {
+        return provider;
+    }
+    crate::models::config_value("provider")
+        .as_deref()
+        .and_then(from_id)
+        .unwrap_or(Provider::Local)
 }
 
 pub fn label(provider: Provider) -> &'static str {
@@ -40,6 +67,7 @@ pub fn label(provider: Provider) -> &'static str {
         Provider::Local => crate::locales::t("provider.name_local"),
         Provider::ElevenLabs => crate::locales::t("provider.name_eleven"),
         Provider::Google => crate::locales::t("provider.name_google"),
+        Provider::OpenRouter => crate::locales::t("provider.name_openrouter"),
     }
 }
 
@@ -48,6 +76,7 @@ pub fn chunk_ms(provider: Provider) -> u64 {
         Provider::Local => u64::MAX,
         Provider::ElevenLabs => ELEVEN_CHUNK_MS,
         Provider::Google => GOOGLE_CHUNK_MS,
+        Provider::OpenRouter => OPENROUTER_CHUNK_MS,
     }
 }
 
@@ -56,6 +85,7 @@ fn service(provider: Provider) -> &'static str {
         Provider::Local => "momr-local",
         Provider::ElevenLabs => "momr-elevenlabs",
         Provider::Google => "momr-google",
+        Provider::OpenRouter => "momr-openrouter",
     }
 }
 
@@ -192,6 +222,7 @@ fn check_status(provider: &str, status: u16, body: &str) -> Result<serde_json::V
         200..=299 => serde_json::from_str(body)
             .map_err(|e| format!("{provider} returned text that is not JSON: {e}")),
         401 | 403 => Err(format!("{provider} rejected the API key: {detail}")),
+        402 => Err(format!("{provider} is out of credits: {detail}")),
         429 => Err(format!("{provider} is out of quota: {detail}")),
         _ => Err(format!("{provider} failed: {detail}")),
     }
@@ -329,8 +360,98 @@ pub fn transcribe_google(
         None,
     ))
 }
+/// The transcription model on OpenRouter, `openrouter_model` in config.toml.
+/// Whisper-1 is the cheap default; any transcription-capable slug works
+/// (whisper-large-v3, gpt-4o-transcribe, chirp-3, …).
+pub fn openrouter_model() -> String {
+    crate::models::config_value("openrouter_model")
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "openai/whisper-1".to_owned())
+}
 
-/// Downmixes any WAV to 16 kHz mono s16le bytes for Google's LINEAR16 input.
+/// The request body for one OpenRouter chunk: base64 WAV plus word
+/// timestamps. Pure, so tests cover it without the network.
+pub fn openrouter_body(audio: &[u8], language: &str, model: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "input_audio": {"data": base64_encode(audio), "format": "wav"},
+        "response_format": "verbose_json",
+        "timestamp_granularities": ["word"],
+    });
+    if language != "auto" {
+        body["language"] = language.into();
+    }
+    body
+}
+
+/// One OpenRouter chunk: WAV in, words out. No diarization: every word comes
+/// back without a speaker, so multi-voice audio lands on one speaker label.
+pub fn transcribe_openrouter(
+    key: &str,
+    wav: &Path,
+    language: &str,
+) -> Result<(Vec<Word>, Option<String>), String> {
+    let audio = std::fs::read(wav).map_err(|e| format!("{}: {e}", wav.display()))?;
+    let mut response = agent()
+        .post(OPENROUTER_URL)
+        .header("Authorization", format!("Bearer {key}"))
+        .send_json(openrouter_body(&audio, language, &openrouter_model()))
+        .map_err(|e| format!("OpenRouter request failed: {e}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("OpenRouter reply unreadable: {e}"))?;
+    let value = check_status("OpenRouter", status, &body)?;
+    let detected = value["language"].as_str().map(str::to_owned);
+    Ok((parse_openrouter_words(&value)?, detected))
+}
+
+/// verbose_json `segments[].words[]` (`word`, `start`/`end` seconds) to
+/// `Word`s; falls back to whole segments, then to plain `text` with no times.
+pub fn parse_openrouter_words(value: &serde_json::Value) -> Result<Vec<Word>, String> {
+    let mut out = Vec::new();
+    for segment in value["segments"].as_array().cloned().unwrap_or_default() {
+        let seg_start = segment["start"].as_f64().unwrap_or(0.0).max(0.0);
+        let seg_end = segment["end"].as_f64().unwrap_or(seg_start).max(seg_start);
+        let words = segment["words"].as_array().cloned().unwrap_or_default();
+        if words.is_empty() {
+            if let Some(text) = segment["text"].as_str().filter(|t| !t.trim().is_empty()) {
+                out.push(Word {
+                    text: text.trim().to_owned(),
+                    start_ms: (seg_start * 1000.0).round() as u64,
+                    end_ms: (seg_end * 1000.0).round() as u64,
+                    speaker: None,
+                });
+            }
+            continue;
+        }
+        for w in &words {
+            let (Some(text), Some(start), Some(end)) =
+                (w["word"].as_str(), w["start"].as_f64(), w["end"].as_f64())
+            else {
+                continue;
+            };
+            out.push(Word {
+                text: text.to_owned(),
+                start_ms: (start.max(0.0) * 1000.0).round() as u64,
+                end_ms: (end.max(0.0) * 1000.0).round() as u64,
+                speaker: None,
+            });
+        }
+    }
+    if out.is_empty()
+        && let Some(text) = value["text"].as_str().filter(|t| !t.trim().is_empty())
+    {
+        out.push(Word {
+            text: text.trim().to_owned(),
+            start_ms: 0,
+            end_ms: 0,
+            speaker: None,
+        });
+    }
+    Ok(out)
+}
 fn wav_to_mono16k_raw(wav: &Path) -> Result<Vec<u8>, String> {
     let out = wav.with_extension("g16.s16");
     let status = Command::new("ffmpeg")
@@ -561,6 +682,15 @@ mod tests {
                 .unwrap_err()
                 .contains("HTTP 500")
         );
+        assert!(
+            check_status(
+                "OpenRouter",
+                402,
+                r#"{"error":{"message":"insufficient credits"}}"#
+            )
+            .unwrap_err()
+            .contains("out of credits")
+        );
     }
 
     #[test]
@@ -644,5 +774,57 @@ mod tests {
             .collect();
         assert_eq!(samples, vec![0, 16384, -16384, 32767, -32767]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn openrouter_body_carries_audio_and_model() {
+        let body = openrouter_body(&[1, 2, 3], "en", "openai/whisper-1");
+        assert_eq!(body["model"], "openai/whisper-1");
+        assert_eq!(body["input_audio"]["format"], "wav");
+        assert_eq!(body["language"], "en");
+        assert!(!body["input_audio"]["data"].as_str().unwrap().is_empty());
+        let auto = openrouter_body(&[1], "auto", "openai/whisper-1");
+        assert!(auto.get("language").is_none());
+    }
+
+    #[test]
+    fn openrouter_parses_words_then_segments_then_text() {
+        let value = serde_json::json!({
+            "text": "halo dunia",
+            "language": "id",
+            "segments": [
+                {"text": "halo", "start": 0.1, "end": 0.3,
+                 "words": [{"word": "halo", "start": 0.1, "end": 0.3}]},
+                {"text": "dunia", "start": 0.4, "end": 0.8, "words": []},
+            ],
+        });
+        let words = parse_openrouter_words(&value).unwrap();
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "halo");
+        assert_eq!(words[0].start_ms, 100);
+        assert_eq!(words[1].text, "dunia");
+        assert_eq!(words[1].end_ms, 800);
+        assert!(words.iter().all(|w| w.speaker.is_none()));
+        let bare = parse_openrouter_words(&serde_json::json!({"text": "hi"})).unwrap();
+        assert_eq!(bare.len(), 1);
+        assert!(
+            parse_openrouter_words(&serde_json::json!({}))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ids_round_trip() {
+        assert_eq!(from_id("local"), Some(Provider::Local));
+        assert_eq!(from_id(" elevenlabs "), Some(Provider::ElevenLabs));
+        assert_eq!(from_id("google"), Some(Provider::Google));
+        assert_eq!(from_id("openrouter"), Some(Provider::OpenRouter));
+        assert_eq!(from_id("whisper"), None);
+        assert_eq!(from_id(""), None);
+        // The flag wins for one run, without touching config.
+        set_override(Provider::OpenRouter);
+        assert_eq!(selected(), Provider::OpenRouter);
+        *OVERRIDE.lock().unwrap() = None;
     }
 }

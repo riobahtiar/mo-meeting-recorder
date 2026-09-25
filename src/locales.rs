@@ -454,6 +454,14 @@ fn en(key: &str) -> &'static str {
             "stop          stop the running recording (for a keybinding)"
         ),
         (
+            "cli.compact",
+            "compact       switch the recording window between full and compact"
+        ),
+        (
+            "cli.pause",
+            "pause         pause or resume the running recording"
+        ),
+        (
             "cli.watch",
             "watch         stream the recorder state as NDJSON, for a menu bar item or any other client"
         ),
@@ -828,6 +836,14 @@ fn id(key: &str) -> Option<&'static str> {
         (
             "cli.stop",
             "stop          hentikan perekaman yang berjalan (untuk pintasan)"
+        ),
+        (
+            "cli.compact",
+            "compact       alihkan jendela perekaman antara penuh dan ringkas"
+        ),
+        (
+            "cli.pause",
+            "pause         jeda atau lanjutkan rekaman yang berjalan"
         ),
         (
             "cli.watch",
@@ -1241,6 +1257,8 @@ mod tests {
         "cli.meeting",
         "cli.start",
         "cli.stop",
+        "cli.compact",
+        "cli.pause",
         "cli.watch",
         "cli.transcribe",
         "cli.ask",

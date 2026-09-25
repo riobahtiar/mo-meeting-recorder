@@ -56,6 +56,8 @@ fn main() -> glib::ExitCode {
             println!("  {}", crate::locales::t("cli.meeting"));
             println!("  {}", crate::locales::t("cli.start"));
             println!("  {}", crate::locales::t("cli.stop"));
+            println!("  {}", crate::locales::t("cli.compact"));
+            println!("  {}", crate::locales::t("cli.pause"));
             println!("  {}", crate::locales::t("cli.watch"));
             println!("  {}", crate::locales::t("cli.transcribe"));
             println!("  {}", crate::locales::t("cli.ask"));

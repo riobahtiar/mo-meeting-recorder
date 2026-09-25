@@ -1114,6 +1114,7 @@ impl Recorder {
             let language = param.and_then(|p| p.get::<String>()).unwrap_or_default();
             r.transcribe_again(&language);
         });
+        self.window.add_action(&again);
         // Single-purpose buttons trigger the same actions as the menu.
         self.pause_button.set_action_name(Some("win.pause"));
         self.import_button.set_action_name(Some("win.import"));

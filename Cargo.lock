@@ -1074,7 +1074,6 @@ dependencies = [
  "async-channel",
  "gtk4",
  "libadwaita",
- "libc",
  "momr-core",
  "momr-platform",
  "serde_json",

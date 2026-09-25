@@ -15,7 +15,6 @@ momr-platform = { path = "crates/momr-platform" }
 adw = { version = "0.9.2", package = "libadwaita", features = ["v1_6"] }
 async-channel = "2.5.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_12"] }
-libc = "0.2.189"
 serde_json = "1.0.151"
 
 [features]

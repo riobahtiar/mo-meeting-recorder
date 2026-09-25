@@ -385,11 +385,16 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
             momr_platform::fs::secure_dir(&grok_home.join("bin")).map_err(|e| e.to_string())?;
             // Symlinks rather than copies: these are credentials the agent
             // rewrites when it refreshes a token.
+            // A missed one only costs the agent that file, so these are best
+            // effort.
             for name in ["auth.json", "config.toml"] {
-                momr_platform::fs::link_if_regular(&source.join(name), &grok_home.join(name));
+                let _ =
+                    momr_platform::fs::link_if_regular(&source.join(name), &grok_home.join(name));
             }
-            // `native` is canonicalized above, so a regular file: the link lands.
-            momr_platform::fs::link_if_regular(&native, &grok_home.join("bin/grok"));
+            // The binary is not optional: without it the trampoline would
+            // bootstrap into the ulimit and fail with a confusing size error.
+            momr_platform::fs::link(&native, &grok_home.join("bin/grok"))
+                .map_err(|e| e.to_string())?;
             built.env.push(("GROK_HOME", grok_home.into()));
             // The updater downloads 166 MB, which the ulimit would refuse.
             built.env.push(("GROK_DISABLE_AUTOUPDATER", "1".into()));
@@ -541,12 +546,18 @@ fn run_built(
         }
     };
     let Some(status) = status else {
-        momr_platform::process::kill_group(child.id(), momr_platform::process::Signal::Term);
-        let deadline = Instant::now() + KILL_GRACE;
-        while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
-            std::thread::sleep(Duration::from_millis(100));
+        use momr_platform::process::{Signal, already_gone, kill_group};
+        for (signal, wait) in [(Signal::Term, KILL_GRACE), (Signal::Kill, Duration::ZERO)] {
+            if let Err(e) = kill_group(child.id(), signal)
+                && !already_gone(&e)
+            {
+                eprintln!("{}: stop {}: {e}", momr_platform::APP_NAME, agent.name);
+            }
+            let deadline = Instant::now() + wait;
+            while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-        momr_platform::process::kill_group(child.id(), momr_platform::process::Signal::Kill);
         let _ = child.wait();
         return Err(crate::locales::tf(
             "agent.no_answer",
@@ -722,7 +733,7 @@ fn workdir() -> std::io::Result<PathBuf> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let dir = base.join(format!("momr-agent-{}-{nanos}", std::process::id()));
-    momr_platform::fs::secure_dir(&dir)?;
+    momr_platform::fs::new_private_dir(&dir)?;
     Ok(dir)
 }
 

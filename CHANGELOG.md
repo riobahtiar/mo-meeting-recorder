@@ -13,7 +13,9 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Settings › Audio: choose the microphone and record all apps or only chosen ones (plan 15; `momr-audio mic --device`, `system --bundle`).
 - Plans folder: `plans/archives/` with an index for finished plans; plan 16 on Windows and Linux versions.
 
+- `momr finish <staging>`: saves a stopped recording (audio, tracks, manifest, transcript) with the saved settings; the AppKit shell's Stop runs it (plan 12).
 ### Changed
+- AppKit shell writes the `recording.json` staging note, so the GTK shell's recovery finishes its crashed recordings (plan 12).
 - Compact strip reworked: the header bar stays (clock as the title, Pause, Stop, Expand), one two-lane wave under it (plan 14).
 - Transcribing scene: the title is measured and fitted to the window, in Menlo (plan 14).
 - API key rows are expanders with the status and the where-to-get-it hint in full (plan 14).
@@ -26,6 +28,8 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Native AppKit shell started: ready window with live meters from `momr-audio`, app menu and About (plan 12).
 - AppKit recording: staging in the shared layout, pause with clock, stop exports the meeting folder and transcribes (plan 12).
 ### Retired
+- The unused `libc` dependency of the GTK shell (plan 12).
+- `open_no_follow`'s Linux flag values, wrong on aarch64; other targets refuse to build until plan 16 (plan 16).
 - The wildcard focus ring in `macos.css` that outlined every container (plan 14).
 - Per-page window resizing (480×700 ready, 1100×760 done) (plan 14).
 - The strip's custom drag handle and its "Drag to move" hint (plan 14).
@@ -37,6 +41,16 @@ One line per feature added or retired, newest first. Details live in the plan th
 - AppKit capture: a helper that exits is reported with its reason and restarted, no longer spinning a core; Start is refused when nothing captures (plan 12).
 - The socket keeps accepting after a failed accept, so `momr stop`, `watch` and the menu bar item stay connected (plan 12).
 - Plain `cargo test` and `cargo clippy` cover the whole workspace again (`default-members`) (plan 12).
+- AppKit meetings match GTK ones: Settings' meetings folder and format, mono `.tracks`, your name, a proper transcript heading (plan 12).
+- Two recordings in the same minute with the same title get their own folders (`… 2`) in both shells (plan 12).
+- AppKit shell: failed writes, failed resumes and the transcriber's reason are shown; the meeting folder is offered even when the transcript failed (plan 12).
+- AppKit shell: capture state lives on one queue (no data race on pause and stop); `momr` is found at Start, through the login shell's PATH as a Finder launch needs (plan 12).
+- AppKit shell: ⌘Q or closing the window while recording asks, and can stop, save and quit (plan 12).
+- The guarded-playback test runs again from the workspace (it skipped silently) (plan 12).
+- Timer: times near a DST change resolve instead of silently turning the timer off; a skipped time says so (plan 15).
+- Stopping playback, captures and agents calls kill(2) directly and reports failures; grok's binary link error is reported again (plan 12).
+- Agent workdirs are created fresh (never reused) with 0700 on every level (plan 12).
+- The dialog corner radius rule in `macos.css` is back (plan 14).
 - Settings dialog: wider (820), the stock × in the header hidden (traffic lights already close it), tighter page-switcher padding, so Indonesian tab titles fit (plan 14 follow-up).
 - Swift helper builds on the macOS 27 SDK: the per-app tap passes process object ids straight to `stereoMixdownOfProcesses` (plan 15).
 - Clippy clean again: the Audio settings process list sorts by key (plan 15).

@@ -40,49 +40,72 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
 
 #[cfg(unix)]
 fn libc_sets_id() {
-    // libc by hand: this crate takes no dependency for one syscall, and the
-    // call cannot fail once the process exists.
-    unsafe extern "C" {
-        fn setsid() -> i32;
-    }
     // SAFETY: setsid always succeeds in a child that has forked.
     unsafe {
-        setsid();
+        sys::setsid();
     }
+}
+
+/// libc by hand: this crate takes no dependency for two syscalls. Called
+/// directly rather than through `/bin/kill`, which would fork a process per
+/// stop (every seek) and resolve `kill` through a PATH that puts user bins
+/// first.
+#[cfg(unix)]
+mod sys {
+    unsafe extern "C" {
+        pub fn setsid() -> i32;
+        pub fn kill(pid: i32, signal: i32) -> i32;
+    }
+    /// The same numbers on every Unix the app targets.
+    pub const SIGTERM: i32 = 15;
+    pub const SIGKILL: i32 = 9;
+}
+
+/// Sends `signal` to `pid` (a negative pid is a process group).
+#[cfg(unix)]
+fn send(pid: i64, signal: Signal) -> io::Result<()> {
+    let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let signal = match signal {
+        Signal::Term => sys::SIGTERM,
+        Signal::Kill => sys::SIGKILL,
+    };
+    // SAFETY: kill(2) takes plain integers and touches no memory of ours.
+    if unsafe { sys::kill(pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Whether `error` only says the process is gone already, which is what a
+/// stop wanted anyway: callers ignore that one and report the rest.
+pub fn already_gone(error: &io::Error) -> bool {
+    // ESRCH on every Unix; Windows' taskkill reports no such code.
+    error.raw_os_error() == Some(3)
 }
 
 /// Stops one process by pid, gracefully: SIGTERM on Unix. Unlike
 /// `kill_group` this addresses the single pid, for children that share our
 /// own process group (capture restarts); group-killing those would signal
 /// the whole group, us included.
-pub fn terminate(pid: u32) {
+pub fn terminate(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status();
+        send(i64::from(pid), Signal::Term)
     }
     #[cfg(not(unix))]
     {
-        kill_group(pid, Signal::Term);
+        kill_group(pid, Signal::Term)
     }
 }
 
 /// Stops a process tree by pid: the whole group on Unix (the pid is a pgid
 /// through `spawn_detached`), the one process on Windows until Job Objects
 /// land with the Windows shell.
-pub fn kill_group(pid: u32, signal: Signal) {
+pub fn kill_group(pid: u32, signal: Signal) -> io::Result<()> {
     #[cfg(unix)]
     {
-        let flag = match signal {
-            Signal::Term => "-TERM",
-            Signal::Kill => "-KILL",
-        };
-        let _ = Command::new("kill")
-            .args([flag, "--", &format!("-{pid}")])
-            .stderr(std::process::Stdio::null())
-            .status();
+        send(-i64::from(pid), signal)
     }
     #[cfg(not(unix))]
     {
@@ -90,6 +113,11 @@ pub fn kill_group(pid: u32, signal: Signal) {
         if signal == Signal::Kill {
             args.push("/F".to_owned());
         }
-        let _ = Command::new("taskkill").args(&args).status();
+        let status = Command::new("taskkill").args(&args).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("taskkill exited with {status}")))
+        }
     }
 }

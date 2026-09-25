@@ -13,6 +13,7 @@ pub mod chapters;
 pub mod cleanup;
 pub mod diarize;
 pub mod export;
+pub mod finish;
 pub mod helper;
 pub mod ipc;
 pub mod locales;

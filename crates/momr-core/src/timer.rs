@@ -6,7 +6,7 @@
 //! plan itself only holds Unix seconds and `ui.rs` checks it from its
 //! half-second tick. The plan lives for one session; stopping clears it.
 
-use chrono::{Days, Local, NaiveTime, TimeZone};
+use chrono::{Days, Local, NaiveDate, NaiveTime, TimeZone};
 
 use crate::locales::{t, tf};
 
@@ -84,26 +84,23 @@ pub fn clock_time(at: i64) -> String {
     when.format(format).to_string()
 }
 
-/// The next time the local clock reads `hour:minute`, as Unix seconds: later
-/// today when that is still ahead of `now`, else the same time tomorrow.
-/// Times that do not exist (a DST gap) or cannot exist yield None.
-pub fn next_occurrence(hour: i32, minute: i32, now: i64) -> Option<i64> {
-    let now = Local.timestamp_opt(now, 0).single()?;
-    let time = NaiveTime::from_hms_opt(hour as u32, minute as u32, 0)?;
-    let candidate = now
-        .date_naive()
-        .and_time(time)
-        .and_local_timezone(Local)
-        .single()?;
-    let day_later = candidate.checked_add_days(Days::new(1))?;
-    Some(
-        if candidate > now {
-            candidate
-        } else {
-            day_later
-        }
-        .timestamp(),
-    )
+/// The next time the local clock reads `hour:minute` after `now`, as Unix
+/// seconds: later today when that is still ahead, else tomorrow. A time the
+/// clock reads twice (the hour repeated when DST ends) is its first
+/// reading; a time the clock skips today falls through to tomorrow. None
+/// only when tomorrow skips it too or the time cannot exist (25:00), which
+/// the caller tells the user rather than setting a timer that never fires.
+pub fn next_occurrence(hour: u32, minute: u32, now: i64) -> Option<i64> {
+    let now = Local.timestamp_opt(now, 0).earliest()?;
+    let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+    let on = |day: NaiveDate| day.and_time(time).and_local_timezone(Local).earliest();
+    let today = now.date_naive();
+    // Tomorrow is only asked for when today will not do, so a DST change
+    // tomorrow cannot void a time that is fine today.
+    if let Some(candidate) = on(today).filter(|candidate| *candidate > now) {
+        return Some(candidate.timestamp());
+    }
+    on(today.checked_add_days(Days::new(1))?).map(|candidate| candidate.timestamp())
 }
 
 /// The "mm:ss" or "h:mm:ss" countdown for the status line.

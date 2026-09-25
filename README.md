@@ -18,7 +18,7 @@
 | Live recording status in the menu bar | [09](plans/09-menu-bar-item.md) | in progress — SwiftBar script renders, native item builds with tested protocol, app spawns/kills it; on-screen check needs a display session |
 | Tests and CI on macOS | [10](plans/10-testing-and-ci.md) | in progress — unit tests, the end-to-end `say` fixture, the meeting-folder fixture and the Swift tests are in place; CI workflows are written but disabled for now (commit ae48747); the smoke checklist needs a display session |
 | Identity: bundle id, UTI, folder names, brand sweep | [11](plans/11-identity.md) | in progress — `io.github.riobahtiar.MOMRecorder`, its UTI and the `momr` folders confirmed (D13), comment sweep and demo kit done; macOS screenshots and the release version bump remain |
-| Native AppKit shell on the Rust core; GTK retires at parity | [12](plans/12-native-shell-option.md) | entered 2026-09-25 (D24) — workspace split first, then ready page |
+| Native AppKit shell on the Rust core; GTK retires at parity | [12](plans/12-native-shell-option.md) | in progress — workspace split done; AppKit shell records and saves through `momr finish`; meters on screen and a live record need a display session |
 | Cloud transcription and Indonesian UI | [13](plans/13-transcription-providers.md) | in progress — ElevenLabs, Google and OpenRouter routed with Keychain keys, EN/ID locales; live cloud runs need user keys, UI walk needs a display session |
 | UI polish after the first display session | [14](plans/14-ui-polish.md) | in progress — focus rings, remembered window size, appearance switch, Settings pages and gear button, compact strip and animation fit coded; the on-screen check is next |
 | Storage reset, recording timer, audio sources | [15](plans/15-reset-timer-sources.md) | in progress — cleanup and timer logic tested, Settings › Storage, Timer dialog, microphone and per-app pickers coded; helper builds with tested `--device`/`--bundle` flags, on-screen source switching needs a display session |
@@ -62,6 +62,7 @@ Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcrip
 | `momr watch` | Stream the recorder state as NDJSON |
 | `momr transcribe <mic> <computer> [--language xx] [--model name] [--provider id]` | Transcribe two tracks to Markdown |
 | `momr transcribe-file <audio> [--speakers N] [--language xx] [--model name] [--provider local\|elevenlabs\|google\|openrouter]` | Transcribe one file, telling voices apart |
+| `momr finish <staging folder> [--title T]` | Save a stopped recording from its staging folder into a meeting folder (audio, tracks, manifest, transcript); prints the folder |
 | `momr ask "<prompt>" < text` | Run a prompt through the agent, without tools |
 
 The `transcribe` commands need no window or audio device, so they are the first thing to try on a fresh build. Both take short forms too (`-l`, `-m`, `-p`, and `-s` for `transcribe-file`). `--provider` (or `-p`) picks the transcription engine for that run only, overriding the `provider` key in `config.toml` without changing it; a cloud provider still needs its API key saved in Settings.

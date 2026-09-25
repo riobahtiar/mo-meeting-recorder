@@ -812,6 +812,11 @@ strings![
         "transcribe    transkripsikan dua trek dan cetak transkrip sebagai Markdown"
     ),
     (
+        "cli.finish",
+        "finish        save a stopped recording from its staging folder: audio, manifest, transcript",
+        "finish        simpan rekaman yang dihentikan dari folder stagingnya: audio, manifest, transkrip"
+    ),
+    (
         "cli.ask",
         "ask           run a prompt over stdin through the default agent, without tools",
         "ask           jalankan prompt lewat stdin melalui agen default, tanpa perkakas"
@@ -1129,6 +1134,11 @@ strings![
         "timer.needs_length",
         "Set a length of at least one minute",
         "Atur durasi minimal satu menit"
+    ),
+    (
+        "timer.no_such_time",
+        "That time is skipped by the clock (a daylight-saving change); pick another",
+        "Waktu itu dilewati jam (pergantian waktu musim panas); pilih waktu lain"
     ),
     ("timer.starts_at", "Starts {}", "Mulai {}"),
     ("timer.stops_after", "Stops after {}", "Berhenti setelah {}"),

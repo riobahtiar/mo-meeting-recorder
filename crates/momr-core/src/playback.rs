@@ -104,7 +104,12 @@ fn stop(child: &mut Child, grace: Duration) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
     }
-    momr_platform::process::terminate(child.id());
+    if let Err(e) = momr_platform::process::terminate(child.id())
+        && !momr_platform::process::already_gone(&e)
+    {
+        // The SIGKILL below still ends the wrapper, but not what it runs.
+        eprintln!("{}: stop playback: {e}", momr_platform::APP_NAME);
+    }
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -218,10 +223,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stopping_a_guarded_child_stops_what_it_runs() {
-        // The helper as scripts/build-macos.sh or `swift build` leaves it.
+        // The helper as scripts/build-macos.sh or `swift build` leaves it,
+        // found from the workspace root: tests run with the package dir as
+        // CWD, where a relative path would never match and the test would
+        // skip without anyone noticing.
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let built = ["release", "debug"]
             .iter()
-            .map(|profile| PathBuf::from(format!("helpers/momr-audio/.build/{profile}/momr-audio")))
+            .map(|profile| root.join(format!("helpers/momr-audio/.build/{profile}/momr-audio")))
             .find(|p| p.is_file());
         let Some(helper) = crate::helper::path().or(built) else {
             eprintln!("skipped: no momr-audio helper built");

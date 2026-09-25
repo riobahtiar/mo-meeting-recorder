@@ -142,7 +142,11 @@ impl Source {
         if let Some(pid) = inner.child_pid {
             // A pid this process spawned and has not reaped; the loop reaps
             // it in `capture_from`.
-            momr_platform::process::terminate(pid);
+            if let Err(e) = momr_platform::process::terminate(pid)
+                && !momr_platform::process::already_gone(&e)
+            {
+                eprintln!("{}: capture restart: {e}", momr_platform::APP_NAME);
+            }
         }
     }
 

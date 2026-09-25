@@ -182,6 +182,115 @@ pub fn relabel_all(markdown: &str, renames: &[(String, String)]) -> String {
     text
 }
 
+/// Splits `**[01:23] You:** text` into its time, speaker and text.
+pub fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
+    let rest = line.strip_prefix("**[")?;
+    let (time, rest) = rest.split_once("] ")?;
+    let (speaker, text) = rest.split_once(":** ")?;
+    Some((time, speaker, text.trim()))
+}
+
+/// The speaker labels in transcript Markdown, in order of first appearance.
+pub fn speakers_in(markdown: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in markdown.lines() {
+        if let Some((_, speaker, _)) = parse_segment(line)
+            && !found.iter().any(|f| f == speaker)
+        {
+            found.push(speaker.to_owned());
+        }
+    }
+    found
+}
+
+/// Fits `manifest.speakers` to the voices a fresh transcript found, then
+/// writes this meeting's names over the transcription's default labels.
+/// Both shells finish a transcript through here, so a meeting's names come
+/// out the same whichever shell recorded it.
+pub fn fit_speakers(manifest: &mut Manifest, markdown: &str) -> String {
+    if manifest.imported.is_some() {
+        // An import finds its own number of speakers; keep names already
+        // given and number the rest.
+        let found = speakers_in(markdown);
+        let mut names = manifest.speakers.clone();
+        names.resize_with(found.len(), String::new);
+        for (i, name) in names.iter_mut().enumerate() {
+            if name.is_empty() {
+                *name = speaker_n(i + 1);
+            }
+        }
+        manifest.speakers = names;
+    } else {
+        // Several voices on the computer audio come out as Remote 1,
+        // Remote 2, ...: one name each, after your own.
+        let remotes = speakers_in(markdown)
+            .iter()
+            .filter_map(|s| parse_remote_n(s))
+            .max()
+            .unwrap_or(0);
+        if remotes > 1 {
+            let mut names = manifest.speakers.clone();
+            if names.len() <= 2 {
+                names.truncate(1);
+            }
+            while names.len() < remotes + 1 {
+                let n = names.len();
+                names.push(remote_n(n));
+            }
+            names.truncate(remotes + 1);
+            manifest.speakers = names;
+        } else if manifest.speakers.len() > 2 {
+            manifest.speakers.truncate(2);
+            manifest.speakers[1] = default_remote().to_owned();
+        }
+    }
+    let renames: Vec<(String, String)> = manifest
+        .default_labels()
+        .into_iter()
+        .zip(manifest.speakers.iter().cloned())
+        .filter(|(label, name)| label != name)
+        .collect();
+    relabel_all(markdown, &renames)
+}
+
+/// The local time a meeting started, as `%Y-%m-%d %H:%M` for the
+/// transcript's heading; empty for a time the clock cannot show.
+pub fn date_line(started_at: i64) -> String {
+    local_time(started_at, "%Y-%m-%d %H:%M")
+}
+
+/// `started_at` in local time with a chrono `format`, empty when the
+/// timestamp is out of range.
+fn local_time(started_at: i64, format: &str) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(started_at, 0)
+        .earliest()
+        .map(|t| t.format(format).to_string())
+        .unwrap_or_default()
+}
+
+/// The folder a meeting started at `started_at` and called `title` gets
+/// under the meetings folder: `202609241400 Weekly sync`. `from_folder`
+/// reads the same shape back.
+pub fn folder_for(started_at: i64, title: &str) -> PathBuf {
+    let stamp = local_time(started_at, "%Y%m%d%H%M");
+    crate::settings::meetings_dir().join(format!("{stamp} {}", crate::export::safe_name(title)))
+}
+
+/// `folder_for`, numbered (`… Weekly sync 2`) when that folder exists
+/// already: two meetings in the same minute with the same title must not
+/// share one folder and overwrite each other's audio.
+pub fn unused_folder_for(started_at: i64, title: &str) -> PathBuf {
+    let mut out = folder_for(started_at, title);
+    let mut n = 2;
+    while out.exists() {
+        out = folder_for(started_at, &format!("{title} {n}"));
+        n += 1;
+    }
+    out
+}
+
 fn name(value: &Value, fallback: &str) -> String {
     value
         .as_str()
@@ -267,10 +376,11 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
     let num = |range: std::ops::Range<usize>| stamp[range].parse::<i32>().ok();
     let date = chrono::NaiveDate::from_ymd_opt(num(0..4)?, num(4..6)? as u32, num(6..8)? as u32)?;
     let time = chrono::NaiveTime::from_hms_opt(num(8..10)? as u32, num(10..12)? as u32, 0)?;
+    // The hour DST repeats reads as its first pass, as glib read it.
     let started = date
         .and_time(time)
         .and_local_timezone(chrono::Local)
-        .single()?;
+        .earliest()?;
     let format = if dir.join("mic.ogg").exists() {
         Format::Separate
     } else {

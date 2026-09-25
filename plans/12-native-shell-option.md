@@ -145,3 +145,15 @@ of truncating the raw tracks, stop reads the transcript before waiting on
 `default-members` makes plain `cargo test` run all 105 tests again. The
 launch was checked by starting the binary (both `momr-audio` children
 came up); meters on screen and a live record are still to watch.
+
+Review fixes 2026-09-26 (PR 3, important): the AppKit shell no longer
+writes the meeting format by hand. Stop runs `momr finish` (core
+`finish`), the one writer of the folder, manifest, tracks and transcript,
+which also backs the GTK shell's recording note and speaker fitting. The
+AppKit shell writes `recording.json`, so the GTK recovery finishes its
+crashes; this shell has no recovery scan of its own yet (step 3.5). Capture
+state is on one queue, write and resume failures are shown, `momr` is
+found at Start through the login shell's PATH, and quitting mid-recording
+asks. `momr finish` was run end to end on an invented meeting (folder,
+mono tracks, manifest, transcript, a same-minute `… 2`, empty staging
+refused).

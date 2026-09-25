@@ -51,6 +51,9 @@ fn main() -> glib::ExitCode {
         Some("transcribe") => exit_code(momr_core::transcribe::cli(
             &std::env::args().skip(2).collect::<Vec<_>>(),
         )),
+        Some("finish") => exit_code(momr_core::finish::cli(
+            &std::env::args().skip(2).collect::<Vec<_>>(),
+        )),
         Some("ask") => exit_code(momr_core::agent::cli(
             &std::env::args().skip(2).collect::<Vec<_>>(),
         )),
@@ -69,6 +72,7 @@ fn main() -> glib::ExitCode {
             println!("  {}", momr_core::locales::t("cli.watch"));
             println!("  {}", momr_core::locales::t("cli.transcribe"));
             println!("  {}", momr_core::locales::t("cli.transcribe_file"));
+            println!("  {}", momr_core::locales::t("cli.finish"));
             println!("  {}", momr_core::locales::t("cli.diarize_help"));
             println!("  {}", momr_core::locales::t("cli.ask"));
             glib::ExitCode::SUCCESS

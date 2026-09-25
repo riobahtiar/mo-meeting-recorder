@@ -1587,6 +1587,28 @@ pub fn cli_file(args: &[String]) -> i32 {
 /// Runs a transcription for the command line: progress and live lines on
 /// stderr, the Markdown on stdout.
 fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> i32 {
+    let started = Instant::now();
+    match run_reporting(work) {
+        Ok(transcript) => {
+            let date = Local::now().format("%Y-%m-%d %H:%M").to_string();
+            print!("{}", to_markdown("Transcript", &date, &transcript));
+            let secs = format!("{:.1}", started.elapsed().as_secs_f64());
+            eprintln!("{}", crate::locales::tf("cli.done_in", &[&secs]));
+            0
+        }
+        Err(message) => {
+            eprintln!("{APP_NAME}: {message}");
+            1
+        }
+    }
+}
+
+/// Runs `work` with its stages and live lines reported on stderr, the way
+/// every command-line transcription shows progress (`transcribe`,
+/// `transcribe-file`, `finish`).
+pub fn run_reporting(
+    work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>,
+) -> Result<Transcript, String> {
     let (tx, rx) = async_channel::unbounded();
     let started = Instant::now();
     let reporter = std::thread::spawn(move || {
@@ -1615,20 +1637,7 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
     let result = work(&tx, &abort);
     emit(&tx, Event::Finished);
     let _ = reporter.join();
-
-    match result {
-        Ok(transcript) => {
-            let date = Local::now().format("%Y-%m-%d %H:%M").to_string();
-            print!("{}", to_markdown("Transcript", &date, &transcript));
-            let secs = format!("{:.1}", started.elapsed().as_secs_f64());
-            eprintln!("{}", crate::locales::tf("cli.done_in", &[&secs]));
-            0
-        }
-        Err(message) => {
-            eprintln!("{APP_NAME}: {message}");
-            1
-        }
-    }
+    result
 }
 
 fn usage() -> i32 {

@@ -1,10 +1,12 @@
 import Foundation
 
 /// Recording in the AppKit shell: both captures tee raw s16le into a staging
-/// folder shaped exactly like the GTK shell's (`<cache>/<started-at>/` with
-/// `mic.raw` and `system.raw`), so either shell recovers the other's crash.
-/// Stop encodes both tracks, writes the meeting folder and runs the core's
-/// `transcribe` CLI for the transcript.
+/// folder shaped like the GTK shell's (`<cache>/<started-at>/` with
+/// `mic.raw`, `system.raw` and the `recording.json` note), so the GTK
+/// shell's recovery finishes a recording this shell never stopped. Stop runs
+/// `momr finish`, the core's one writer of the meeting folder: audio in the
+/// format chosen in Settings, the kept tracks, the manifest and the
+/// transcript, exactly as a GTK recording gets them.
 final class Recorder {
     private let mic: SourceCapture
     private let computer: SourceCapture
@@ -15,6 +17,9 @@ final class Recorder {
     private var pausedBegan: Date?
     private var pausedTotal: TimeInterval = 0
     private(set) var paused = false
+    /// Set by `stop`: the staging folder is being finished, so pause and
+    /// resume must not reopen files in it.
+    private var stopped = false
 
     /// Seconds on the clock (pauses excluded).
     var elapsed: Int {
@@ -25,27 +30,37 @@ final class Recorder {
         pausedBegan.map { Int(Date().timeIntervalSince($0)) } ?? 0
     }
 
-    init?(mic: SourceCapture, computer: SourceCapture) {
+    /// Opens the staging folder and starts both tracks. Throws with the
+    /// reason (disk full, no permission) for the status line.
+    init(mic: SourceCapture, computer: SourceCapture, title: String) throws {
         self.mic = mic
         self.computer = computer
-        self.startedAt = Int64(Date().timeIntervalSince1970)
-        let cache: URL
+        startedAt = Int64(Date().timeIntervalSince1970)
+        staging = Self.cache().appendingPathComponent(String(startedAt))
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
+        systemFile = try Self.appending(to: staging.appendingPathComponent("system.raw"))
+        try writeNote(title: title)
+        mic.record(into: micFile)
+        computer.record(into: systemFile)
+    }
+
+    /// `momr_platform::paths::cache()`: an absolute `XDG_CACHE_HOME`, else
+    /// `~/Library/Caches`, with the app folder under it.
+    private static func cache() -> URL {
         if let xdg = ProcessInfo.processInfo.environment["XDG_CACHE_HOME"], xdg.hasPrefix("/") {
-            cache = URL(fileURLWithPath: xdg).appendingPathComponent("momr")
-        } else {
-            cache = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Caches/momr")
+            return URL(fileURLWithPath: xdg).appendingPathComponent("momr")
         }
-        staging = cache.appendingPathComponent(String(startedAt))
-        do {
-            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-            micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
-            systemFile = try Self.appending(to: staging.appendingPathComponent("system.raw"))
-        } catch {
-            return nil
-        }
-        mic.recordFile = micFile
-        computer.recordFile = systemFile
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/momr")
+    }
+
+    /// The staging note `finish::read_note` reads. Format and language are
+    /// left out: this shell has no pickers yet, so the saved settings apply.
+    private func writeNote(title: String) throws {
+        let note: [String: Any] = ["title": title, "started_at": startedAt]
+        let data = try JSONSerialization.data(withJSONObject: note)
+        try data.write(to: staging.appendingPathComponent("recording.json"))
     }
 
     /// A handle that writes after what `url` already holds: the file is
@@ -62,176 +77,90 @@ final class Recorder {
     }
 
     func pause() {
-        guard !paused else { return }
+        guard !paused, !stopped else { return }
         paused = true
         pausedBegan = Date()
-        try? micFile?.synchronize()
-        try? systemFile?.synchronize()
-        micFile?.closeFile()
-        systemFile?.closeFile()
-        micFile = nil
-        systemFile = nil
-        mic.recordFile = nil
-        computer.recordFile = nil
+        closeFiles()
     }
 
-    func resume() {
-        guard paused else { return }
+    /// Reopens both tracks. Returns why a track could not be reopened (that
+    /// side records nothing from here on), or nil when both run again.
+    func resume() -> String? {
+        guard paused, !stopped else { return nil }
         paused = false
         if let began = pausedBegan {
             pausedTotal += Date().timeIntervalSince(began)
         }
         pausedBegan = nil
-        micFile = try? Self.appending(to: staging.appendingPathComponent("mic.raw"))
-        systemFile = try? Self.appending(to: staging.appendingPathComponent("system.raw"))
-        // A missing file after pause still records the other side.
-        mic.recordFile = micFile
-        computer.recordFile = systemFile
+        var problems: [String] = []
+        do {
+            micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
+        } catch {
+            problems.append("Microphone: \(error.localizedDescription)")
+        }
+        do {
+            systemFile = try Self.appending(to: staging.appendingPathComponent("system.raw"))
+        } catch {
+            problems.append("Computer audio: \(error.localizedDescription)")
+        }
+        mic.record(into: micFile)
+        computer.record(into: systemFile)
+        return problems.isEmpty ? nil : "Could not resume recording. " + problems.joined(separator: " ")
     }
 
-    /// Duration from the longer raw track, like the GTK shell's recovery scan.
-    private func durationSecs() -> Int64 {
-        let bytesPerSec: Int64 = 48_000 * 2 * 2
-        let sizes = ["mic.raw", "system.raw"].map { name in
-            (try? FileManager.default.attributesOfItem(atPath: staging.appendingPathComponent(name).path)[.size] as? Int64) ?? 0
+    /// Ends the tee first, so no write can land on a handle being closed.
+    private func closeFiles() {
+        mic.record(into: nil)
+        computer.record(into: nil)
+        for file in [micFile, systemFile] {
+            try? file?.synchronize()
+            try? file?.close()
         }
-        return (sizes.max() ?? 0) / bytesPerSec
+        micFile = nil
+        systemFile = nil
     }
 
     // MARK: - Stop
 
-    /// Encodes, manifests, transcribes and cleans up on a background queue;
-    /// reports the meeting folder (or an error) on the main queue.
-    func stop(title: String, completion: @escaping (URL?, String?) -> Void) {
-        mic.recordFile = nil
-        computer.recordFile = nil
-        try? micFile?.synchronize()
-        try? systemFile?.synchronize()
-        micFile?.closeFile()
-        systemFile?.closeFile()
-        micFile = nil
-        systemFile = nil
+    /// What Stop produced: the meeting folder when one was written (it may
+    /// hold the audio even when the transcript failed), and why anything
+    /// failed.
+    struct Outcome {
+        var folder: URL?
+        var problem: String?
+    }
+
+    /// Finishes through `momr finish` on a background queue and reports on
+    /// the main queue.
+    func stop(title: String, completion: @escaping (Outcome) -> Void) {
+        stopped = true
+        closeFiles()
         let staging = staging
-        let startedAt = startedAt
-        let duration = durationSecs()
         DispatchQueue.global(qos: .userInitiated).async {
-            let (url, error) = Self.export(staging: staging, startedAt: startedAt, duration: duration, title: title)
-            DispatchQueue.main.async { completion(url, error) }
+            let outcome = Self.finish(staging: staging, title: title)
+            DispatchQueue.main.async { completion(outcome) }
         }
     }
 
-    private static func export(staging: URL, startedAt: Int64, duration: Int64, title: String) -> (URL?, String?) {
-        guard let ffmpeg = tool("ffmpeg") else { return (nil, "ffmpeg not found") }
-        let stamp: String = {
-            let f = DateFormatter()
-            f.dateFormat = "yyyyMMddHHmm"
-            return f.string(from: Date(timeIntervalSince1970: TimeInterval(startedAt)))
-        }()
-        let safe = title.safeTitle()
-        let meeting = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/Meetings/\(stamp) \(safe)")
-        let tracks = meeting.appendingPathComponent(".tracks")
+    private static func finish(staging: URL, title: String) -> Outcome {
+        guard let momr = Tools.url("momr") else {
+            return Outcome(folder: nil, problem: "momr not found; the recording stays in \(staging.path).")
+        }
+        let result: (status: Int32, output: Data, reason: String)
         do {
-            try FileManager.default.createDirectory(at: tracks, withIntermediateDirectories: true)
+            result = try Tools.run(momr, ["finish", staging.path, "--title", title])
         } catch {
-            return (nil, error.localizedDescription)
+            return Outcome(folder: nil, problem: "Could not run momr: \(error.localizedDescription)")
         }
-        let micRaw = staging.appendingPathComponent("mic.raw").path
-        let systemRaw = staging.appendingPathComponent("system.raw").path
-        let micOgg = tracks.appendingPathComponent("mic.ogg").path
-        let computerOgg = tracks.appendingPathComponent("computer.ogg").path
-        for (raw, ogg) in [(micRaw, micOgg), (systemRaw, computerOgg)] {
-            let p = Process()
-            p.executableURL = ffmpeg
-            p.arguments = ["-y", "-v", "error", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", raw,
-                           "-c:a", "libopus", ogg]
-            try? p.run()
-            p.waitUntilExit()
-            guard p.terminationStatus == 0 else { return (nil, "ffmpeg could not encode \(URL(fileURLWithPath: ogg).lastPathComponent)") }
+        // The folder is the first stdout line, printed as soon as it exists.
+        let folder = String(decoding: result.output, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map { URL(fileURLWithPath: String($0)) }
+        if result.status == 0 {
+            return Outcome(folder: folder, problem: nil)
         }
-        // Top-level pair, like a `separate` meeting from the GTK shell.
-        try? FileManager.default.copyItem(atPath: micOgg, toPath: meeting.appendingPathComponent("mic.ogg").path)
-        try? FileManager.default.copyItem(atPath: computerOgg, toPath: meeting.appendingPathComponent("computer.ogg").path)
-        let manifest: [String: Any?] = [
-            "app": "momr",
-            "version": 1,
-            "title": title,
-            "started_at": startedAt,
-            "duration_secs": duration,
-            "format": "separate",
-            "language": "auto",
-            "speakers": ["You", "Remote"],
-            "imported": nil,
-            "speaker_count": nil,
-            "model": nil,
-            "provider": nil,
-            "chapters": [],
-            "chapters_by": nil,
-        ]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: meeting.appendingPathComponent("\(safe).meeting-recorder"))
-        } catch {
-            return (nil, error.localizedDescription)
-        }
-        // The transcript through the core: configured provider and model, as chosen.
-        guard let momr = tool("momr") else { return (nil, "momr binary not found") }
-        let p = Process()
-        p.executableURL = momr
-        p.arguments = ["transcribe", micOgg, computerOgg, "--language", "auto"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
-        } catch {
-            return (nil, error.localizedDescription)
-        }
-        // Read before waiting: the transcript arrives on stdout, and one
-        // larger than the pipe buffer would block `momr` on its write while
-        // we block on its exit.
-        let output = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return (nil, "transcription failed") }
-        let markdown = String(data: output, encoding: .utf8) ?? ""
-        try? markdown.write(to: meeting.appendingPathComponent("transcript.md"), atomically: true, encoding: .utf8)
-        try? FileManager.default.removeItem(at: staging)
-        return (meeting, nil)
-    }
-
-    /// A sibling tool (`momr`, `ffmpeg`): next to this executable, in the
-    /// bundle's MacOS dir, or on PATH.
-    static func tool(_ name: String) -> URL? {
-        if name == "momr-audio" { return SourceCapture.helperURL() }
-        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        for candidate in [exe.appendingPathComponent(name),
-                          exe.deletingLastPathComponent().appendingPathComponent("MacOS/\(name)")] {
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "command -v \(name)"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        task.waitUntilExit()
-        guard let found = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !found.isEmpty
-        else {
-            return nil
-        }
-        return URL(fileURLWithPath: found)
-    }
-}
-
-private extension String {
-    /// Filename-safe title shared with the GTK shell's `safe_name`.
-    func safeTitle() -> String {
-        let bad: Set<Character> = ["/", "\\", ":", "*", "?", "\"", "<", ">", "|"]
-        let cleaned = String(map { bad.contains($0) ? "-" : $0 })
-        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
-        return trimmed.isEmpty ? "Meeting" : trimmed
+        let reason = result.reason.isEmpty ? "momr finish exited with \(result.status)" : result.reason
+        return Outcome(folder: folder, problem: reason)
     }
 }

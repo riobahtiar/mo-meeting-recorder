@@ -25,10 +25,11 @@ use momr_core::agent::{self, Agent};
 use momr_core::audio::{Device, HISTORY, Source, to_meter};
 use momr_core::chapters;
 use momr_core::export::{self, Format, export_audio, export_tracks};
+use momr_core::finish::{self, RecordingNote, raw_duration};
 use momr_core::ipc::{SharedStatus, Status};
 use momr_core::locales::{Lang, t, tf};
 use momr_core::meeting::Chapter;
-use momr_core::meeting::{self, Manifest};
+use momr_core::meeting::{self, Manifest, parse_segment};
 use momr_core::provider::{Cloud, Provider};
 use momr_core::settings;
 use momr_core::transcribe::{self, Abort, CANCELLED, Event, LANGUAGE_CODES, language_label};
@@ -1517,28 +1518,24 @@ impl Recorder {
                 plan.max_secs = Some(secs);
                 let _ = settings::save_timer_minutes((secs / 60) as u32);
             }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let now = momr_core::ipc::now();
+            let clock = |h: &adw::SpinRow, m: &adw::SpinRow, after: i64| {
+                momr_core::timer::next_occurrence(value(h) as u32, value(m) as u32, after)
+            };
             if start_on.is_active() {
-                plan.start_at = momr_core::timer::next_occurrence(
-                    value(&start_h) as i32,
-                    value(&start_m) as i32,
-                    now,
-                );
+                plan.start_at = clock(&start_h, &start_m, now);
+                if plan.start_at.is_none() {
+                    this.toast(t("timer.no_such_time"));
+                    return;
+                }
             }
             if stop_on.is_active() {
-                plan.stop_at = momr_core::timer::next_occurrence(
-                    value(&stop_h) as i32,
-                    value(&stop_m) as i32,
-                    now,
-                );
-                // A stop before the start means the day after it.
-                if let (Some(start), Some(stop)) = (plan.start_at, plan.stop_at)
-                    && stop <= start
-                {
-                    plan.stop_at = Some(stop + 24 * 3600);
+                // After the start when there is one, so a stop before the
+                // start means the day after it, DST changes included.
+                plan.stop_at = clock(&stop_h, &stop_m, plan.start_at.unwrap_or(now));
+                if plan.stop_at.is_none() {
+                    this.toast(t("timer.no_such_time"));
+                    return;
                 }
             }
             this.set_timer(plan);
@@ -2835,12 +2832,7 @@ impl Recorder {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(momr_core::ipc::now, |d| d.as_secs() as i64);
-        let mut out = output_dir(started_at, &title);
-        let mut n = 2;
-        while out.exists() {
-            out = output_dir(started_at, &format!("{title} {n}"));
-            n += 1;
-        }
+        let out = meeting::unused_folder_for(started_at, &title);
 
         self.player.unload();
         self.title_row.set_text(&title);
@@ -2899,7 +2891,7 @@ impl Recorder {
         else {
             return;
         };
-        let note = read_recording_note(&staging);
+        let note = finish::read_note(&staging);
         let started_at = note.as_ref().map_or(0, |n| n.started_at);
         let when = glib::DateTime::from_unix_local(started_at)
             .and_then(|t| t.format("%A %H:%M"))
@@ -2941,17 +2933,15 @@ impl Recorder {
         let note = note.unwrap_or_else(|| RecordingNote {
             title: t("done.recovered_title").to_owned(),
             started_at: momr_core::ipc::now() - raw_duration(&staging),
-            format: settings::load_format(),
-            language: settings::load_language().to_owned(),
+            format: None,
+            language: None,
         });
         self.title_row.set_text(&note.title);
-        if let Some(i) = Format::ALL.iter().position(|f| *f == note.format) {
+        let (format, language) = (note.format(), note.language());
+        if let Some(i) = Format::ALL.iter().position(|f| *f == format) {
             self.format_row.set_selected(i as u32);
         }
-        if let Some(i) = LANGUAGE_CODES
-            .iter()
-            .position(|code| **code == note.language)
-        {
+        if let Some(i) = LANGUAGE_CODES.iter().position(|code| **code == language) {
             self.language_row.set_selected(i as u32);
         }
         self.started_at.set(note.started_at);
@@ -3147,7 +3137,7 @@ impl Recorder {
 
         let format = self.selected_format();
         let language = self.selected_language();
-        let out = output_dir(self.started_at.get(), &self.title());
+        let out = meeting::unused_folder_for(self.started_at.get(), &self.title());
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (audio_out, audio_staging) = (out.clone(), staging.clone());
@@ -3283,57 +3273,10 @@ impl Recorder {
         let transcript = result?;
         // The name as it is now; it may have been edited while transcribing.
         let out = self.result_dir.borrow().clone().unwrap_or(out);
-        let date = glib::DateTime::from_unix_local(self.started_at.get())
-            .and_then(|t| t.format("%Y-%m-%d %H:%M"))
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let date = meeting::date_line(self.started_at.get());
         let mut markdown = transcribe::to_markdown(&self.title(), &date, &transcript);
         if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
-            // An import finds its own number of speakers; keep names already
-            // given and number the rest.
-            if manifest.imported.is_some() {
-                let found = speakers_in(&markdown);
-                let mut names = manifest.speakers.clone();
-                names.resize_with(found.len(), String::new);
-                for (i, name) in names.iter_mut().enumerate() {
-                    if name.is_empty() {
-                        *name = momr_core::meeting::speaker_n(i + 1);
-                    }
-                }
-                manifest.speakers = names;
-            } else {
-                // Several voices on the computer audio come out as Remote 1,
-                // Remote 2, ...: one name each, after your own.
-                let remotes = speakers_in(&markdown)
-                    .iter()
-                    .filter_map(|s| meeting::parse_remote_n(s))
-                    .max()
-                    .unwrap_or(0);
-                if remotes > 1 {
-                    let mut names = manifest.speakers.clone();
-                    if names.len() <= 2 {
-                        names.truncate(1);
-                    }
-                    while names.len() < remotes + 1 {
-                        let n = names.len();
-                        names.push(momr_core::meeting::remote_n(n));
-                    }
-                    names.truncate(remotes + 1);
-                    manifest.speakers = names;
-                } else if manifest.speakers.len() > 2 {
-                    manifest.speakers.truncate(2);
-                    manifest.speakers[1] = meeting::default_remote().to_owned();
-                }
-            }
-            // The transcription labels speakers You/Remote or Speaker N; use
-            // the names of this meeting.
-            let renames: Vec<(String, String)> = manifest
-                .default_labels()
-                .into_iter()
-                .zip(manifest.speakers.iter().cloned())
-                .filter(|(label, name)| label != name)
-                .collect();
-            markdown = meeting::relabel_all(&markdown, &renames);
+            markdown = meeting::fit_speakers(manifest, &markdown);
             manifest.language = language.to_owned();
             // The model only means something for a local transcript.
             manifest.model = (provider == Provider::Local).then(momr_core::models::configured);
@@ -4197,7 +4140,7 @@ impl Recorder {
             return;
         };
         let title = self.title();
-        let target = output_dir(self.started_at.get(), &title);
+        let target = meeting::folder_for(self.started_at.get(), &title);
         // "202609241400 Weekly 2" is still the folder of "Weekly": an import
         // got a number when the name was taken. Only a new name renames.
         let renamed = !folder_is_for(&current, &target);
@@ -4302,15 +4245,6 @@ fn folder_is_for(folder: &std::path::Path, expected: &std::path::Path) -> bool {
                     .strip_prefix(' ')
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
-}
-
-fn output_dir(started_at: i64, title: &str) -> PathBuf {
-    let stamp = glib::DateTime::from_unix_local(started_at)
-        .and_then(|t| t.format("%Y%m%d%H%M"))
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    let root = settings::meetings_dir();
-    root.join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -4462,16 +4396,8 @@ fn import_audio(
     Ok((bytes / (48_000 * 2 * 2)) as i64)
 }
 
-/// What is known about a recording in progress, next to its audio, so it can
-/// be finished after a crash.
-#[derive(Clone)]
-struct RecordingNote {
-    title: String,
-    started_at: i64,
-    format: Format,
-    language: String,
-}
-
+/// Keeps the staging note current: the title, start, format and language
+/// a recovery needs if this recording never reaches Stop.
 fn write_recording_note(
     staging: &std::path::Path,
     title: &str,
@@ -4479,27 +4405,15 @@ fn write_recording_note(
     format: Format,
     language: &str,
 ) {
-    let note = serde_json::json!({
-        "title": title,
-        "started_at": started_at,
-        "format": format.key(),
-        "language": language,
-    });
-    let _ = std::fs::write(staging.join("recording.json"), note.to_string());
-}
-
-fn read_recording_note(staging: &std::path::Path) -> Option<RecordingNote> {
-    let text = std::fs::read_to_string(staging.join("recording.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    Some(RecordingNote {
-        title: value["title"]
-            .as_str()
-            .filter(|t| !t.is_empty())?
-            .to_owned(),
-        started_at: value["started_at"].as_i64()?,
-        format: Format::from_key(value["format"].as_str().unwrap_or("mono")),
-        language: value["language"].as_str().unwrap_or("auto").to_owned(),
-    })
+    finish::write_note(
+        staging,
+        &RecordingNote {
+            title: title.to_owned(),
+            started_at,
+            format: Some(format),
+            language: Some(language.to_owned()),
+        },
+    );
 }
 
 /// Recording staging folders left behind, with some audio in them.
@@ -4519,29 +4433,6 @@ fn unfinished_recordings() -> Vec<PathBuf> {
     found
 }
 
-/// Recorded seconds in a staging folder, from the size of the longer raw track.
-fn raw_duration(staging: &std::path::Path) -> i64 {
-    let bytes = ["mic.raw", "system.raw"]
-        .iter()
-        .map(|name| std::fs::metadata(staging.join(name)).map_or(0, |m| m.len()))
-        .max()
-        .unwrap_or(0);
-    (bytes / (48_000 * 2 * 2)) as i64
-}
-
-/// The speaker labels in transcript Markdown, in order of first appearance.
-fn speakers_in(markdown: &str) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
-    for line in markdown.lines() {
-        if let Some((_, speaker, _)) = parse_segment(line)
-            && !found.iter().any(|f| f == speaker)
-        {
-            found.push(speaker.to_owned());
-        }
-    }
-    found
-}
-
 /// `01:23` or `1:02:03` to milliseconds.
 fn clock_to_ms(clock: &str) -> i64 {
     clock
@@ -4550,16 +4441,6 @@ fn clock_to_ms(clock: &str) -> i64 {
         .fold(0, |total, part| total * 60 + part)
         * 1000
 }
-
-/// Splits `**[01:23] You:** text` into its time, speaker and text.
-fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
-    let rest = line.strip_prefix("**[")?;
-    let (time, rest) = rest.split_once("] ")?;
-    let (speaker, text) = rest.split_once(":** ")?;
-    Some((time, speaker, text.trim()))
-}
-
-pub use momr_core::export::safe_name;
 
 fn format_elapsed(secs: i64) -> String {
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);

@@ -1,9 +1,9 @@
 import AppKit
 
-/// The ready page: two live meters (microphone above, computer below), a
-/// status line and Start. Recording, done and Settings arrive in later
-/// slices; this slice proves the shell, the helper path and the meters.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+/// The one window: two live meters (microphone above, computer below), a
+/// status line, Start, and while recording the clock with Pause and Stop.
+/// The done page and Settings arrive in later slices.
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private let mic = SourceCapture("mic", label: "Microphone")
     private let computer = SourceCapture("system", label: "Computer audio")
@@ -21,6 +21,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// What the status line says while no recording runs: the last outcome
     /// (saved, failed, refused) or nil for the listening hint.
     private var message: String?
+    /// Problems this recording hit that stay on screen until the next
+    /// Start: a failed write or resume lost audio, which a later good chunk
+    /// does not bring back.
+    private var problems: [String] = []
+    /// Stop is finishing the meeting; quitting now would cut `momr finish`.
+    private var finishing = false
+    /// Quit was chosen while recording or finishing: quit once saved.
+    private var quitWhenDone = false
 
     func applicationDidFinishLaunching(_: Notification) {
         buildMenu()
@@ -29,6 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         computer.onLevel = { [weak self] in self?.computerMeter.level = CGFloat($0) }
         mic.onNote = { [weak self] _ in self?.updateStatus() }
         computer.onNote = { [weak self] _ in self?.updateStatus() }
+        mic.onWriteError = { [weak self] in self?.report($0) }
+        computer.onWriteError = { [weak self] in self?.report($0) }
         mic.start()
         computer.start()
         updateStatus()
@@ -41,6 +51,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {
         true
+    }
+
+    /// ⌘Q or the last window closing mid-recording would leave the meeting
+    /// in the cache for a recovery this shell does not have yet. Ask first,
+    /// and offer to save it on the way out.
+    func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
+        if finishing {
+            quitWhenDone = true
+            show("Saving the meeting; MOM Recorder quits when it is done.")
+            return .terminateCancel
+        }
+        guard recorder != nil else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "A recording is running"
+        alert.informativeText = "Stop and save it before quitting?"
+        alert.addButton(withTitle: "Stop and Quit")
+        alert.addButton(withTitle: "Keep Recording")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        quitWhenDone = true
+        stopRecording()
+        return .terminateCancel
+    }
+
+    /// Closing the window is quitting (the app has no other window), so it
+    /// goes through the same question instead of vanishing mid-recording.
+    func windowShouldClose(_: NSWindow) -> Bool {
+        guard recorder != nil || finishing else { return true }
+        NSApp.terminate(nil)
+        return false
     }
 
     // MARK: - Window
@@ -95,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "MOM Recorder"
+        window.delegate = self
         window.contentView = content
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -108,13 +148,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             show("Nothing is capturing, so there is nothing to record.")
             return
         }
-        guard let recorder = Recorder(mic: mic, computer: computer) else {
-            show("Could not open the staging folder.")
+        // Checked now, not at Stop: finding out after an hour's meeting that
+        // the tool to save it is missing would be too late.
+        guard Tools.url("momr") != nil else {
+            show("momr not found — put it next to MomrApp, in /opt/homebrew/bin or on PATH.")
+            return
+        }
+        let recorder: Recorder
+        do {
+            recorder = try Recorder(mic: mic, computer: computer, title: "Meeting")
+        } catch {
+            show("Could not start recording: \(error.localizedDescription)")
             return
         }
         self.recorder = recorder
         meetingURL = nil
         message = nil
+        problems = []
         revealButton.isHidden = true
         startButton.isHidden = true
         pauseButton.isHidden = false
@@ -131,7 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func tickClock() {
         guard let recorder else { return }
         let s = recorder.elapsed
-        clockLabel.stringValue = String(format: "%02d:%02d", s / 60, s % 60)
+        clockLabel.stringValue = s >= 3600
+            ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+            : String(format: "%02d:%02d", s / 60, s % 60)
         window.title = recorder.paused ? "Paused" : "● Recording"
         updateStatus()
     }
@@ -144,7 +196,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePause() {
         guard let recorder else { return }
         if recorder.paused {
-            recorder.resume()
+            if let problem = recorder.resume() {
+                report(problem)
+            }
             pauseButton.title = "Pause"
         } else {
             recorder.pause()
@@ -160,17 +214,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pauseButton.isHidden = true
         stopButton.isHidden = true
         window.title = "MOM Recorder"
+        finishing = true
         show("Finishing: encoding and transcribing…")
-        recorder.stop(title: "Meeting") { [weak self] url, error in
+        let lost = problems
+        recorder.stop(title: "Meeting") { [weak self] outcome in
             guard let self else { return }
+            self.finishing = false
             self.startButton.isHidden = false
             self.clockLabel.isHidden = true
-            if let url {
-                self.meetingURL = url
-                self.revealButton.isHidden = false
-                self.show("Saved \(url.lastPathComponent).")
-            } else {
-                self.show(error ?? "Something went wrong.")
+            // The folder is offered whenever it exists: it holds the audio
+            // even when the transcript failed.
+            self.meetingURL = outcome.folder
+            self.revealButton.isHidden = outcome.folder == nil
+            var parts: [String] = []
+            if let folder = outcome.folder {
+                parts.append(outcome.problem == nil ? "Saved \(folder.lastPathComponent)." : "Saved \(folder.lastPathComponent), but:")
+            }
+            parts += lost
+            if let problem = outcome.problem {
+                parts.append(problem)
+            }
+            self.problems = []
+            self.show(parts.joined(separator: " "))
+            if self.quitWhenDone {
+                NSApp.terminate(nil)
             }
         }
     }
@@ -185,7 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// so a capture that stopped mid-meeting is visible, not hidden behind
     /// "Recording".
     private func updateStatus() {
-        var parts = notes
+        var parts = problems + notes
         if let recorder {
             parts.insert(recorder.paused ? "Paused." : "Recording.", at: 0)
         } else {
@@ -196,6 +263,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func show(_ text: String) {
         message = text
+        updateStatus()
+    }
+
+    /// A problem that cost this recording audio: kept on screen, and said
+    /// again when the meeting is saved.
+    private func report(_ problem: String) {
+        if !problems.contains(problem) {
+            problems.append(problem)
+        }
         updateStatus()
     }
 

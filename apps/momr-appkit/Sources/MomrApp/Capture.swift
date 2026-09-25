@@ -9,9 +9,16 @@ import Foundation
 /// crash). Its last stderr line becomes the source's note, shown until audio
 /// flows again: a capture that ends without a word would lose half a
 /// meeting while the clock keeps running.
+///
+/// The pipe delivers on a background queue while the recorder swaps the
+/// recording file on the main queue, so the file and the partial chunk live
+/// on one serial queue (`queue`) and are only touched there. A failed write
+/// (a full disk) stops that track's recording and is reported once, since
+/// the meeting is saved from what reached the disk.
 final class SourceCapture {
     typealias LevelHandler = (Float) -> Void
     typealias NoteHandler = (String?) -> Void
+    typealias WriteErrorHandler = (String) -> Void
 
     private let subcommand: String
     private let label: String
@@ -19,6 +26,8 @@ final class SourceCapture {
     /// Whether the app wants this source running: set by `start`, cleared by
     /// `stop`, so an exit after `stop` is not restarted or reported.
     private var wanted = false
+    /// Owns `leftover` and `recordFile`: the reader and the recorder meet here.
+    private let queue: DispatchQueue
     private var leftover = Data()
     /// 20 ms of stereo s16le at 48 kHz.
     private static let chunkBytes = 48_000 * 2 * 2 / 50
@@ -30,45 +39,27 @@ final class SourceCapture {
     var onNote: NoteHandler?
     /// Why this source is not capturing, or nil while it is. Main queue only.
     private(set) var note: String?
+    /// Called on the main queue when a write to the recording file failed.
+    var onWriteError: WriteErrorHandler?
 
     /// Set while recording (and not paused): every byte lands here too.
-    var recordFile: FileHandle?
+    /// Only touched on `queue`.
+    private var recordFile: FileHandle?
     init(_ subcommand: String, label: String) {
         self.subcommand = subcommand
         self.label = label
+        queue = DispatchQueue(label: "momr.capture.\(subcommand)")
+    }
+
+    /// Starts or ends teeing into `file`. Returns once no more bytes go to
+    /// the previous file, so the caller may close it right after.
+    func record(into file: FileHandle?) {
+        queue.sync { recordFile = file }
     }
 
     /// Whether a capture child is running now. Main queue only.
     var isRunning: Bool {
         process?.isRunning ?? false
-    }
-
-    /// The helper next to this executable, in the bundle's MacOS dir, or on
-    /// PATH — the same order the Rust shell searches.
-    static func helperURL() -> URL? {
-        let name = "momr-audio"
-        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        let nextToExe = exe.appendingPathComponent(name)
-        if FileManager.default.isExecutableFile(atPath: nextToExe.path) {
-            return nextToExe
-        }
-        let inBundle = exe.deletingLastPathComponent().appendingPathComponent("MacOS/\(name)")
-        if FileManager.default.isExecutableFile(atPath: inBundle.path) {
-            return inBundle
-        }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "command -v \(name)"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        task.waitUntilExit()
-        let found = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let found, !found.isEmpty {
-            return URL(fileURLWithPath: found)
-        }
-        return nil
     }
 
     func start() {
@@ -89,12 +80,12 @@ final class SourceCapture {
         if process.isRunning {
             process.terminate()
         }
-        leftover.removeAll()
+        queue.async { self.leftover.removeAll() }
     }
 
     private func launch() {
         guard wanted else { return }
-        guard let helper = Self.helperURL() else {
+        guard let helper = Tools.url("momr-audio") else {
             // No retry: a missing helper does not appear by itself, and each
             // look-up runs a shell.
             setNote("momr-audio helper not found — put it next to MomrApp or on PATH.")
@@ -116,7 +107,8 @@ final class SourceCapture {
                 handle.readabilityHandler = nil
                 return
             }
-            self?.received(data)
+            guard let self else { return }
+            self.queue.async { self.received(data) }
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -163,8 +155,18 @@ final class SourceCapture {
         onNote?(text)
     }
 
+    /// On `queue`: tees `data` into the recording and turns it into levels.
     private func received(_ data: Data) {
-        try? recordFile?.write(contentsOf: data)
+        if let file = recordFile {
+            do {
+                try file.write(contentsOf: data)
+            } catch {
+                // Stop writing, so one error is one report, not fifty a second.
+                recordFile = nil
+                let message = "\(label): could not write the recording (\(error.localizedDescription))."
+                DispatchQueue.main.async { [weak self] in self?.onWriteError?(message) }
+            }
+        }
         leftover.append(data)
         while leftover.count >= Self.chunkBytes {
             let chunk = leftover.prefix(Self.chunkBytes)

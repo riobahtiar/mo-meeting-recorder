@@ -25,9 +25,9 @@ Checkbox states: `[ ]` not started, `[~]` in progress, `[x]` done.
 | [05 Agent and config](05-agent-and-config.md) | Chapters through an agent named in config, same no-tools boundary | 02 | 1 Works | `[~]` |
 | [06 Paths and environment](06-paths-and-environment.md) | Files under `~/Library`; Finder-launched app finds its tools | 02 | 1 Works | `[x]` |
 | [07 macOS look and feel](07-macos-look-and-feel.md) | Native menu bar, window chrome, typography, controls, colours, Preferences, About | 03, 04, 06 | 2 Feels native | `[~]` |
-| [08 App bundle and distribution](08-app-bundle-and-distribution.md) | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | 03, 04, 05, 06 | 3 Ships | `[ ]` |
-| [09 Menu bar item](09-menu-bar-item.md) | Live recording status in the menu bar | 03, 08 | 2 Feels native | `[ ]` |
-| [10 Testing and CI](10-testing-and-ci.md) | Tests for the new seams; CI on macOS | 02 | all | `[ ]` |
+| [08 App bundle and distribution](08-app-bundle-and-distribution.md) | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | 03, 04, 05, 06 | 3 Ships | `[~]` |
+| [09 Menu bar item](09-menu-bar-item.md) | Live recording status in the menu bar | 03, 08 | 2 Feels native | `[~]` |
+| [10 Testing and CI](10-testing-and-ci.md) | Tests for the new seams; CI on macOS | 02 | all | `[~]` |
 | [11 Identity](11-identity.md) | Confirm the bundle id, UTI and folder names; last brand sweep | 08 | 3 Ships | `[ ]` |
 | [12 Native shell option](12-native-shell-option.md) | When and how to build a SwiftUI front end on the Rust core | 07 | 4 Optional | reference |
 

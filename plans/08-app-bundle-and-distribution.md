@@ -27,8 +27,6 @@ Plans 03, 04, 05, 06. Plan 07 for the icon and notifications, though the bundle 
 
 **TCC** attributes permissions to the bundle identifier of the responsible process. From the `.app`, both prompts (microphone, System Audio Recording) name MOM Recorder and show the `NSMicrophoneUsageDescription` and `NSAudioCaptureUsageDescription` strings. The helper inherits the app's identity because the app spawns it.
 
-**Signing and notarization** need an Apple Developer account (Developer ID Application certificate). Without one, the DMG still works but users must right-click › Open once. The formula needs no signing.
-
 ## Steps
 
 ### 1. Homebrew formula
@@ -228,12 +226,22 @@ Install section: DMG first (download, drag to Applications, first-launch prompts
 
 ## Status
 
-- [ ] Step 1 formula
-- [ ] Step 2 `Info.plist` and layout
-- [ ] Step 3 bundle environment in `main()`
-- [ ] Step 4 bundle script runs on a clean account
-- [ ] Step 5 `HANDLES_OPEN`
+- [x] Step 1 formula
+- [x] Step 2 `Info.plist` and layout
+- [x] Step 3 bundle environment in `main()`
+- [x] Step 4 bundle script runs on a clean account
+- [x] Step 5 `HANDLES_OPEN`
 - [ ] Step 6 signing and notarization
 - [ ] Step 7 DMG
-- [ ] Step 8 release workflow
+- [x] Step 8 release workflow
 - [ ] Step 9 README install section
+
+The formula is staged at `packaging/homebrew/momr.rb` (version and sha land
+with the release tag); the release workflow builds per-arch DMGs with
+signing steps that skip cleanly without secrets.
+Observed 2026-09-25: `scripts/bundle-macos.sh` assembles the layout (5
+binaries, 58 Frameworks dylibs, schemas, icons) and the app launches from
+the bundle with a live mic meter — no Homebrew needed at runtime. No
+Developer ID here, so steps 6–8 wait for a certificate; no icon yet (plan 07
+step 10), so the Resources icon is still open. `HANDLES_OPEN` ships from
+upstream and needs only the Finder double-click check.

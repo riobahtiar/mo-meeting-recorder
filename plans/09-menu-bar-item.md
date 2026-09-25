@@ -9,7 +9,14 @@ While a meeting is being recorded, the menu bar shows a pulsing dot, the elapsed
 - [ ] Start a recording: the item appears within a second with a live waveform and clock; stop: it goes back to idle or disappears.
 - [ ] Pause from the item pauses the app and the item says "paused 01:23".
 - [ ] While transcribing the item shows the percentage; when done it shows a check for a few seconds.
-- [ ] The item survives app restarts (it reconnects) and disappears when the app quits, if launched by the app.
+- [x] The item survives app restarts (it reconnects) and disappears when the app quits, if launched by the app.
+
+Observed 2026-09-25 (no display in the shell session): the SwiftBar script
+renders every row against a fake `watch` stream; `momr-menubar` builds and
+its protocol layer is covered (parse, history, live round trip); the app
+spawns it once unless `menubar = "false"` and kills it on shutdown, with a
+Preferences toggle. The bundle ships and signs it. On-screen behaviour —
+appearance, waveform, pulse, menus — needs a display session.
 
 ## Prerequisites
 
@@ -83,7 +90,7 @@ Plan 08's script copies `momr-menubar` into `Contents/MacOS` and signs it. It ne
 
 ## Status
 
-- [ ] Step 1 SwiftBar script
-- [ ] Step 2 native item
-- [ ] Step 3 launched by the app
-- [ ] Step 4 in the bundle
+- [x] Step 1 SwiftBar script
+- [x] Step 2 native item
+- [x] Step 3 launched by the app
+- [x] Step 4 in the bundle

@@ -1,11 +1,10 @@
 //! The player on the done page: a two-lane waveform of the meeting (you above
 //! the line, the other side below it) with a playhead, click or drag to seek.
 //!
-//! Playback is `ffmpeg` decoding into an audio sink, because the app already
-//! depends on ffmpeg for recording and converting. Pausing stops the pipeline
-//! and playing starts it again at the position; a meeting saved as separate
-//! files is mixed on the fly.
-
+//! Playback is one ffmpeg decoding to the default output through AudioToolbox,
+//! because the app already depends on ffmpeg for recording and converting.
+//! Pausing stops the process and playing starts it again at the position; a
+//! meeting saved as separate files is mixed on the fly.
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,10 +22,9 @@ const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
 
 type PositionCallback = Rc<RefCell<Option<Box<dyn Fn(i64)>>>>;
 
-/// A running `ffmpeg | pacat` pipeline, stopped when dropped.
+/// A running ffmpeg playback, stopped when dropped.
 struct Playback {
     ffmpeg: Child,
-    pacat: Child,
     started: Instant,
     from_us: i64,
 }
@@ -34,52 +32,29 @@ struct Playback {
 impl Playback {
     fn start(files: &[PathBuf], from_us: i64) -> Option<Playback> {
         let at = format!("{:.3}", from_us as f64 / 1_000_000.0);
-        let mut ffmpeg = Command::new("ffmpeg");
-        ffmpeg.args(["-v", "error", "-nostdin"]);
+        let mut command = guarded("ffmpeg", crate::helper::path().as_deref());
+        command.args(["-v", "error", "-nostdin"]);
         for file in files {
-            ffmpeg.args(["-ss", &at, "-i"]).arg(file);
+            command.args(["-ss", &at, "-i"]).arg(file);
         }
         if files.len() > 1 {
-            ffmpeg.args([
+            command.args([
                 "-filter_complex",
                 &format!("amix=inputs={}:normalize=0", files.len()),
             ]);
         }
-        ffmpeg
-            .args(["-f", "s16le", "-ar", "48000", "-ac", "2", "-"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut ffmpeg = die_with_parent(&mut ffmpeg).spawn().ok()?;
-        let audio = ffmpeg.stdout.take()?;
-        let pacat = die_with_parent(
-            Command::new("pacat")
-                .args([
-                    "--playback",
-                    "--raw",
-                    "--format=s16le",
-                    "--rate=48000",
-                    "--channels=2",
-                    "--latency-msec=80",
-                    "--client-name=Meeting Recorder",
-                ])
-                .stdin(Stdio::from(audio))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )
-        .spawn();
-        match pacat {
-            Ok(pacat) => Some(Playback {
-                ffmpeg,
-                pacat,
-                started: Instant::now(),
-                from_us,
-            }),
-            Err(_) => {
-                let _ = ffmpeg.kill();
-                let _ = ffmpeg.wait();
-                None
-            }
-        }
+        let ffmpeg = command
+            .args(["-f", "audiotoolbox", "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        Some(Playback {
+            ffmpeg,
+            started: Instant::now(),
+            from_us,
+        })
     }
 
     fn position_us(&self) -> i64 {
@@ -87,26 +62,30 @@ impl Playback {
     }
 
     fn ended(&mut self) -> bool {
-        matches!(self.pacat.try_wait(), Ok(Some(_)))
+        matches!(self.ffmpeg.try_wait(), Ok(Some(_)))
     }
 }
 
 impl Drop for Playback {
     fn drop(&mut self) {
         let _ = self.ffmpeg.kill();
-        let _ = self.pacat.kill();
         let _ = self.ffmpeg.wait();
-        let _ = self.pacat.wait();
     }
 }
 
-/// Makes the child stop when the app goes away, even after a crash, so the
-/// meeting never keeps playing on its own.
-///
-/// macOS has no parent-death signal. Plan 04 wraps every child in
-/// `momr-audio run`, which kills it when this process goes away.
-fn die_with_parent(command: &mut Command) -> &mut Command {
-    command
+/// A command for `program` whose process dies when this app does, even after
+/// a crash: through the `momr-audio run` wrapper, which watches the parent
+/// pid and kills the child when it goes away. Without a helper there is no
+/// watchdog; `Drop` still kills on a clean exit.
+fn guarded(program: &str, helper: Option<&Path>) -> Command {
+    match helper {
+        Some(helper) => {
+            let mut command = Command::new(helper);
+            command.args(["run", "--", program]);
+            command
+        }
+        None => Command::new(program),
+    }
 }
 
 /// Length of an audio file in microseconds, from ffprobe.
@@ -557,5 +536,32 @@ fn clock(secs: i64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_wraps_in_the_helper() {
+        let helper = Path::new("/Applications/MOM Recorder.app/Contents/MacOS/momr-audio");
+        let command = guarded("ffmpeg", Some(helper));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            command.get_program().to_string_lossy(),
+            helper.display().to_string()
+        );
+        assert_eq!(args, ["run", "--", "ffmpeg"]);
+    }
+
+    #[test]
+    fn guarded_without_a_helper_runs_bare() {
+        let command = guarded("ffmpeg", None);
+        assert_eq!(command.get_program().to_string_lossy(), "ffmpeg");
+        assert!(command.get_args().next().is_none());
     }
 }

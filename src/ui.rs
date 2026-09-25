@@ -83,9 +83,9 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
                 redraw(&window);
             }
         });
-        app.set_accels_for_action("win.compact", &["<Control>m"]);
-        app.set_accels_for_action("window.close", &["<Control>w"]);
-        app.set_accels_for_action("app.quit", &["<Control>q"]);
+        app.set_accels_for_action("win.compact", &["<Primary><Shift>m"]);
+        app.set_accels_for_action("window.close", &["<Primary>w"]);
+        app.set_accels_for_action("app.quit", &["<Primary>q"]);
     });
     let recorder: Rc<RefCell<Option<Rc<Recorder>>>> = Rc::default();
     let get = {
@@ -188,6 +188,8 @@ struct Recorder {
     animation_since: Cell<Option<std::time::Instant>>,
     paused_secs: Cell<i64>,
     pause_began: Cell<i64>,
+    /// The `caffeinate` child keeping the Mac awake while recording.
+    caffeinate: RefCell<Option<std::process::Child>>,
     pause_button: gtk::Button,
     import_button: gtk::Button,
     model_banner: adw::Banner,
@@ -629,6 +631,7 @@ impl Recorder {
             animation_since: Cell::new(None),
             paused_secs: Cell::new(0),
             pause_began: Cell::new(0),
+            caffeinate: RefCell::default(),
             pause_button,
             import_button,
             model_banner,
@@ -1159,9 +1162,6 @@ impl Recorder {
         self.window.set_size_request(minimum.0, minimum.1);
         self.window.set_default_size(size.0, size.1);
         self.window.queue_resize();
-        glib::timeout_add_local_once(Duration::from_millis(50), move || {
-            hyprland_resize(size);
-        });
     }
 
     fn tick(&self) {
@@ -1217,11 +1217,6 @@ impl Recorder {
         };
         self.window.set_default_size(size.0, size.1);
         self.window.queue_resize();
-        // A compositor may ignore a client asking to change the size of a
-        // window that is already on screen; on Hyprland, ask it directly.
-        glib::timeout_add_local_once(Duration::from_millis(50), move || {
-            hyprland_resize(size);
-        });
     }
 
     /// Recorded time so far, without the pauses.
@@ -1572,6 +1567,17 @@ impl Recorder {
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
         self.set_state(State::Recording);
+        // Keep the Mac from idle-sleeping while recording. `-w` ties the
+        // assertion to this process, so it dies with the app even on a crash.
+        if let Ok(child) = std::process::Command::new("caffeinate")
+            .args(["-i", "-w", &std::process::id().to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            *self.caffeinate.borrow_mut() = Some(child);
+        }
     }
 
     fn stop(self: &Rc<Self>) {
@@ -1587,6 +1593,10 @@ impl Recorder {
         self.animation_since.set(Some(std::time::Instant::now()));
         self.mic.stop_recording();
         self.system.stop_recording();
+        if let Some(mut caffeinate) = self.caffeinate.borrow_mut().take() {
+            let _ = caffeinate.kill();
+            let _ = caffeinate.wait();
+        }
         let Some(staging) = self.staging.borrow().clone() else {
             return;
         };
@@ -2841,90 +2851,6 @@ impl Paragraphs {
             last_chars: text.chars().count(),
         });
     }
-}
-
-/// Resizes this app's window through Hyprland, keeping it where it is.
-/// Does nothing outside Hyprland.
-fn hyprland_resize((width, height): (i32, i32)) {
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
-        return;
-    }
-    let pid = std::process::id();
-    std::thread::spawn(move || {
-        // Right after start the window may not be mapped yet; wait for it a little.
-        let mut window = None;
-        for _ in 0..30 {
-            window = own_window(pid);
-            if window.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let Some(window) = window else { return };
-        let Some(address) = window["address"].as_str().map(str::to_owned) else {
-            return;
-        };
-        hyprctl_dispatch(&format!(
-            "hl.dsp.window.resize({{ x = {width}, y = {height}, window = \"address:{address}\" }})"
-        ));
-        // Hyprland grows a floating window around its centre; a strip that was
-        // dragged into a corner would then stick out. Bring it back on screen.
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        if let Some((x, y)) = own_window(pid).and_then(|w| on_screen(&w)) {
-            hyprctl_dispatch(&format!(
-                "hl.dsp.window.move({{ x = {x}, y = {y}, window = \"address:{address}\" }})"
-            ));
-        }
-    });
-}
-
-fn hyprctl_json(what: &str) -> Option<serde_json::Value> {
-    let out = std::process::Command::new("hyprctl")
-        .args([what, "-j"])
-        .output()
-        .ok()?;
-    serde_json::from_slice(&out.stdout).ok()
-}
-
-fn hyprctl_dispatch(call: &str) {
-    let _ = std::process::Command::new("hyprctl")
-        .arg("dispatch")
-        .arg(call)
-        .output();
-}
-
-/// This process's floating window, as `hyprctl clients -j` describes it.
-fn own_window(pid: u32) -> Option<serde_json::Value> {
-    hyprctl_json("clients")?
-        .as_array()?
-        .iter()
-        .find(|c| c["pid"].as_u64() == Some(u64::from(pid)) && c["floating"] == true)
-        .cloned()
-}
-
-/// Where the window has to go to be fully visible on its monitor, outside the
-/// bar and with a small margin; None when it already is.
-fn on_screen(window: &serde_json::Value) -> Option<(i64, i64)> {
-    const MARGIN: i64 = 12;
-    let (x, y) = (window["at"][0].as_i64()?, window["at"][1].as_i64()?);
-    let (w, h) = (window["size"][0].as_i64()?, window["size"][1].as_i64()?);
-    let monitors = hyprctl_json("monitors")?;
-    let monitor = monitors
-        .as_array()?
-        .iter()
-        .find(|m| m["id"].as_i64() == window["monitor"].as_i64())?;
-    let scale = monitor["scale"].as_f64().unwrap_or(1.0).max(0.1);
-    let reserved = |i: usize| monitor["reserved"][i].as_i64().unwrap_or(0);
-    let left = monitor["x"].as_i64()? + reserved(0) + MARGIN;
-    let top = monitor["y"].as_i64()? + reserved(1) + MARGIN;
-    let right =
-        monitor["x"].as_i64()? + (monitor["width"].as_f64()? / scale) as i64 - reserved(2) - MARGIN;
-    let bottom = monitor["y"].as_i64()? + (monitor["height"].as_f64()? / scale) as i64
-        - reserved(3)
-        - MARGIN;
-    let nx = x.min(right - w).max(left);
-    let ny = y.min(bottom - h).max(top);
-    (nx != x || ny != y).then_some((nx, ny))
 }
 
 /// Repaints a widget and everything in it, for custom drawing after a theme switch.

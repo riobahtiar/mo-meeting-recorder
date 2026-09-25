@@ -24,7 +24,7 @@ private func flag(_ name: String, in args: [String], default defaultValue: Strin
 
 private func usage() -> Never {
     fputs(
-        "usage: momr-audio (list | mic [--rate N] [--channels N] | system [--rate N] [--channels N])\n",
+        "usage: momr-audio (list | mic [--rate N] [--channels N] | system [--rate N] [--channels N] | run -- <program> <args…>)\n",
         stderr)
     exit(2)
 }
@@ -33,8 +33,13 @@ private func usage() -> Never {
 struct MomrAudio {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        guard let sub = args.first, ["list", "mic", "system"].contains(sub)
+        guard let sub = args.first,
+            ["list", "mic", "system", "run"].contains(sub)
         else { usage() }
+        if sub == "run" {
+            guard args.count >= 4, args[1] == "--" else { usage() }
+            exit(runRun(program: args[2], args: Array(args.dropFirst(3))))
+        }
         guard
             let rateText = flag("--rate", in: args, default: "48000"),
             let rate = Double(rateText), rate > 0,

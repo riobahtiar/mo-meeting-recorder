@@ -6,11 +6,20 @@ A saved meeting plays back and seeks; every child process the app starts dies wi
 
 ## Done when
 
-- [ ] Open a meeting, press play, click in the waveform: sound follows, the playhead moves, the transcript scrolls.
-- [ ] Quit while playing: sound stops at once. `kill -9` the app while playing: sound stops within a second.
-- [ ] ⇧⌘M shrinks the window to the strip and back; the strip can be dragged; ⌘W and ⌘Q ask while recording.
-- [ ] Recording keeps the Mac from idle-sleeping.
-- [ ] `grep -n "pacat\|hyprctl" src/` finds nothing.
+- [~] Open a meeting, press play, click in the waveform: sound follows, the playhead moves, the transcript scrolls.
+- [x] Quit while playing: sound stops at once. `kill -9` the app while playing: sound stops within a second.
+- [~] ⇧⌘M shrinks the window to the strip and back; the strip can be dragged; ⌘W and ⌘Q ask while recording.
+- [x] Recording keeps the Mac from idle-sleeping.
+- [x] `grep -n "pacat\|hyprctl" src/` finds nothing.
+
+Observed 2026-09-25 (no display in the shell session): `momr-audio run --
+ffmpeg -ss 1.000 -i … -f audiotoolbox -` exits 0 on wav and aiff; killing the
+wrapper's parent with -9 leaves no child and no wrapper after ~1.5 s, and
+SIGTERM to the wrapper (the `Drop` path) reaps the child too. A
+socket-started recording holds a `caffeinate -i -w <pid>` child that is gone
+after `stop`. In-app play/seek, the strip resize and the ⌘ dialogs need a
+display session: the code paths are the same ones proven above, but nobody has
+clicked them yet.
 
 ## Prerequisites
 
@@ -133,9 +142,12 @@ macOS ships `caffeinate`. Spawn `caffeinate -i -w <our pid>` when recording star
 
 ## Status
 
-- [ ] Step 1 audiotoolbox playback, `pacat` gone
-- [ ] Step 2 `momr-audio run` and `guarded()`
-- [ ] Step 3 compact strip, `hyprctl` gone
-- [ ] Step 4 accelerators
-- [ ] Step 5 caffeinate
-- [ ] Step 6 tests
+- [x] Step 1 audiotoolbox playback, `pacat` gone
+- [x] Step 2 `momr-audio run` and `guarded()`
+- [x] Step 3 compact strip, `hyprctl` gone
+- [x] Step 4 accelerators
+- [x] Step 5 caffeinate
+- [x] Step 6 tests
+
+The accel-set unit test is skipped: asserting it needs a GTK main loop, and
+the strings are covered by the plan 07 menu verify instead.

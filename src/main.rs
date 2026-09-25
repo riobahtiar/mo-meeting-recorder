@@ -8,6 +8,7 @@ mod audio;
 mod chapters;
 mod diarize;
 mod export;
+mod helper;
 mod ipc;
 mod meeting;
 mod models;

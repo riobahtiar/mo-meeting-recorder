@@ -14,7 +14,7 @@ use gtk::{gio, glib};
 
 use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
-use crate::audio::{HISTORY, Source, to_meter};
+use crate::audio::{Device, HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
@@ -192,6 +192,8 @@ struct Recorder {
     import_button: gtk::Button,
     model_banner: adw::Banner,
     model_downloading: Cell<bool>,
+    /// Why the computer source is not capturing, shown under the meters.
+    audio_banner: adw::Banner,
     drop_hint: gtk::Label,
     staging: RefCell<Option<PathBuf>>,
     result_dir: RefCell<Option<PathBuf>>,
@@ -205,8 +207,8 @@ struct Recorder {
 
 impl Recorder {
     fn new(app: &adw::Application) -> Rc<Self> {
-        let mic = Source::spawn("@DEFAULT_SOURCE@");
-        let system = Source::spawn("@DEFAULT_MONITOR@");
+        let mic = Source::spawn(Device::Mic);
+        let system = Source::spawn(Device::Computer);
         let shared: SharedStatus = Arc::new(Mutex::new(Status {
             state: "idle",
             ..Default::default()
@@ -291,6 +293,9 @@ impl Recorder {
         meters_box.append(&meter_block("Computer audio", &meters[1]));
 
         content.append(&meters_box);
+
+        let audio_banner = adw::Banner::builder().revealed(false).build();
+        content.append(&audio_banner);
 
         let status_row = gtk::Box::builder()
             .spacing(10)
@@ -628,6 +633,7 @@ impl Recorder {
             import_button,
             model_banner,
             model_downloading: Cell::new(false),
+            audio_banner,
             drop_hint,
             staging: RefCell::default(),
             result_dir: RefCell::default(),
@@ -1173,6 +1179,17 @@ impl Recorder {
             self.compact_timer.set_label(&clock);
             self.dot.set_opacity(opacity);
             self.compact_dot.set_opacity(opacity);
+        }
+        // Computer capture may fall back to BlackHole or go idle (tap refused,
+        // helper missing); say so under the meters until it captures again.
+        match self.system.note() {
+            Some(note) => {
+                if self.audio_banner.title() != note {
+                    self.audio_banner.set_title(&note);
+                }
+                self.audio_banner.set_revealed(true);
+            }
+            None => self.audio_banner.set_revealed(false),
         }
     }
 

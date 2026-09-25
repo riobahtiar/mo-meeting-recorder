@@ -149,3 +149,11 @@ Each entry: the context, the decision, what was rejected and why, and what follo
 **Rejected.** Pixel-perfect Liquid Glass inside GTK: the real material (`NSGlassEffectView`, glass button styles, scroll-edge effects) is AppKit and SwiftUI only. Chasing it in Cairo and CSS would produce an imitation that breaks under Reduce Transparency.
 **Consequences.** Plan 07 carries explicit Liquid Glass acceptance notes (translucency that degrades gracefully, icon layers); whether the approximation satisfies is judged by its side-by-side verify, and falling short routes to the plan 12 native shell, whose criteria gain a Liquid Glass line.
 **Status.** Accepted.
+
+## D21 Optional transcription providers; English and Indonesian UI
+
+**Context.** After the core port, MOM Recorder should offer ElevenLabs speech-to-text, Google Cloud Speech-to-Text and the omnilingual-asr model alongside the built-in local transcription, and the UI should read in English and Indonesian.
+**Decision.** Local whisper.cpp stays the default: the README promises no audio leaves the Mac, so a provider that sends audio out only ever runs on explicit opt-in, chosen per install in Preferences with its credentials stored alongside. Each provider gets its credentials fields in Preferences plus short instructions naming where the key comes from (ElevenLabs dashboard, Google Cloud console, model download for omnilingual-asr). UI strings move behind a small locales module, English first with Indonesian next, switched in Preferences.
+**Rejected.** Replacing the local default, and scattering provider keys through config files without the app saying where each comes from.
+**Consequences.** A new plan after the core phases (11) specifies the provider backends, key storage and the locales module; the README privacy section gains a per-provider "what leaves your Mac" note when the first provider ships.
+**Status.** Accepted for direction; provider and locale details Open until the core phases land.

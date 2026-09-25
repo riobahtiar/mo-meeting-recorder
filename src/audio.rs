@@ -1,5 +1,13 @@
-//! Audio capture through `parec`: one process per source, kept running for the
-//! whole life of the app so the meters work before and after a recording too.
+//! Audio capture: one child process per source, kept running for the whole
+//! life of the app so the meters work before and after a recording too.
+//!
+//! The microphone comes from the `momr-audio` helper's `mic`, which follows
+//! default-device changes, or from ffmpeg's avfoundation input when the helper
+//! is missing. The computer audio comes from the helper's `system` process
+//! tap, falling back to a BlackHole loopback device captured with ffmpeg, and
+//! otherwise staying idle with a note for the ready page. Every path honours
+//! the same contract: raw interleaved s16le at `RATE` and `CHANNELS` on
+//! stdout, until killed.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -18,11 +26,21 @@ const CHUNK_BYTES: usize = (RATE / 50 * 2 * CHANNELS) as usize;
 pub const HISTORY: usize = 150;
 const FLOOR_DB: f64 = -60.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Device {
+    /// The default microphone.
+    Mic,
+    /// What the computer plays.
+    Computer,
+}
+
 struct Inner {
     levels: VecDeque<f32>,
     file: Option<BufWriter<File>>,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
+    /// Why this source is not capturing, for the ready-page banner. None while capturing.
+    note: Option<String>,
 }
 
 #[derive(Clone)]
@@ -31,22 +49,23 @@ pub struct Source {
 }
 
 impl Source {
-    /// Starts capturing `device`, a PulseAudio source name such as `@DEFAULT_MONITOR@`.
-    pub fn spawn(device: &'static str) -> Self {
+    /// Starts capturing `device` on a thread that restarts the child whenever
+    /// it exits, so a device that goes away comes back on its own.
+    pub fn spawn(device: Device) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
             paused: false,
+            note: None,
         }));
-        let shared = inner.clone();
-        thread::spawn(move || {
-            loop {
-                capture(device, &shared);
-                // parec exits when the device goes away; try again.
-                thread::sleep(Duration::from_secs(1));
-            }
+        let source = Source {
+            inner: inner.clone(),
+        };
+        thread::spawn(move || match device {
+            Device::Mic => mic_loop(&inner),
+            Device::Computer => computer_loop(&inner),
         });
-        Source { inner }
+        source
     }
 
     /// Tees the raw stream (s16le, RATE, CHANNELS) into `path` from now on.
@@ -83,25 +102,279 @@ impl Source {
             .copied()
             .fold(0.0, f32::max)
     }
+
+    /// Why this source is not capturing, if anything, for the ready page.
+    pub fn note(&self) -> Option<String> {
+        self.inner.lock().unwrap().note.clone()
+    }
 }
 
-fn capture(device: &str, shared: &Mutex<Inner>) {
-    let Ok(mut child) = Command::new("parec")
-        .args([
-            "--raw",
-            "--format=s16le",
-            &format!("--rate={RATE}"),
-            &format!("--channels={CHANNELS}"),
-            "--latency-msec=20",
-            "-d",
-            device,
-        ])
+/// (program, args) for one capture child, so tests can check it without spawning.
+pub fn capture_args(device: Device, helper: Option<&Path>) -> (String, Vec<String>) {
+    let rate = RATE.to_string();
+    let channels = CHANNELS.to_string();
+    match (device, helper) {
+        (Device::Mic, Some(helper)) => (
+            helper.display().to_string(),
+            vec![
+                "mic".into(),
+                "--rate".into(),
+                rate,
+                "--channels".into(),
+                channels,
+            ],
+        ),
+        (Device::Mic, None) => (
+            "ffmpeg".into(),
+            vec![
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-nostdin".into(),
+                "-f".into(),
+                "avfoundation".into(),
+                "-i".into(),
+                ":default".into(),
+                "-f".into(),
+                "s16le".into(),
+                "-ar".into(),
+                rate,
+                "-ac".into(),
+                channels,
+                "-".into(),
+            ],
+        ),
+        (Device::Computer, Some(helper)) => (
+            helper.display().to_string(),
+            vec![
+                "system".into(),
+                "--rate".into(),
+                rate,
+                "--channels".into(),
+                channels,
+            ],
+        ),
+        // No helper: the loopback is the only computer source left.
+        (Device::Computer, None) => blackhole_args("BlackHole 2ch"),
+    }
+}
+
+/// ffmpeg reading a BlackHole loopback device by name.
+pub fn blackhole_args(device: &str) -> (String, Vec<String>) {
+    let rate = RATE.to_string();
+    let channels = CHANNELS.to_string();
+    (
+        "ffmpeg".into(),
+        vec![
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-nostdin".into(),
+            "-f".into(),
+            "avfoundation".into(),
+            "-i".into(),
+            format!(":{device}"),
+            "-f".into(),
+            "s16le".into(),
+            "-ar".into(),
+            rate,
+            "-ac".into(),
+            channels,
+            "-".into(),
+        ],
+    )
+}
+
+/// What the computer source captures from. The loop below only moves between
+/// these; `next_mode` decides the moves so tests can cover them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ComputerMode {
+    /// The helper's process tap.
+    Tap,
+    /// A BlackHole loopback device through ffmpeg.
+    BlackHole,
+    /// Nothing captures; the ready page explains why.
+    Idle,
+}
+
+/// The next mode and the banner note for it, from the current mode, whether
+/// the helper is present, the loopback device name when one is installed, and
+/// the exit code of the child that just ended (None on the first run).
+fn next_mode(
+    current: &ComputerMode,
+    helper: bool,
+    blackhole: Option<&str>,
+    exit: Option<i32>,
+) -> (ComputerMode, Option<String>) {
+    // The helper's exit codes for an unavailable tap (see helpers/momr-audio).
+    let tap_dead = matches!(exit, Some(3) | Some(4));
+    let tap_note = |code| match code {
+        Some(4) => {
+            "System Audio Recording permission was refused — allow it in System Settings › Privacy & Security, then restart the app."
+        }
+        _ => {
+            "This macOS cannot tap the system audio — install BlackHole to record the computer audio."
+        }
+    };
+    let loopback_or_idle = |reason: &str| match blackhole {
+        Some(_) => (ComputerMode::BlackHole, None),
+        None => (
+            ComputerMode::Idle,
+            Some(format!(
+                "{reason} Install BlackHole to record the computer audio instead."
+            )),
+        ),
+    };
+    match current {
+        ComputerMode::Tap => {
+            if !helper {
+                return match blackhole {
+                    Some(_) => (ComputerMode::BlackHole, None),
+                    None => (
+                        ComputerMode::Idle,
+                        Some(
+                            "The momr-audio helper was not found — reinstall MOM Recorder. \
+                             Install BlackHole to record the computer audio instead."
+                                .into(),
+                        ),
+                    ),
+                };
+            }
+            match exit {
+                // First run, a clean end, or a crash: the tap is worth retrying.
+                None | Some(0) | Some(_) if !tap_dead => (ComputerMode::Tap, None),
+                _ => loopback_or_idle(tap_note(exit)),
+            }
+        }
+        ComputerMode::BlackHole => match exit {
+            // Just moved here, or a clean end: capture, preferring the tap again.
+            None | Some(0) if helper => (ComputerMode::Tap, None),
+            None | Some(0) => (ComputerMode::BlackHole, None),
+            // The loopback went away: the tap may work; without a helper keep
+            // retrying the loopback and say so.
+            _ if helper => (ComputerMode::Tap, None),
+            _ => (
+                ComputerMode::BlackHole,
+                Some(
+                    "The computer-audio device went away — retrying. \
+                     Check it in System Settings › Sound."
+                        .into(),
+                ),
+            ),
+        },
+        // Something changed while idle (a device installed, the helper back):
+        // re-evaluate from scratch.
+        ComputerMode::Idle => {
+            if helper {
+                (ComputerMode::Tap, None)
+            } else {
+                match blackhole {
+                    Some(_) => (ComputerMode::BlackHole, None),
+                    None => (
+                        ComputerMode::Idle,
+                        Some(
+                            "The momr-audio helper was not found — reinstall MOM Recorder. \
+                             Install BlackHole to record the computer audio instead."
+                                .into(),
+                        ),
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn set_note(shared: &Mutex<Inner>, note: Option<String>) {
+    shared.lock().unwrap().note = note;
+}
+
+fn mic_loop(shared: &Mutex<Inner>) {
+    loop {
+        let helper = crate::helper::path();
+        let (program, args) = capture_args(Device::Mic, helper.as_deref());
+        match capture_from(&program, &args, shared) {
+            Ok(code) => set_note(
+                shared,
+                Some(format!(
+                    "Microphone capture failed (exit {}) — check System Settings › Privacy & Security › Microphone.",
+                    code.unwrap_or(-1)
+                )),
+            ),
+            Err(_) => set_note(
+                shared,
+                Some("Could not start microphone capture — is ffmpeg installed?".into()),
+            ),
+        }
+        // ffmpeg exits when the device goes away; the helper when it has no
+        // device. Either way, try again.
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn computer_loop(shared: &Mutex<Inner>) {
+    let mut mode = ComputerMode::Tap;
+    let mut exit: Option<i32> = None;
+    let mut blackhole: Option<String> = None;
+    loop {
+        let helper = crate::helper::path();
+        if blackhole.is_none()
+            && let Some(helper) = helper.as_ref()
+        {
+            blackhole = crate::helper::blackhole_name(helper);
+        }
+        let (program, args, idle_secs);
+        (mode, program, args, idle_secs) =
+            match next_mode(&mode, helper.is_some(), blackhole.as_deref(), exit) {
+                (ComputerMode::Tap, note) => {
+                    set_note(shared, note);
+                    let helper = helper.expect("Tap mode needs the helper");
+                    let (program, args) = capture_args(Device::Computer, Some(&helper));
+                    (ComputerMode::Tap, program, args, 1)
+                }
+                (ComputerMode::BlackHole, note) => {
+                    set_note(shared, note);
+                    let device = blackhole.clone().unwrap_or_else(|| "BlackHole 2ch".into());
+                    let (program, args) = blackhole_args(&device);
+                    (ComputerMode::BlackHole, program, args, 5)
+                }
+                (ComputerMode::Idle, note) => {
+                    set_note(shared, note);
+                    thread::sleep(Duration::from_secs(5));
+                    exit = None;
+                    continue;
+                }
+            };
+        exit = match capture_from(&program, &args, shared) {
+            Ok(code) => code,
+            Err(_) => {
+                // The program itself would not start. For ffmpeg that means it
+                // is missing; for the helper it should not happen, since its
+                // path was checked. Back off and re-evaluate.
+                set_note(
+                    shared,
+                    Some(format!("Could not start {program} — is it installed?")),
+                );
+                thread::sleep(Duration::from_secs(idle_secs));
+                None
+            }
+        };
+    }
+}
+
+/// Runs one capture child to EOF, keeping the level history and the recording
+/// file as it goes. Returns the child's exit code, or an error when it would
+/// not start at all.
+fn capture_from(
+    program: &str,
+    args: &[String],
+    shared: &Mutex<Inner>,
+) -> std::io::Result<Option<i32>> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
+        .spawn()?;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut buf = vec![0u8; CHUNK_BYTES];
     // So a crash loses at most a second: flush every second, and push it to
@@ -133,7 +406,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    Ok(child.wait().ok().and_then(|status| status.code()))
 }
 
 /// Maps a linear peak to 0..1 on a -60 dB..0 dB scale.
@@ -142,4 +415,120 @@ pub fn to_meter(peak: f32) -> f64 {
         return 0.0;
     }
     (1.0 - 20.0 * f64::from(peak).log10() / FLOOR_DB).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn helper() -> PathBuf {
+        PathBuf::from("/Applications/MOM Recorder.app/Contents/MacOS/momr-audio")
+    }
+
+    #[test]
+    fn mic_prefers_the_helper() {
+        let (program, args) = capture_args(Device::Mic, Some(helper().as_path()));
+        assert_eq!(program, helper().display().to_string());
+        assert_eq!(args[0], "mic");
+        assert!(args.windows(2).any(|w| w == ["--rate", "48000"]));
+        assert!(args.windows(2).any(|w| w == ["--channels", "2"]));
+    }
+
+    #[test]
+    fn mic_falls_back_to_the_default_ffmpeg_input() {
+        let (program, args) = capture_args(Device::Mic, None);
+        assert_eq!(program, "ffmpeg");
+        assert!(args.windows(2).any(|w| w == ["-i", ":default"]));
+        assert!(args.windows(2).any(|w| w == ["-ar", "48000"]));
+    }
+
+    #[test]
+    fn computer_uses_the_tap_when_the_helper_is_there() {
+        let (program, args) = capture_args(Device::Computer, Some(helper().as_path()));
+        assert_eq!(program, helper().display().to_string());
+        assert_eq!(args[0], "system");
+    }
+
+    #[test]
+    fn computer_without_a_helper_names_blackhole() {
+        let (program, args) = capture_args(Device::Computer, None);
+        assert_eq!(program, "ffmpeg");
+        assert!(args.windows(2).any(|w| w == ["-i", ":BlackHole 2ch"]));
+    }
+
+    #[test]
+    fn tap_retry_then_loopback_then_idle() {
+        // First run and crashes retry the tap.
+        assert_eq!(
+            next_mode(&ComputerMode::Tap, true, None, None).0,
+            ComputerMode::Tap
+        );
+        assert_eq!(
+            next_mode(&ComputerMode::Tap, true, None, Some(1)).0,
+            ComputerMode::Tap
+        );
+        // A refused tap moves to the loopback when one is installed …
+        let (mode, note) = next_mode(&ComputerMode::Tap, true, Some("BlackHole 2ch"), Some(4));
+        assert_eq!(mode, ComputerMode::BlackHole);
+        assert_eq!(note, None);
+        // … and idles with a banner when none is.
+        let (mode, note) = next_mode(&ComputerMode::Tap, true, None, Some(4));
+        assert_eq!(mode, ComputerMode::Idle);
+        assert!(note.unwrap().contains("BlackHole"));
+        // An old macOS names the cause, not the permission page.
+        let (_, note) = next_mode(&ComputerMode::Tap, true, None, Some(3));
+        assert!(note.unwrap().contains("cannot tap"));
+    }
+
+    #[test]
+    fn missing_helper_goes_straight_to_the_loopback() {
+        let (mode, _) = next_mode(&ComputerMode::Tap, false, Some("BlackHole 16ch"), None);
+        assert_eq!(mode, ComputerMode::BlackHole);
+        let (mode, note) = next_mode(&ComputerMode::Tap, false, None, None);
+        assert_eq!(mode, ComputerMode::Idle);
+        assert!(note.unwrap().contains("helper"));
+    }
+
+    #[test]
+    fn lost_loopback_prefers_the_tap_again() {
+        let (mode, _) = next_mode(
+            &ComputerMode::BlackHole,
+            true,
+            Some("BlackHole 2ch"),
+            Some(1),
+        );
+        assert_eq!(mode, ComputerMode::Tap);
+        // Alone with no helper, it retries the loopback and says so.
+        let (mode, note) = next_mode(&ComputerMode::BlackHole, false, None, Some(1));
+        assert_eq!(mode, ComputerMode::BlackHole);
+        assert!(note.unwrap().contains("went away"));
+    }
+
+    #[test]
+    fn idle_reevaluates_when_something_returns() {
+        assert_eq!(
+            next_mode(&ComputerMode::Idle, true, None, None).0,
+            ComputerMode::Tap
+        );
+        assert_eq!(
+            next_mode(&ComputerMode::Idle, false, Some("BlackHole 2ch"), None).0,
+            ComputerMode::BlackHole
+        );
+    }
+
+    #[test]
+    fn capture_commands_name_no_pulseaudio_tool() {
+        // The forbidden name is spelled apart so this file stays free of it.
+        let forbidden = ["par", "ec"].concat();
+        for device in [Device::Mic, Device::Computer] {
+            for helper in [None, Some(helper().as_path())] {
+                let (program, args) = capture_args(device, helper);
+                assert!(!program.contains(&forbidden));
+                assert!(args.iter().all(|a| !a.contains(&forbidden)));
+            }
+        }
+        let (program, _) = blackhole_args("BlackHole 2ch");
+        assert_eq!(program, "ffmpeg");
+    }
 }

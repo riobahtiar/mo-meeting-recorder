@@ -6,12 +6,25 @@ On the ready page the microphone meter moves when you speak and the computer met
 
 ## Done when
 
-- [ ] Both meters move on the ready page, from a terminal launch.
-- [ ] A 30-second recording with a video playing produces `.tracks/mic.ogg` and `.tracks/computer.ogg` of equal length (`ffprobe`), and a transcript with lines from both You and Remote.
+- [~] Both meters move on the ready page, from a terminal launch.
+- [~] A 30-second recording with a video playing produces `.tracks/mic.ogg` and `.tracks/computer.ogg` of equal length (`ffprobe`), and a transcript with lines from both You and Remote.
 - [ ] Switching the default input or output device during a recording keeps both tracks going (helper path).
 - [ ] With the tap unavailable, the ready page says what to install (BlackHole) and the mic still records.
-- [ ] `cargo test` covers the command construction per device.
-- [ ] `grep -n parec src/` finds nothing.
+- [x] `cargo test` covers the command construction per device.
+- [x] `grep -n parec src/` finds nothing.
+
+Observed 2026-09-25 on Apple silicon (no display in the shell session, so no
+drawn-meter check): `momr watch` reports mic 0.2–0.33 from room noise while
+computer sits at 0.0 on silence; `momr-audio system | ffmpeg … /tmp/system.wav`
+while a file plays gives 5 s at 0.77 peak, and `afplay` of the result plays it
+back. A socket-started recording wrote staging `mic.raw` 22.0 s peak 0.08 and
+`system.raw` 21.9 s peak 0.77; `momr transcribe` of the two tracks prints You
+and Remote lines with the leak correctly on You. The `.ogg` equality and the
+drawn page need a display session: the stop-button flow could not run
+headless (the window owns it). Device switching and the BlackHole banner are
+code plus unit tests only: the restart loop, the
+`AVAudioEngineConfigurationChange` handler and `next_mode` are covered, but no
+headset was switched and no BlackHole is installed here.
 
 ## Prerequisites
 
@@ -201,12 +214,12 @@ Unchanged: both tracks are levelled at export (`export.rs`), and speaker attribu
 
 ## Status
 
-- [ ] Step 1 `Device` enum
-- [ ] Step 2 command builders with tests, `parec` gone
-- [ ] Step 3 mic via ffmpeg moves the meter
-- [ ] Step 4 helper: `list`, `system`, `mic`
-- [ ] Step 5 build script and lookup
-- [ ] Step 6 BlackHole fallback
-- [ ] Step 7 banner
-- [ ] Step 8 echo check
-- [ ] Step 9 tests
+- [x] Step 1 `Device` enum
+- [x] Step 2 command builders with tests, `parec` gone
+- [x] Step 3 mic via ffmpeg moves the meter
+- [x] Step 4 helper: `list`, `system`, `mic`
+- [x] Step 5 build script and lookup
+- [x] Step 6 BlackHole fallback
+- [x] Step 7 banner
+- [x] Step 8 echo check
+- [x] Step 9 tests

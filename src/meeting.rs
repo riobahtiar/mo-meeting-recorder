@@ -263,10 +263,33 @@ mod tests {
 
     #[test]
     fn swapping_two_names_through_a_placeholder() {
-        let tmp = relabel(MD, "You", "\u{1}");
+        let tmp = relabel(MD, "You", "");
         let tmp = relabel(&tmp, "Remote", "You");
-        let out = relabel(&tmp, "\u{1}", "Remote");
+        let out = relabel(&tmp, "", "Remote");
         assert!(out.contains("**[00:01] Remote:** Hi."));
         assert!(out.contains("**[00:03] You:** You: said hi."));
+    }
+
+    /// The checked-in invented meeting opens with its names and settings.
+    #[test]
+    fn fixture_folder_opens() {
+        let dir = std::path::Path::new("tests/fixtures/meeting");
+        let (folder, manifest) = super::open(dir).expect("fixture opens");
+        assert_eq!(folder, dir);
+        assert_eq!(manifest.title, "Demo");
+        assert_eq!(manifest.speakers, vec!["Maya".to_owned(), "Tom".to_owned()]);
+        assert_eq!(manifest.language, "en");
+        let (mic, computer) = crate::export::tracks(&folder);
+        assert!(mic.is_file() && computer.is_file());
+    }
+
+    /// A manifest in the old `{"you", "remote"}` shape still reads.
+    #[test]
+    fn legacy_manifest_shape_reads() {
+        let (_, manifest) = super::open(std::path::Path::new(
+            "tests/fixtures/meeting/legacy.meeting-recorder",
+        ))
+        .expect("legacy opens");
+        assert_eq!(manifest.speakers, vec!["Maya".to_owned(), "Tom".to_owned()]);
     }
 }

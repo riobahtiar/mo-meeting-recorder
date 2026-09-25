@@ -69,11 +69,8 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
 /// Choices in the import dialog: automatic, then a fixed number.
 const SPEAKER_CHOICES: [&str; 7] = ["Automatic", "1", "2", "3", "4", "5", "6"];
 
-/// The native menu bar: GTK's quartz backend turns this `GMenuModel` into the
-/// NSMenu bar, and adds the standard app menu when `app.about`,
-/// `app.preferences` and `app.quit` exist. Every item is a `GAction` from
-/// `install_actions`, so enabled state is shared with the buttons.
-fn install_menubar(app: &adw::Application) {
+/// The menu structure alone, so tests can walk every item without an app.
+fn menu_model() -> gio::Menu {
     use gio::Menu;
     let item = |label: &str, action: &str| gio::MenuItem::new(Some(label), Some(action));
 
@@ -137,7 +134,15 @@ fn install_menubar(app: &adw::Application) {
     bar.append_submenu(Some("View"), &view);
     bar.append_submenu(Some("Window"), &window);
     bar.append_submenu(Some("Help"), &help);
-    app.set_menubar(Some(&bar));
+    bar
+}
+
+/// The native menu bar: GTK's quartz backend turns this `GMenuModel` into the
+/// NSMenu bar, and adds the standard app menu when `app.about`,
+/// `app.preferences` and `app.quit` exist. Every item is a `GAction` from
+/// `install_actions`, so enabled state is shared with the buttons.
+fn install_menubar(app: &adw::Application) {
+    app.set_menubar(Some(&menu_model()));
 }
 
 /// Runs the app. `open` is a `.meeting-recorder` file or a meeting folder to show
@@ -3638,4 +3643,70 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
             .build(),
     );
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `win.*` action the window registers in `install_actions`.
+    const WIN_ACTIONS: &[&str] = &[
+        "win.new-recording",
+        "win.open-meeting",
+        "win.import",
+        "win.reveal",
+        "win.start",
+        "win.pause",
+        "win.stop",
+        "win.compact",
+        "win.copy-transcript",
+        "win.fullscreen",
+        "win.transcribe-again",
+    ];
+
+    fn actions_in(model: &gio::MenuModel, out: &mut Vec<String>) {
+        for i in 0..model.n_items() {
+            if let Some(action) = model
+                .item_attribute_value(i, "action", None)
+                .and_then(|v| v.get::<String>())
+            {
+                // A `win.transcribe-again::"en"` target still names its action.
+                let base = action.split("::").next().unwrap_or(&action).to_owned();
+                out.push(base);
+            }
+            let links = model.iterate_item_links(i);
+            while let Some((_, linked)) = links.next() {
+                actions_in(&linked, out);
+            }
+        }
+    }
+
+    #[test]
+    fn menu_items_name_registered_actions() {
+        let bar = menu_model();
+        let mut actions = Vec::new();
+        actions_in(&bar.upcast_ref::<gio::MenuModel>(), &mut actions);
+        assert!(!actions.is_empty());
+        for action in &actions {
+            let known = action.starts_with("win.")
+                || action.starts_with("app.")
+                || action.starts_with("window.")
+                || action.starts_with("text.")
+                || action.starts_with("clipboard.")
+                || action.starts_with("selection.");
+            assert!(known, "menu names unknown action {action}");
+            if action.starts_with("win.") {
+                assert!(
+                    WIN_ACTIONS.contains(&action.as_str()),
+                    "menu names unregistered {action}"
+                );
+            }
+        }
+        for expected in WIN_ACTIONS {
+            assert!(
+                actions.iter().any(|a| a == expected),
+                "menu misses {expected}"
+            );
+        }
+    }
 }

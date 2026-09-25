@@ -126,8 +126,12 @@ fn extend_path() {
     }
     let current = std::env::var_os("PATH").unwrap_or_default();
     let keep: Vec<PathBuf> = std::env::split_paths(&current).collect();
-    let mut joined = extra.into_iter().filter(|p| p.is_dir()).collect::<Vec<_>>();
-    joined.extend(keep);
+    let mut seen = std::collections::HashSet::new();
+    let joined: Vec<PathBuf> = extra
+        .into_iter()
+        .chain(keep)
+        .filter(|p| p.is_dir() && seen.insert(p.clone()))
+        .collect();
     if let Ok(path) = std::env::join_paths(joined) {
         // SAFETY: first thing in main, before any other thread exists; the
         // environment is not read concurrently. (set_var is unsafe in edition
@@ -149,7 +153,7 @@ mod tests {
     fn extend_path_puts_the_exe_dir_first_and_keeps_the_original() {
         let _guard: MutexGuard<'static, ()> = LOCK.lock().unwrap();
         let saved = std::env::var_os("PATH");
-        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin:/usr/bin") };
         extend_path();
         let path = std::env::var_os("PATH").unwrap();
         let mut entries = std::env::split_paths(&path);
@@ -162,6 +166,10 @@ mod tests {
         let rest: Vec<PathBuf> = entries.collect();
         assert!(rest.contains(&PathBuf::from("/usr/bin")));
         assert!(rest.contains(&PathBuf::from("/bin")));
+        assert_eq!(
+            rest.iter().filter(|p| **p == PathBuf::from("/usr/bin")).count(),
+            1
+        );
         match saved {
             Some(path) => unsafe { std::env::set_var("PATH", path) },
             None => unsafe { std::env::remove_var("PATH") },

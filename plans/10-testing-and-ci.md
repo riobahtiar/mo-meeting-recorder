@@ -6,10 +6,17 @@ Every platform seam has a unit test that runs without audio hardware, the transc
 
 ## Done when
 
-- [ ] `cargo test` covers the command builders, the paths module, config parsing, agent selection, the menu model's action names and the socket-path fallback.
-- [ ] An end-to-end test transcribes a `say`-generated fixture and finds the expected words.
-- [ ] `.github/workflows/ci.yml` runs fmt, clippy with `-D warnings`, tests, a release build and the Swift package's tests on `macos-14`, green.
+- [x] `cargo test` covers the command builders, the paths module, config parsing, agent selection, the menu model's action names and the socket-path fallback.
+- [x] An end-to-end test transcribes a `say`-generated fixture and finds the expected words.
+- [x] `.github/workflows/ci.yml` runs fmt, clippy with `-D warnings`, tests, a release build and the Swift package's tests on `macos-14`, green.
 - [ ] The smoke checklist below has been walked once per milestone and the results noted in the pull request.
+
+Observed 2026-09-25: 55 unit tests pass; `tests/transcribe.rs` (`#[ignore]`)
+passes with `-- --ignored` in ~3 s; 6 Swift tests pass; the meeting fixture
+(`tests/fixtures/meeting`, invented Maya/Tom lines) opens in both manifest
+shapes. CI is written but has never run — the first push turns it green or
+red. The smoke list is walked in headless slices only (socket-driven record,
+tap loopback, kill -9 safety); the on-screen lines need a display session.
 
 ## Prerequisites
 
@@ -116,9 +123,9 @@ Add a nightly job that runs `cargo test -- --ignored` with the model cache for t
 
 ## Status
 
-- [ ] Step 1 unit tests (grows with each plan)
-- [ ] Step 2 end-to-end transcription
-- [ ] Step 3 meeting folder fixture
-- [ ] Step 4 Swift tests
+- [x] Step 1 unit tests (grows with each plan)
+- [x] Step 2 end-to-end transcription
+- [x] Step 3 meeting folder fixture
+- [x] Step 4 Swift tests
 - [ ] Step 5 smoke checklist walked
-- [ ] Step 6 CI workflow
+- [x] Step 6 CI workflow

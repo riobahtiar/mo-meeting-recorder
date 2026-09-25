@@ -54,7 +54,7 @@ impl Format {
 }
 
 /// Appends silence so both tracks are equally long and stay aligned at the end.
-fn pad_to_same_length(paths: [&Path; 2]) -> std::io::Result<()> {
+pub fn pad_to_same_length(paths: [&Path; 2]) -> std::io::Result<()> {
     let sizes = [
         std::fs::metadata(paths[0])?.len(),
         std::fs::metadata(paths[1])?.len(),
@@ -112,8 +112,16 @@ pub fn speech_gain_db(raw: &Path) -> f64 {
 
 /// Encodes `mic_raw` and `system_raw` into `out`. True when every file was written.
 /// Each track is levelled on its own first, so a quiet side is as easy to hear
-/// as a loud one.
-pub fn export_audio(mic_raw: &Path, system_raw: &Path, out: &Path, format: Format) -> bool {
+/// as a loud one. With `voice`, each track also goes through
+/// `enhance::VOICE_CHAIN` before its gain (the tracks given are then the
+/// enhanced copies, so the gain is measured without the noise taken out).
+pub fn export_audio(
+    mic_raw: &Path,
+    system_raw: &Path,
+    out: &Path,
+    format: Format,
+    voice: bool,
+) -> bool {
     for path in [mic_raw, system_raw] {
         if OpenOptions::new()
             .create(true)
@@ -142,8 +150,13 @@ pub fn export_audio(mic_raw: &Path, system_raw: &Path, out: &Path, format: Forma
     };
     let to_mono = "pan=mono|c0=0.5*c0+0.5*c1";
     let target = |name: &str| out.join(name).to_string_lossy().into_owned();
-    let mic_gain = format!("volume={:.1}dB", speech_gain_db(mic_raw));
-    let system_gain = format!("volume={:.1}dB", speech_gain_db(system_raw));
+    let chain = if voice {
+        format!("{},", crate::enhance::VOICE_CHAIN)
+    } else {
+        String::new()
+    };
+    let mic_gain = format!("{chain}volume={:.1}dB", speech_gain_db(mic_raw));
+    let system_gain = format!("{chain}volume={:.1}dB", speech_gain_db(system_raw));
     let limit = "alimiter=limit=0.9:level=disabled";
 
     let jobs: Vec<Vec<String>> = match format {
@@ -334,7 +347,7 @@ mod tests {
         let (mic, system) = (dir.join("mic.raw"), dir.join("system.raw"));
         tone(&mic, 0.5, 3); // loud
         tone(&system, 0.01, 3); // 34 dB quieter
-        assert!(export_audio(&mic, &system, &dir, Format::Separate));
+        assert!(export_audio(&mic, &system, &dir, Format::Separate, false));
         let (loud, quiet) = (
             mean_db(&dir.join("mic.ogg")),
             mean_db(&dir.join("computer.ogg")),

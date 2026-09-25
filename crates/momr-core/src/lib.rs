@@ -23,6 +23,7 @@ pub mod audio;
 pub mod chapters;
 pub mod cleanup;
 pub mod diarize;
+pub mod enhance;
 pub mod export;
 pub mod finish;
 pub mod helper;

@@ -31,12 +31,19 @@ pub struct RecordingNote {
     pub started_at: i64,
     pub format: Option<Format>,
     pub language: Option<String>,
+    /// Voice enhancement for the saved audio (plan 17).
+    pub enhance: Option<bool>,
 }
 
 impl RecordingNote {
     /// The format to finish in: the note's, else the one in Settings.
     pub fn format(&self) -> Format {
         self.format.unwrap_or_else(crate::settings::load_format)
+    }
+
+    /// Whether to enhance the saved audio: the note's, else Settings'.
+    pub fn enhance(&self) -> bool {
+        self.enhance.unwrap_or_else(crate::settings::load_enhance)
     }
 
     /// The transcript language: the note's, else the one in Settings.
@@ -60,6 +67,9 @@ pub fn write_note(staging: &Path, note: &RecordingNote) {
     if let Some(language) = &note.language {
         value["language"] = language.as_str().into();
     }
+    if let Some(enhance) = note.enhance {
+        value["enhance"] = enhance.into();
+    }
     let _ = std::fs::write(staging.join(NOTE), value.to_string());
 }
 
@@ -75,7 +85,79 @@ pub fn read_note(staging: &Path) -> Option<RecordingNote> {
         started_at: value["started_at"].as_i64()?,
         format: value["format"].as_str().map(Format::from_key),
         language: value["language"].as_str().map(str::to_owned),
+        enhance: value["enhance"].as_bool(),
     })
+}
+
+/// What saving a staging folder's audio produced.
+#[derive(Debug, Default, PartialEq)]
+pub struct Exported {
+    /// The listening files (`audio.ogg`, or the pair) were written.
+    pub audio: bool,
+    /// `.tracks/` was written from the raw tracks.
+    pub tracks: bool,
+    /// The listening files are enhanced.
+    pub enhanced: bool,
+    /// Why enhancement was asked for but not applied.
+    pub enhance_problem: Option<String>,
+}
+
+/// Writes a staging folder's audio into `out`: `.tracks/` from the raw
+/// tracks, always (they are what the transcriber and transcribe-again read,
+/// D26), and the listening files in `format`, enhanced when `enhance` and
+/// the enhancement works. Enhancement is both sides or neither, so the two
+/// sides of a meeting never sound like two different processes. The
+/// enhanced copies are removed once encoded; the raw tracks stay.
+pub fn export(staging: &Path, out: &Path, format: Format, enhance: bool) -> Exported {
+    let (mic, system) = (staging.join("mic.raw"), staging.join("system.raw"));
+    if std::fs::create_dir_all(out).is_err() {
+        return Exported::default();
+    }
+    // Padding first, so the kept tracks and the listening files agree in
+    // length whichever copy the listening files come from.
+    for path in [&mic, &system] {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path);
+    }
+    let padded = export::pad_to_same_length([&mic, &system]).is_ok();
+    let tracks = padded && export::export_tracks(&mic, &system, out);
+    let mut exported = Exported {
+        tracks,
+        ..Exported::default()
+    };
+    let (mut listen_mic, mut listen_system) = (mic.clone(), system.clone());
+    if enhance {
+        let helper = crate::helper::path();
+        match (
+            crate::enhance::track(&mic, helper.as_deref()),
+            crate::enhance::track(&system, helper.as_deref()),
+        ) {
+            (Ok(m), Ok(s)) => {
+                (listen_mic, listen_system) = (m, s);
+                exported.enhanced = true;
+            }
+            (Err(why), other) | (other, Err(why)) => {
+                if let Ok(copy) = other
+                    && copy != mic
+                    && copy != system
+                {
+                    let _ = std::fs::remove_file(copy);
+                }
+                exported.enhance_problem =
+                    Some(crate::locales::t("enhance.failed").replace("{}", &why));
+            }
+        }
+    }
+    exported.audio =
+        export::export_audio(&listen_mic, &listen_system, out, format, exported.enhanced);
+    for (copy, raw) in [(&listen_mic, &mic), (&listen_system, &system)] {
+        if copy != raw {
+            let _ = std::fs::remove_file(copy);
+        }
+    }
+    exported
 }
 
 /// Recorded seconds in a staging folder, from the size of the longer raw track.
@@ -107,6 +189,7 @@ pub fn manifest(note: &RecordingNote, duration_secs: i64) -> Manifest {
         provider: None,
         chapters: Vec::new(),
         chapters_by: None,
+        enhanced: false,
     }
 }
 
@@ -193,6 +276,7 @@ fn run(args: &Args) -> Result<(), String> {
         started_at: crate::ipc::now() - duration,
         format: None,
         language: None,
+        enhance: None,
     });
     if let Some(title) = &args.title {
         note.title = title.clone();
@@ -201,9 +285,14 @@ fn run(args: &Args) -> Result<(), String> {
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     let (mic, system) = (staging.join("mic.raw"), staging.join("system.raw"));
     eprintln!("{}", crate::locales::t("help.stages_saving"));
-    let audio = export::export_audio(&mic, &system, &out, note.format());
-    let tracks = export::export_tracks(&mic, &system, &out);
+    let exported = export(staging, &out, note.format(), note.enhance());
+    if let Some(problem) = &exported.enhance_problem {
+        // Said, not fatal: the meeting is saved without enhancement.
+        eprintln!("{APP_NAME}: {problem}");
+    }
+    let (audio, tracks) = (exported.audio, exported.tracks);
     let mut manifest = manifest(&note, duration);
+    manifest.enhanced = exported.enhanced;
     meeting::write(&out, &manifest).map_err(|e| format!("{}: {e}", out.display()))?;
     println!("{}", out.display());
 
@@ -245,13 +334,17 @@ mod tests {
             started_at: 1_790_000_000,
             format: Some(Format::Separate),
             language: Some("id".into()),
+            enhance: Some(true),
         };
         write_note(&dir, &full);
         assert_eq!(read_note(&dir), Some(full));
         // The AppKit shell writes only what it knows.
         std::fs::write(dir.join(NOTE), r#"{"title":"Sync","started_at":5}"#).unwrap();
         let bare = read_note(&dir).unwrap();
-        assert_eq!((bare.format, bare.language), (None, None));
+        assert_eq!(
+            (bare.format, bare.language, bare.enhance),
+            (None, None, None)
+        );
         std::fs::write(dir.join(NOTE), r#"{"title":"","started_at":5}"#).unwrap();
         assert_eq!(read_note(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);

@@ -25,7 +25,7 @@ use crate::{APP_ID, APP_NAME};
 use momr_core::agent::{self, Agent};
 use momr_core::audio::{Device, HISTORY, Source, Sources, to_meter};
 use momr_core::chapters;
-use momr_core::export::{self, Format, export_audio, export_tracks};
+use momr_core::export::{self, Format, export_audio};
 use momr_core::finish::{self, RecordingNote, raw_duration};
 use momr_core::ipc::{SharedStatus, Status};
 use momr_core::locales::{Lang, t, tf};
@@ -312,6 +312,9 @@ struct Recorder {
     /// The sides the running recording keeps, fixed at Start.
     recording_sources: Cell<Sources>,
     format_row: adw::ComboRow,
+    /// Voice enhancement for the saved audio (plan 17; the transcript
+    /// always uses the original, D26).
+    enhance_row: adw::SwitchRow,
     language_row: adw::ComboRow,
     timer_row: adw::ActionRow,
     timer_plan: RefCell<momr_core::timer::Plan>,
@@ -514,6 +517,11 @@ impl Recorder {
             .build();
         let saved = settings::load_format();
         format_row.set_selected(Format::ALL.iter().position(|f| *f == saved).unwrap_or(0) as u32);
+        let enhance_row = adw::SwitchRow::builder()
+            .title(t("ready.enhance_title"))
+            .subtitle(t("ready.enhance_subtitle"))
+            .active(settings::load_enhance())
+            .build();
         let language_labels: Vec<&str> = LANGUAGE_CODES
             .iter()
             .map(|code| language_label(code))
@@ -541,6 +549,7 @@ impl Recorder {
         group.add(&title_row);
         group.add(&sources_row);
         group.add(&format_row);
+        group.add(&enhance_row);
         group.add(&language_row);
         group.add(&timer_row);
         content.append(&group);
@@ -853,6 +862,7 @@ impl Recorder {
             sources_row,
             recording_sources: Cell::new(Sources::Both),
             format_row,
+            enhance_row,
             language_row,
             timer_row,
             timer_plan: RefCell::default(),
@@ -1047,6 +1057,16 @@ impl Recorder {
             }
         });
 
+        // Like the format, enhancement applies at Stop, so it can change
+        // during the call; the staging note follows for a recovery.
+        let weak = Rc::downgrade(self);
+        self.enhance_row.connect_active_notify(move |row| {
+            if let Some(r) = weak.upgrade() {
+                Self::saved(&weak, settings::save_enhance(row.is_active()));
+                r.refresh_recording_note();
+            }
+        });
+
         // The two language rows (recording page, done page) are one setting.
         let weak = Rc::downgrade(self);
         self.language_row.connect_selected_notify(move |row| {
@@ -1142,17 +1162,7 @@ impl Recorder {
         let weak = Rc::downgrade(self);
         self.title_row.connect_changed(move |row| {
             if let Some(r) = weak.upgrade() {
-                if r.state.get() == State::Recording
-                    && let Some(staging) = r.staging.borrow().as_ref()
-                {
-                    write_recording_note(
-                        staging,
-                        row.text().trim(),
-                        r.started_at.get(),
-                        r.selected_format(),
-                        r.selected_language(),
-                    );
-                }
+                r.refresh_recording_note();
                 r.shared.lock().unwrap().title = row.text().to_string();
             }
         });
@@ -2481,6 +2491,23 @@ impl Recorder {
             .unwrap_or(Format::Mono)
     }
 
+    /// Rewrites the staging note with what a recovery needs now: the title
+    /// typed so far, the start, format, language and enhancement.
+    fn refresh_recording_note(&self) {
+        if let Some(staging) = self.staging.borrow().as_ref() {
+            finish::write_note(
+                staging,
+                &RecordingNote {
+                    title: self.title_row.text().trim().to_owned(),
+                    started_at: self.started_at.get(),
+                    format: Some(self.selected_format()),
+                    language: Some(self.selected_language().to_owned()),
+                    enhance: Some(self.enhance_row.is_active()),
+                },
+            );
+        }
+    }
+
     fn selected_sources(&self) -> Sources {
         Sources::ALL
             .get(self.sources_row.selected() as usize)
@@ -2897,6 +2924,7 @@ impl Recorder {
             provider: None,
             chapters: Vec::new(),
             chapters_by: None,
+            enhanced: false,
         });
         self.animation_since.set(Some(std::time::Instant::now()));
         self.animation.reset();
@@ -2981,8 +3009,10 @@ impl Recorder {
             started_at: momr_core::ipc::now() - raw_duration(&staging),
             format: None,
             language: None,
+            enhance: None,
         });
         self.title_row.set_text(&note.title);
+        self.enhance_row.set_active(note.enhance());
         let (format, language) = (note.format(), note.language());
         if let Some(i) = Format::ALL.iter().position(|f| *f == format) {
             self.format_row.set_selected(i as u32);
@@ -3118,14 +3148,9 @@ impl Recorder {
                 .set_label(&t("help.could_not_start").replace("{}", &e.to_string()));
             return;
         }
-        write_recording_note(
-            &staging,
-            &self.title(),
-            started_at,
-            self.selected_format(),
-            self.selected_language(),
-        );
         *self.staging.borrow_mut() = Some(staging);
+        self.started_at.set(started_at);
+        self.refresh_recording_note();
         *self.result_dir.borrow_mut() = None;
         self.player.unload();
         // A scheduled start has happened, or been overtaken by hand; the
@@ -3196,22 +3221,20 @@ impl Recorder {
 
         let format = self.selected_format();
         let language = self.selected_language();
+        let enhance = self.enhance_row.is_active();
         let out = meeting::unused_folder_for(self.started_at.get(), &self.title());
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (audio_out, audio_staging) = (out.clone(), staging.clone());
-            let saved = gio::spawn_blocking(move || {
-                let _ = std::fs::create_dir_all(&audio_out);
-                let (mic, system) = (
-                    audio_staging.join("mic.raw"),
-                    audio_staging.join("system.raw"),
-                );
-                let audio = export_audio(&mic, &system, &audio_out, format);
-                let tracks = export_tracks(&mic, &system, &audio_out);
-                (audio, tracks)
+            let exported = gio::spawn_blocking(move || {
+                finish::export(&audio_staging, &audio_out, format, enhance)
             })
             .await
-            .unwrap_or((false, false));
+            .unwrap_or_default();
+            if let Some(problem) = &exported.enhance_problem {
+                this.toast(problem);
+            }
+            let saved = (exported.audio, exported.tracks);
             let manifest = Manifest {
                 title: this.title(),
                 started_at: this.started_at.get(),
@@ -3228,6 +3251,7 @@ impl Recorder {
                 provider: None,
                 chapters: Vec::new(),
                 chapters_by: None,
+                enhanced: exported.enhanced,
             };
             let _ = meeting::write(&out, &manifest);
             *this.manifest.borrow_mut() = Some(manifest);
@@ -4437,7 +4461,7 @@ fn import_audio(
         return Err(t("import.no_audio").into());
     }
     let _ = std::fs::write(&silence, []);
-    let listened = export_audio(&raw, &silence, out, Format::Mono);
+    let listened = export_audio(&raw, &silence, out, Format::Mono, false);
     let kept = std::process::Command::new("ffmpeg")
         .args([
             "-v", "error", "-y", "-nostdin", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i",
@@ -4453,26 +4477,6 @@ fn import_audio(
         return Err(t("import.no_convert").into());
     }
     Ok((bytes / (48_000 * 2 * 2)) as i64)
-}
-
-/// Keeps the staging note current: the title, start, format and language
-/// a recovery needs if this recording never reaches Stop.
-fn write_recording_note(
-    staging: &std::path::Path,
-    title: &str,
-    started_at: i64,
-    format: Format,
-    language: &str,
-) {
-    finish::write_note(
-        staging,
-        &RecordingNote {
-            title: title.to_owned(),
-            started_at,
-            format: Some(format),
-            language: Some(language.to_owned()),
-        },
-    );
 }
 
 /// Recording staging folders left behind, with some audio in them.

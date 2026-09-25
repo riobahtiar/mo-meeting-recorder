@@ -23,7 +23,7 @@
 | UI polish after the first display session | [14](plans/14-ui-polish.md) | in progress — focus rings, remembered window size, appearance switch, Settings pages and gear button, compact strip and animation fit coded; the on-screen check is next |
 | Storage reset, recording timer, audio sources | [15](plans/15-reset-timer-sources.md) | in progress — cleanup and timer logic tested, Settings › Storage, Timer dialog, microphone and per-app pickers coded; helper builds with tested `--device`/`--bundle` flags, on-screen source switching needs a display session |
 | Windows and Linux versions | [16](plans/16-multi-platform-architecture.md) | blueprint — `momr-core` has no `cfg(target_os)`; `momr-platform` has paths, process, fs and sock for macOS, other targets next |
-| Record one side or both; voice enhancement | [17](plans/17-sources-and-voice-enhancement.md) | in progress — Record row on the ready page (both shells) coded and tested; voice enhancement waits for its research; on-screen check needs a display session |
+| Record one side or both; voice enhancement | [17](plans/17-sources-and-voice-enhancement.md) | in progress — Record row and Voice enhancement switch (both shells) coded and tested; enhancement measured on an invented clip (18 dB less noise, sample-aligned); on-screen check needs a display session |
 
 Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: the app is GTK 4 and libadwaita. Screenshots come with the macOS look in plan 07.
 
@@ -39,6 +39,7 @@ Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: 
 - **Keeps your recording safe.** An unfinished recording is offered back on the next start.
 - **Records on a timer.** Stop after a set length, or start and stop at clock times (⌘T).
 - **Records what you choose.** Pick the microphone, and record every app or only the ones you name (Settings › Audio). On the ready page, record both sides, only the microphone or only the computer audio.
+- **Cleans up voices when you want it.** Voice enhancement takes wind, traffic, hum and room noise out of the saved audio with Apple's on-device voice isolation, then shapes the voice with a gentle EQ and compressor. The transcript is always made from the original audio.
 - **Cleans up after itself.** Settings › Storage shows what the app keeps and clears it; meetings are never touched.
 
 ## Build
@@ -51,7 +52,7 @@ sh scripts/build-macos.sh   # Rust binary + momr-audio/momr-menubar helpers
 
 The first transcription downloads the whisper model (about 1.6 GB, once); telling voices apart in an imported file downloads the speaker model (about 120 MB) on first use.
 
-Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here, and one recorded here opens there. The manifest differs in two small ways. New meetings write `"app": "momr"` where upstream wrote `"omarchy-meeting-recorder"`; no reader checks that field, so both open in both apps. A new optional `"provider"` field records which transcription engine made the transcript (`local`, `elevenlabs`, `google` or `openrouter`), and older readers ignore it. The speaker labels in `transcript.md` ("You", "Remote", "Remote N", "Speaker N") and its language line stay in English whatever the interface language, because scripts read them. Models, settings and `config.toml` live under `~/Library/Application Support/momr`; staging, the cache and the live-state socket under `~/Library/Caches/momr`.
+Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here, and one recorded here opens there. The manifest differs in three small ways. New meetings write `"app": "momr"` where upstream wrote `"omarchy-meeting-recorder"`; no reader checks that field, so both open in both apps. A new optional `"provider"` field records which transcription engine made the transcript (`local`, `elevenlabs`, `google` or `openrouter`), and older readers ignore it. A new optional `"enhanced"` field says whether the listening audio went through voice enhancement; `.tracks/` and the transcript never do, and a manifest without it reads as not enhanced. The speaker labels in `transcript.md` ("You", "Remote", "Remote N", "Speaker N") and its language line stay in English whatever the interface language, because scripts read them. Models, settings and `config.toml` live under `~/Library/Application Support/momr`; staging, the cache and the live-state socket under `~/Library/Caches/momr`.
 
 ## Command line
 

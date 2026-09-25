@@ -87,6 +87,16 @@ pub fn save_sources(sources: crate::audio::Sources) -> std::io::Result<()> {
     save("sources", sources.key())
 }
 
+/// Whether new recordings are saved with voice enhancement; off until the
+/// ready page's switch says otherwise.
+pub fn load_enhance() -> bool {
+    load()["enhance"].as_bool().unwrap_or(false)
+}
+
+pub fn save_enhance(on: bool) -> std::io::Result<()> {
+    save_value("enhance", serde_json::Value::Bool(on))
+}
+
 /// A whisper language code from `LANGUAGE_CODES`, "auto" when unset or unknown.
 pub fn load_language() -> &'static str {
     let settings = load();

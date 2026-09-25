@@ -85,6 +85,10 @@ pub struct Manifest {
     pub chapters: Vec<Chapter>,
     /// Which agent made them, e.g. "claude".
     pub chapters_by: Option<String>,
+    /// Whether the listening audio was voice-enhanced (plan 17). The kept
+    /// `.tracks/` and the transcript are never enhanced (D26). Absent in
+    /// older manifests and upstream ones, which read as false.
+    pub enhanced: bool,
 }
 
 impl Manifest {
@@ -106,6 +110,7 @@ impl Manifest {
                 .map(|c| json!({ "start_ms": c.start_ms, "title": c.title }))
                 .collect::<Vec<_>>(),
             "chapters_by": self.chapters_by,
+            "enhanced": self.enhanced,
         })
     }
 
@@ -147,6 +152,7 @@ impl Manifest {
                 })
                 .unwrap_or_default(),
             chapters_by: value["chapters_by"].as_str().map(str::to_owned),
+            enhanced: value["enhanced"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -398,6 +404,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
         provider: None,
         chapters: Vec::new(),
         chapters_by: None,
+        enhanced: false,
     })
 }
 
@@ -467,6 +474,8 @@ mod tests {
         )
         .expect("reads");
         assert_eq!(half.speakers, vec!["Maya".to_owned(), "Remote".to_owned()]);
+        // Upstream and older manifests have no "enhanced": not enhanced.
+        assert!(!half.enhanced);
     }
 
     #[test]
@@ -487,9 +496,11 @@ mod tests {
                 title: "Intro".into(),
             }],
             chapters_by: Some("claude".into()),
+            enhanced: true,
         };
         let back = Manifest::from_json(&manifest.to_json()).expect("reads back");
         assert_eq!(back.title, manifest.title);
+        assert!(back.enhanced);
         assert_eq!(back.duration_secs, 42);
         assert_eq!(back.format.key(), Format::Separate.key());
         assert_eq!(back.language, "id");

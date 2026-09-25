@@ -1,5 +1,5 @@
 // momr-audio: microphone and system-audio capture for MOM Recorder.
-// One executable, four subcommands:
+// One executable, five subcommands:
 //
 //   list [--rate …] [--channels …]   devices, audio processes and tap support, as JSON
 //   mic [--rate N] [--channels N] [--device UID]
@@ -9,6 +9,8 @@
 //                                    process tap as s16le: every process, or
 //                                    only the apps with those bundle identifiers
 //   run -- <program> <args…>         run a program, killing it when the parent exits
+//   enhance <in.raw> <out.raw>       voice isolation for a saved s16le track
+//                                    (plan 17; Enhance.swift)
 //
 // Exit codes, shared with src/audio.rs, which maps them to the BlackHole
 // fallback and the ready-page banner. They are an interface: change one only
@@ -27,6 +29,8 @@
 //      starting it. The OSStatus is on stderr.
 //   7  audio conversion keeps failing: 50 buffers in a row could not become
 //      s16le, so the recording would be silent. The reason is on stderr.
+//   8  `enhance`: AUSoundIsolation is not available on this Mac.
+//   9  `enhance`: the unit failed to render. The reason is on stderr.
 //
 // `run` exits with its child's status instead, except for 2 above.
 
@@ -39,6 +43,7 @@ enum MomrCommand: Equatable {
     case mic(rate: Double, channels: AVAudioChannelCount, device: String?)
     case system(rate: Double, channels: AVAudioChannelCount, bundles: [String])
     case run(program: String, args: [String])
+    case enhance(input: String, output: String)
 }
 
 private func flag(_ name: String, in args: [String], default defaultValue: String)
@@ -72,6 +77,9 @@ func parseCommand(_ args: [String]) -> MomrCommand? {
     case "run":
         guard args.count >= 4, args[1] == "--" else { return nil }
         return .run(program: args[2], args: Array(args.dropFirst(3)))
+    case "enhance":
+        guard args.count == 3, !args[1].isEmpty, !args[2].isEmpty, args[1] != args[2] else { return nil }
+        return .enhance(input: args[1], output: args[2])
     case "list", "mic", "system":
         guard
             let rateText = flag("--rate", in: args, default: "48000"),
@@ -98,7 +106,7 @@ func parseCommand(_ args: [String]) -> MomrCommand? {
 
 private func usage() -> Never {
     fputs(
-        "usage: momr-audio (list | mic [--rate N] [--channels N] [--device UID] | system [--rate N] [--channels N] [--bundle ID]… | run -- <program> <args…>)\n",
+        "usage: momr-audio (list | mic [--rate N] [--channels N] [--device UID] | system [--rate N] [--channels N] [--bundle ID]… | run -- <program> <args…> | enhance <in.raw> <out.raw>)\n",
         stderr)
     exit(2)
 }
@@ -118,6 +126,8 @@ struct MomrAudio {
             code = runSystem(rate: rate, channels: channels, bundles: bundles)
         case let .run(program, programArgs):
             code = runRun(program: program, args: programArgs)
+        case let .enhance(input, output):
+            code = runEnhance(input: input, output: output)
         }
         exit(code)
     }

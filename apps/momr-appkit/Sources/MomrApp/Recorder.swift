@@ -17,6 +17,12 @@ final class Recorder {
     private var pausedTotal: TimeInterval = 0
     /// The sides this recording keeps, fixed at Start.
     let sources: Sources
+    private let title: String
+    /// Voice enhancement at Stop; it may change during the call, like the
+    /// GTK switch, and the note follows so a recovery honours it.
+    var enhance: Bool {
+        didSet { try? writeNote() }
+    }
 
     /// Where the recording is. `stopped` is terminal: the staging folder is
     /// being finished, so pause and resume must not reopen files in it.
@@ -45,7 +51,7 @@ final class Recorder {
 
     /// Opens the staging folder and starts both tracks. Throws with the
     /// reason (disk full, no permission) for the status line.
-    init(mic: SourceCapture, computer: SourceCapture, title: String, sources: Sources = .both) throws {
+    init(mic: SourceCapture, computer: SourceCapture, title: String, sources: Sources = .both, enhance: Bool = false) throws {
         self.mic = mic
         self.computer = computer
         startedAt = Int64(Date().timeIntervalSince1970)
@@ -57,7 +63,9 @@ final class Recorder {
         // A side not kept keeps its empty file and gets no handle.
         if !sources.records(.mic) { try micFile?.close(); micFile = nil }
         if !sources.records(.system) { try systemFile?.close(); systemFile = nil }
-        try writeNote(title: title)
+        self.title = title
+        self.enhance = enhance
+        try writeNote()
         mic.record(into: micFile)
         computer.record(into: systemFile)
     }
@@ -72,10 +80,11 @@ final class Recorder {
             .appendingPathComponent("Library/Caches/momr")
     }
 
-    /// The staging note `finish::read_note` reads. Format and language are
-    /// left out: this shell has no pickers yet, so the saved settings apply.
-    private func writeNote(title: String) throws {
-        let note: [String: Any] = ["title": title, "started_at": startedAt]
+    /// The staging note `finish::read_note` reads, which `momr finish` then
+    /// follows. Format and language are left out: this shell has no pickers
+    /// yet, so the saved settings apply.
+    private func writeNote() throws {
+        let note: [String: Any] = ["title": title, "started_at": startedAt, "enhance": enhance]
         let data = try JSONSerialization.data(withJSONObject: note)
         try data.write(to: staging.appendingPathComponent("recording.json"))
     }

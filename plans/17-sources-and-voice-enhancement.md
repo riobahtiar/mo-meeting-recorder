@@ -28,15 +28,21 @@ Plan 12 (the core both shells share) and plan 15 (the Audio settings the sources
 
 ### 2. Voice enhancement
 
-To be specified from the research: the pipeline, where it runs (capture, export, or both), its dependency cost, and the manifest key.
+Chosen from the research (AUSoundIsolation plus an ffmpeg chain, both tracks):
+
+- **Helper.** `momr-audio enhance <in.raw> <out.raw>` (`Enhance.swift`) renders each channel of a D03 track offline through `AVAudioEngine` with AUSoundIsolation, the High Quality Voice model on macOS 15+, 90 % wet. The unit hides a delay (56–93 ms), so the output is aligned by an envelope correlation refined on the waveform, to the sample. Exit 8 means the unit is missing, 9 a failed render.
+- **Core.** `enhance::track` runs the helper and returns `*.enhanced.raw`, or why not; `finish::export` is the one export both shells call: `.tracks/` from the raw tracks, the listening files from the enhanced copies through `enhance::VOICE_CHAIN` (80 Hz high-pass, −2 dB at 250 Hz, +3 dB at 3.5 kHz, `deesser`, a 2.5:1 compressor) before the level gain, so the gain is measured without the noise. Both sides or neither; a failure saves the meeting unenhanced and says why.
+- **Formats.** The staging note gains `enhance`, the manifest `enhanced` (absent reads as false; README note), settings `enhance`. The transcript and `.tracks/` are never enhanced (D26).
+- **Shells.** A Voice enhancement switch on the GTK ready page, changeable during the call like the format; a checkbox in the AppKit shell, read from settings and written into the staging note so `momr finish` follows it.
 
 ## Verify
 
 1. Choose each Record option, record ten seconds while speaking and playing a video: the folder has both files, the side not kept is silent, the transcript names only the kept side.
 2. Relaunch: the choice is kept. Start a recording: the row is disabled until the meeting is saved.
-3. Voice enhancement: to be written with step 2.
+3. Record with a fan or street noise running, Voice enhancement on: the saved audio has the noise gone between words and the voices in step with each other in a stereo export; `.tracks/mic.ogg` still has the noise; the transcript matches a recording with it off.
+4. On an Intel Mac: enhancement either works or the meeting is saved unenhanced with a toast saying why.
 
 ## Status
 
 - [x] Step 1 recording sources (coded 2026-09-26; `cargo test`, clippy and the AppKit tests pass; the on-screen check is Verify 1–2)
-- [ ] Step 2 voice enhancement
+- [x] Step 2 voice enhancement (coded 2026-09-26; `cargo test`, the helper and AppKit tests pass; `momr finish` on an invented noisy clip gave 18–21 dB less noise between words, sample-aligned output, raw `.tracks/`; the on-screen check is Verify 3, Intel is Verify 4)

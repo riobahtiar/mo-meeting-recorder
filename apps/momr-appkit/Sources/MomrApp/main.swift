@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let revealButton = NSButton(title: "Reveal in Finder", target: nil, action: nil)
     /// Which sides the next recording keeps.
     private let sourcesPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Voice enhancement for the saved audio; the transcript uses the original (D26).
+    private let enhanceBox = NSButton(checkboxWithTitle: "Voice enhancement", target: nil, action: nil)
     private var micBlock: NSStackView!
     private var computerBlock: NSStackView!
     private var recorder: Recorder?
@@ -102,6 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sourcesPopup.action = #selector(sourcesChanged)
         let sourcesRow = NSStackView(views: [NSTextField(labelWithString: "Record:"), sourcesPopup])
         sourcesRow.spacing = 8
+        enhanceBox.state = (SavedSettings.value("enhance") as? Bool ?? false) ? .on : .off
+        enhanceBox.toolTip = "Less noise and clearer voices in the saved audio; the transcript uses the original."
+        enhanceBox.target = self
+        enhanceBox.action = #selector(enhanceChanged)
         micBlock = NSStackView(views: [micLabel, micMeter])
         computerBlock = NSStackView(views: [computerLabel, computerMeter])
         for block in [micBlock!, computerBlock!] {
@@ -127,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         revealButton.target = self
         revealButton.action = #selector(revealMeeting)
         revealButton.isHidden = true
-        let stack = NSStackView(views: [title, clockLabel, sourcesRow, micBlock, computerBlock, statusLabel, startButton, pauseButton, stopButton, revealButton])
+        let stack = NSStackView(views: [title, clockLabel, sourcesRow, enhanceBox, micBlock, computerBlock, statusLabel, startButton, pauseButton, stopButton, revealButton])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -180,7 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let recorder: Recorder
         do {
-            recorder = try Recorder(mic: mic, computer: computer, title: "Meeting", sources: sources)
+            recorder = try Recorder(
+                mic: mic, computer: computer, title: "Meeting", sources: sources,
+                enhance: enhanceBox.state == .on)
         } catch {
             show("Could not start recording: \(error.localizedDescription)")
             return
@@ -215,6 +223,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var selectedSources: Sources {
         Sources.allCases[max(sourcesPopup.indexOfSelectedItem, 0)]
+    }
+
+    @objc private func enhanceChanged() {
+        recorder?.enhance = enhanceBox.state == .on
     }
 
     /// Dims the meter of a side the next recording will not keep; it still

@@ -41,19 +41,25 @@ enum Sources: String, CaseIterable {
         }
     }
 
-    /// The choice saved by the GTK shell's ready page, read only: this shell
-    /// does not write the shared settings file yet, so the two never race
-    /// on it. Unknown or missing reads as both, like the core.
+    /// The choice saved by the GTK shell's ready page. Unknown or missing
+    /// reads as both, like the core.
     static func saved() -> Sources {
+        (SavedSettings.value("sources") as? String).flatMap(Sources.init(rawValue:)) ?? .both
+    }
+}
+
+/// The GTK shell's `settings.json`, read only: this shell does not write
+/// the shared settings file yet, so the two never race on it.
+enum SavedSettings {
+    static func value(_ key: String) -> Any? {
         let env = ProcessInfo.processInfo.environment["XDG_STATE_HOME"].flatMap { $0.hasPrefix("/") ? $0 : nil }
         let base = env.map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         let file = base.appendingPathComponent("momr/settings.json")
         guard let data = try? Data(contentsOf: file),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let key = object["sources"] as? String
-        else { return .both }
-        return Sources(rawValue: key) ?? .both
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object[key]
     }
 }
 

@@ -201,6 +201,31 @@ strings![
     ("ready.format_title", "Audio file", "Berkas audio"),
     ("ready.sources_title", "Record", "Rekam"),
     (
+        "ready.enhance_title",
+        "Voice enhancement",
+        "Peningkatan suara"
+    ),
+    (
+        "ready.enhance_subtitle",
+        "Less noise and clearer voices in the saved audio; the transcript uses the original",
+        "Lebih sedikit bising dan suara lebih jernih di audio tersimpan; transkrip memakai aslinya"
+    ),
+    (
+        "enhance.no_helper",
+        "the momr-audio helper is missing",
+        "helper momr-audio tidak ada"
+    ),
+    (
+        "enhance.unavailable",
+        "voice isolation is not available on this Mac",
+        "isolasi suara tidak tersedia di Mac ini"
+    ),
+    (
+        "enhance.failed",
+        "Saved without voice enhancement: {}",
+        "Disimpan tanpa peningkatan suara: {}"
+    ),
+    (
         "ready.sources_subtitle",
         "Which side of the call is kept",
         "Sisi panggilan mana yang disimpan"

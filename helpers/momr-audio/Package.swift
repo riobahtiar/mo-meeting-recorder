@@ -12,10 +12,26 @@ let package = Package(
             name: "momr-audio",
             path: "Sources/momr-audio"
         ),
+        // The watch protocol and level history, shared with the menu bar item.
+        .target(
+            name: "MomrWatch",
+            path: "Sources/MomrWatch"
+        ),
+        // The recording status in the menu bar (plan 09).
+        .executableTarget(
+            name: "momr-menubar",
+            dependencies: ["MomrWatch"],
+            path: "Sources/momr-menubar"
+        ),
         .testTarget(
             name: "momr-audioTests",
             dependencies: ["momr-audio"],
             path: "Tests/momr-audioTests"
+        ),
+        .testTarget(
+            name: "MomrWatchTests",
+            dependencies: ["MomrWatch"],
+            path: "Tests/MomrWatchTests"
         ),
     ]
 )

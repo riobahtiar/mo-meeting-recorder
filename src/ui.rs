@@ -152,7 +152,10 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
-    app.connect_startup(|app| {
+    let menubar: Rc<RefCell<Option<std::process::Child>>> = Rc::new(RefCell::new(None));
+    let menubar_startup = menubar.clone();
+    app.connect_startup(move |app| {
+        spawn_menubar(&menubar_startup);
         load_css();
         if let Some(settings) = gtk::Settings::default() {
             // Window buttons on the left, drawn as traffic lights by macos.css.
@@ -218,9 +221,34 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         }
         recorder.window.present();
     });
+    app.connect_shutdown(move |_| {
+        if let Some(mut child) = menubar.borrow_mut().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    });
     match open {
         Some(path) => app.run_with_args(&[APP_NAME, path]),
         None => app.run_with_args::<&str>(&[]),
+    }
+}
+
+/// The menu bar item, launched once next to the app. `menubar = "false"` in
+/// config.toml disables it; a missing binary is silently skipped.
+fn spawn_menubar(slot: &Rc<RefCell<Option<std::process::Child>>>) {
+    if crate::models::config_value("menubar").as_deref() == Some("false") {
+        return;
+    }
+    let Some(binary) = crate::helper::menubar_path() else {
+        return;
+    };
+    if let Ok(child) = std::process::Command::new(binary)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        *slot.borrow_mut() = Some(child);
     }
 }
 
@@ -1457,6 +1485,21 @@ impl Recorder {
         }
         audio.add(&computer_row);
         page.add(&audio);
+
+        let menubar_group = adw::PreferencesGroup::builder().title("Menu Bar").build();
+        let menubar_row = adw::SwitchRow::builder()
+            .title("Show recording status")
+            .subtitle("Takes effect on the next launch")
+            .active(crate::models::config_value("menubar").as_deref() != Some("false"))
+            .build();
+        menubar_row.connect_active_notify(|row| {
+            crate::models::save_config_value(
+                "menubar",
+                if row.is_active() { "true" } else { "false" },
+            );
+        });
+        menubar_group.add(&menubar_row);
+        page.add(&menubar_group);
         let weak = Rc::downgrade(self);
         dialog.connect_closed(move |_| {
             let Some(r) = weak.upgrade() else { return };

@@ -26,6 +26,13 @@ pub fn path() -> Option<PathBuf> {
     which(HELPER)
 }
 
+/// The `momr-menubar` status item next to the capture helper, if shipped.
+pub fn menubar_path() -> Option<PathBuf> {
+    let helper = path()?;
+    let candidate = helper.parent()?.join("momr-menubar");
+    is_executable(&candidate).then_some(candidate)
+}
+
 /// The full `momr-audio list` picture: tap support, the BlackHole device when
 /// one is installed, and the input/output device counts.
 pub fn list_info(helper: &Path) -> Option<(bool, Option<String>, usize, usize)> {

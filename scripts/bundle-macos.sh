@@ -15,7 +15,7 @@ mkdir -p "$C/MacOS" "$C/Frameworks" "$C/Resources/share/glib-2.0/schemas"
 
 sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$C/Info.plist"
 printf 'APPL????' > "$C/PkgInfo"
-cp target/release/momr target/release/momr-audio "$C/MacOS/"
+cp target/release/momr target/release/momr-audio target/release/momr-menubar "$C/MacOS/"
 cp "$(brew --prefix ffmpeg)/bin/ffmpeg" "$(brew --prefix ffmpeg)/bin/ffprobe" "$C/MacOS/"
 if [ -f data/icon/MOMRecorder.icns ]; then
   cp data/icon/MOMRecorder.icns "$C/Resources/"

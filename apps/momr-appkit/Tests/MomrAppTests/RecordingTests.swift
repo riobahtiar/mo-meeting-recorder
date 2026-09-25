@@ -53,4 +53,13 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(SourceCapture.meterLevel(0.001), 0, accuracy: 1e-6)
         XCTAssertEqual(SourceCapture.meterLevel(0.1), 2.0 / 3.0, accuracy: 1e-6)
     }
+
+    /// The keys and the rule match core `audio::Sources`, so a choice saved
+    /// by the GTK shell means the same here.
+    func testSourcesMatchTheCore() {
+        XCTAssertEqual(Sources.allCases.map(\.rawValue), ["both", "mic", "computer"])
+        XCTAssertTrue(Sources.both.records(.mic) && Sources.both.records(.system))
+        XCTAssertTrue(Sources.mic.records(.mic) && !Sources.mic.records(.system))
+        XCTAssertTrue(!Sources.computer.records(.mic) && Sources.computer.records(.system))
+    }
 }

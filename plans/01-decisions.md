@@ -237,3 +237,22 @@ anything with a glib or Unix import stays in the GTK app until its seam is
 cut. The `metal`/`vulkan`/`cuda` features stay whisper-rs features selected
 per target, never core code.
 **Status.** Accepted; decided 2026-09-25 with the maintainer.
+
+## D26 Transcripts come from the original audio, never the enhanced one
+
+**Context.** Plan 17 adds a voice enhancement toggle (noise removal and a
+cleaner, fuller voice). Noise suppression and enhancement change the
+signal whisper hears, and heavy processing can cost recognition accuracy
+or add artifacts that whisper turns into words.
+**Decision.** Enhancement only shapes the audio a person listens to (the
+meeting's audio files). Transcription, transcribe-again and diarization
+always read the unprocessed tracks: the raw staging tracks at Stop, and
+the kept `.tracks/` afterwards, which stay unprocessed.
+**Rejected.** Transcribing the enhanced audio: it would tie transcript
+quality to the enhancement's artifacts, and turning the toggle off could
+no longer give back the original result.
+**Consequences.** `.tracks/` keeps its meaning (the original two sides,
+for transcribing again), so no reader of the folder changes. The enhanced
+audio is what `audio.ogg` or the top-level pair holds, and the manifest
+says whether it was enhanced.
+**Status.** Accepted; decided 2026-09-26 with the maintainer.

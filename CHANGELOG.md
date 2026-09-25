@@ -5,6 +5,7 @@ One line per feature added or retired, newest first. Details live in the plan th
 ## Unreleased
 
 ### Added
+- Ready page: Record the microphone and computer audio, the microphone only or the computer audio only; the side not kept is silence, so the folder shape is unchanged (plan 17).
 - `momr finish <staging>`: saves a stopped recording (audio, tracks, manifest, transcript) with the saved settings; the AppKit shell's Stop runs it (plan 12).
 - Settings › General › Appearance: System, Light or Dark, applied at once (plan 14).
 - Gear button in the header bar that opens Settings; ⌘, unchanged (plan 14).

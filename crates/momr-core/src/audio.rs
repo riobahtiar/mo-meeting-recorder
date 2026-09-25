@@ -60,6 +60,55 @@ pub enum Device {
     Computer,
 }
 
+/// Which sides a recording keeps, chosen on the ready page. Both captures
+/// keep running whatever the choice, so the meters work and switching back
+/// needs no restart; a side that is not kept gets an empty raw file, which
+/// export pads with silence and the transcriber skips as silent, so the
+/// meeting folder keeps the same shape (upstream readers see two tracks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sources {
+    Both,
+    MicOnly,
+    ComputerOnly,
+}
+
+impl Sources {
+    pub const ALL: [Sources; 3] = [Sources::Both, Sources::MicOnly, Sources::ComputerOnly];
+
+    /// The settings key; unknown keys read as `Both`, the upstream behaviour.
+    pub fn key(self) -> &'static str {
+        match self {
+            Sources::Both => "both",
+            Sources::MicOnly => "mic",
+            Sources::ComputerOnly => "computer",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Sources {
+        Sources::ALL
+            .into_iter()
+            .find(|s| s.key() == key)
+            .unwrap_or(Sources::Both)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sources::Both => crate::locales::t("sources.both"),
+            Sources::MicOnly => crate::locales::t("sources.mic"),
+            Sources::ComputerOnly => crate::locales::t("sources.computer"),
+        }
+    }
+
+    /// Whether this choice keeps what `device` captures.
+    pub fn records(self, device: Device) -> bool {
+        match self {
+            Sources::Both => true,
+            Sources::MicOnly => device == Device::Mic,
+            Sources::ComputerOnly => device == Device::Computer,
+        }
+    }
+}
+
 struct Inner {
     levels: VecDeque<f32>,
     file: Option<BufWriter<File>>,
@@ -588,6 +637,20 @@ pub fn to_meter(peak: f32) -> f64 {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn sources_round_trip_and_say_which_side_they_keep() {
+        for sources in Sources::ALL {
+            assert_eq!(Sources::from_key(sources.key()), sources);
+        }
+        // A settings file from before the choice existed records both.
+        assert_eq!(Sources::from_key("anything"), Sources::Both);
+        assert!(Sources::Both.records(Device::Mic) && Sources::Both.records(Device::Computer));
+        assert!(Sources::MicOnly.records(Device::Mic));
+        assert!(!Sources::MicOnly.records(Device::Computer));
+        assert!(!Sources::ComputerOnly.records(Device::Mic));
+        assert!(Sources::ComputerOnly.records(Device::Computer));
+    }
 
     fn helper() -> PathBuf {
         PathBuf::from("/Applications/MOM Recorder.app/Contents/MacOS/momr-audio")

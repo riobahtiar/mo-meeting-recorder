@@ -17,6 +17,46 @@ import Foundation
 /// on one serial queue (`queue`) and are only touched there. A failed write
 /// (a full disk) stops that track's recording and is reported once, since
 /// the meeting is saved from what reached the disk.
+/// Which sides a recording keeps, as core `audio::Sources`: the same keys
+/// in `settings.json`, and the same rule that a side not kept gets an empty
+/// raw track, so the meeting keeps its two-track shape.
+enum Sources: String, CaseIterable {
+    case both
+    case mic
+    case computer
+
+    var label: String {
+        switch self {
+        case .both: "Microphone and computer audio"
+        case .mic: "Microphone only"
+        case .computer: "Computer audio only"
+        }
+    }
+
+    func records(_ source: Source) -> Bool {
+        switch self {
+        case .both: true
+        case .mic: source == .mic
+        case .computer: source == .system
+        }
+    }
+
+    /// The choice saved by the GTK shell's ready page, read only: this shell
+    /// does not write the shared settings file yet, so the two never race
+    /// on it. Unknown or missing reads as both, like the core.
+    static func saved() -> Sources {
+        let env = ProcessInfo.processInfo.environment["XDG_STATE_HOME"].flatMap { $0.hasPrefix("/") ? $0 : nil }
+        let base = env.map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        let file = base.appendingPathComponent("momr/settings.json")
+        guard let data = try? Data(contentsOf: file),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let key = object["sources"] as? String
+        else { return .both }
+        return Sources(rawValue: key) ?? .both
+    }
+}
+
 /// Which side a capture records: the `momr-audio` subcommand, and what the
 /// status line calls it.
 enum Source: String {

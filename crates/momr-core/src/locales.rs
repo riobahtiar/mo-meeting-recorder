@@ -199,6 +199,24 @@ strings![
         "Dipakai untuk transkrip setelah panggilan"
     ),
     ("ready.format_title", "Audio file", "Berkas audio"),
+    ("ready.sources_title", "Record", "Rekam"),
+    (
+        "ready.sources_subtitle",
+        "Which side of the call is kept",
+        "Sisi panggilan mana yang disimpan"
+    ),
+    ("ready.not_recorded", "Not recorded", "Tidak direkam"),
+    (
+        "sources.both",
+        "Microphone and computer audio",
+        "Mikrofon dan audio komputer"
+    ),
+    ("sources.mic", "Microphone only", "Hanya mikrofon"),
+    (
+        "sources.computer",
+        "Computer audio only",
+        "Hanya audio komputer"
+    ),
     (
         "ready.format_subtitle",
         "Can be changed during the call",

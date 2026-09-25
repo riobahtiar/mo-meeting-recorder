@@ -75,6 +75,18 @@ pub fn save_format(format: Format) -> std::io::Result<()> {
     save("format", format.key())
 }
 
+/// Which sides a new recording keeps; both until the ready page says otherwise.
+pub fn load_sources() -> crate::audio::Sources {
+    load()["sources"]
+        .as_str()
+        .map(crate::audio::Sources::from_key)
+        .unwrap_or(crate::audio::Sources::Both)
+}
+
+pub fn save_sources(sources: crate::audio::Sources) -> std::io::Result<()> {
+    save("sources", sources.key())
+}
+
 /// A whisper language code from `LANGUAGE_CODES`, "auto" when unset or unknown.
 pub fn load_language() -> &'static str {
     let settings = load();

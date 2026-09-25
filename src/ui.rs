@@ -23,7 +23,7 @@ use crate::animation::TranscribeAnimation;
 use crate::player::Player;
 use crate::{APP_ID, APP_NAME};
 use momr_core::agent::{self, Agent};
-use momr_core::audio::{Device, HISTORY, Source, to_meter};
+use momr_core::audio::{Device, HISTORY, Source, Sources, to_meter};
 use momr_core::chapters;
 use momr_core::export::{self, Format, export_audio, export_tracks};
 use momr_core::finish::{self, RecordingNote, raw_duration};
@@ -307,6 +307,10 @@ struct Recorder {
     /// The clock, as the header bar's title while compact.
     compact_title: gtk::Box,
     title_row: adw::EntryRow,
+    /// Which sides the next recording keeps (`Sources`).
+    sources_row: adw::ComboRow,
+    /// The sides the running recording keeps, fixed at Start.
+    recording_sources: Cell<Sources>,
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
     timer_row: adw::ActionRow,
@@ -315,6 +319,8 @@ struct Recorder {
     timer_warned: Cell<bool>,
     animation: TranscribeAnimation,
     meters: [gtk::DrawingArea; 2],
+    /// The meters with their captions, dimmed when their side is not kept.
+    meter_blocks: [gtk::Box; 2],
     /// The strip's two-lane wave.
     compact_wave: gtk::DrawingArea,
     dot: gtk::Label,
@@ -492,6 +498,14 @@ impl Recorder {
             .title(t("done.rename_meeting"))
             .show_apply_button(true)
             .build();
+        let sources_labels: Vec<&str> = Sources::ALL.iter().map(|s| s.label()).collect();
+        let sources_row = adw::ComboRow::builder()
+            .title(t("ready.sources_title"))
+            .subtitle(t("ready.sources_subtitle"))
+            .model(&gtk::StringList::new(&sources_labels))
+            .build();
+        let saved = settings::load_sources();
+        sources_row.set_selected(Sources::ALL.iter().position(|s| *s == saved).unwrap_or(0) as u32);
         let format_labels: Vec<&str> = Format::ALL.iter().map(|f| f.label()).collect();
         let format_row = adw::ComboRow::builder()
             .title(t("ready.format_title"))
@@ -525,6 +539,7 @@ impl Recorder {
             .build();
         timer_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         group.add(&title_row);
+        group.add(&sources_row);
         group.add(&format_row);
         group.add(&language_row);
         group.add(&timer_row);
@@ -540,8 +555,12 @@ impl Recorder {
             .orientation(gtk::Orientation::Vertical)
             .spacing(18)
             .build();
-        meters_box.append(&meter_block(t("ready.mic"), &meters[0]));
-        meters_box.append(&meter_block(t("ready.computer"), &meters[1]));
+        let meter_blocks = [
+            meter_block(t("ready.mic"), &meters[0]),
+            meter_block(t("ready.computer"), &meters[1]),
+        ];
+        meters_box.append(&meter_blocks[0]);
+        meters_box.append(&meter_blocks[1]);
 
         content.append(&meters_box);
 
@@ -831,6 +850,8 @@ impl Recorder {
             strip_pause,
             compact_title,
             title_row,
+            sources_row,
+            recording_sources: Cell::new(Sources::Both),
             format_row,
             language_row,
             timer_row,
@@ -838,6 +859,7 @@ impl Recorder {
             timer_warned: Cell::new(false),
             animation,
             meters,
+            meter_blocks,
             compact_wave,
             dot,
             timer,
@@ -1014,6 +1036,14 @@ impl Recorder {
                 && !r.loading.get()
             {
                 Self::saved(&weak, settings::save_format(r.selected_format()));
+            }
+        });
+
+        let weak = Rc::downgrade(self);
+        self.sources_row.connect_selected_notify(move |_| {
+            if let Some(r) = weak.upgrade() {
+                Self::saved(&weak, settings::save_sources(r.selected_sources()));
+                r.render();
             }
         });
 
@@ -2451,6 +2481,13 @@ impl Recorder {
             .unwrap_or(Format::Mono)
     }
 
+    fn selected_sources(&self) -> Sources {
+        Sources::ALL
+            .get(self.sources_row.selected() as usize)
+            .copied()
+            .unwrap_or(Sources::Both)
+    }
+
     fn selected_language(&self) -> &'static str {
         LANGUAGE_CODES
             .get(self.language_row.selected() as usize)
@@ -2510,6 +2547,25 @@ impl Recorder {
             }));
         self.language_row
             .set_sensitive(!matches!(state, State::Stopping | State::Transcribing));
+        // Fixed once a recording runs: the tracks were opened for its sides.
+        self.sources_row
+            .set_sensitive(matches!(state, State::Idle | State::Done));
+        let sources = if recording {
+            self.recording_sources.get()
+        } else {
+            self.selected_sources()
+        };
+        for (block, device) in self
+            .meter_blocks
+            .iter()
+            .zip([Device::Mic, Device::Computer])
+        {
+            let kept = sources.records(device);
+            // Dimmed, not hidden: the meter still shows the side is live,
+            // which is how a user checks the choice before a call.
+            block.set_opacity(if kept { 1.0 } else { 0.4 });
+            block.set_tooltip_text((!kept).then(|| t("ready.not_recorded")));
+        }
         self.button.set_sensitive(matches!(
             state,
             State::Idle | State::Recording | State::Done
@@ -3040,9 +3096,21 @@ impl Recorder {
         self.pause_began.set(0);
         let started_at = momr_core::ipc::now();
         let staging = momr_platform::paths::cache().join(started_at.to_string());
+        let sources = self.selected_sources();
+        self.recording_sources.set(sources);
+        // A side that is not kept still gets its raw file, empty, so the
+        // staging folder and the meeting keep their two-track shape.
+        let open = |source: &Source, device: Device, name: &str| {
+            let path = staging.join(name);
+            if sources.records(device) {
+                source.start_recording(&path)
+            } else {
+                std::fs::File::create(&path).map(drop)
+            }
+        };
         if let Err(e) = std::fs::create_dir_all(&staging)
-            .and_then(|_| self.mic.start_recording(&staging.join("mic.raw")))
-            .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
+            .and_then(|_| open(&self.mic, Device::Mic, "mic.raw"))
+            .and_then(|_| open(&self.system, Device::Computer, "system.raw"))
         {
             let _ = self.mic.stop_recording();
             let _ = self.system.stop_recording();
@@ -3102,6 +3170,7 @@ impl Recorder {
         if let Some(e) = lost.iter().flatten().next() {
             self.toast(&tf("banner.audio_write_failed", &[e]));
         } else if length >= SILENT_HINT_SECS
+            && self.recording_sources.get().records(Device::Computer)
             && !self.system.heard_anything()
             && !self.silent_hint_shown.replace(true)
         {

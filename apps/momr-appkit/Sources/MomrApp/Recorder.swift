@@ -15,6 +15,8 @@ final class Recorder {
     private var micFile: FileHandle?
     private var systemFile: FileHandle?
     private var pausedTotal: TimeInterval = 0
+    /// The sides this recording keeps, fixed at Start.
+    let sources: Sources
 
     /// Where the recording is. `stopped` is terminal: the staging folder is
     /// being finished, so pause and resume must not reopen files in it.
@@ -43,14 +45,18 @@ final class Recorder {
 
     /// Opens the staging folder and starts both tracks. Throws with the
     /// reason (disk full, no permission) for the status line.
-    init(mic: SourceCapture, computer: SourceCapture, title: String) throws {
+    init(mic: SourceCapture, computer: SourceCapture, title: String, sources: Sources = .both) throws {
         self.mic = mic
         self.computer = computer
         startedAt = Int64(Date().timeIntervalSince1970)
         staging = Self.cache().appendingPathComponent(String(startedAt))
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        self.sources = sources
         micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
         systemFile = try Self.appending(to: staging.appendingPathComponent("system.raw"))
+        // A side not kept keeps its empty file and gets no handle.
+        if !sources.records(.mic) { try micFile?.close(); micFile = nil }
+        if !sources.records(.system) { try systemFile?.close(); systemFile = nil }
         try writeNote(title: title)
         mic.record(into: micFile)
         computer.record(into: systemFile)
@@ -100,15 +106,19 @@ final class Recorder {
         state = .recording
         pausedTotal += Date().timeIntervalSince(since)
         var problems: [String] = []
-        do {
-            micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
-        } catch {
-            problems.append("Microphone: \(error.localizedDescription)")
+        if sources.records(.mic) {
+            do {
+                micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
+            } catch {
+                problems.append("Microphone: \(error.localizedDescription)")
+            }
         }
-        do {
-            systemFile = try Self.appending(to: staging.appendingPathComponent("system.raw"))
-        } catch {
-            problems.append("Computer audio: \(error.localizedDescription)")
+        if sources.records(.system) {
+            do {
+                systemFile = try Self.appending(to: staging.appendingPathComponent("system.raw"))
+            } catch {
+                problems.append("Computer audio: \(error.localizedDescription)")
+            }
         }
         mic.record(into: micFile)
         computer.record(into: systemFile)

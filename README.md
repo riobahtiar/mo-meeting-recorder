@@ -23,6 +23,7 @@
 | UI polish after the first display session | [14](plans/14-ui-polish.md) | in progress — focus rings, remembered window size, appearance switch, Settings pages and gear button, compact strip and animation fit coded; the on-screen check is next |
 | Storage reset, recording timer, audio sources | [15](plans/15-reset-timer-sources.md) | in progress — cleanup and timer logic tested, Settings › Storage, Timer dialog, microphone and per-app pickers coded; helper builds with tested `--device`/`--bundle` flags, on-screen source switching needs a display session |
 | Windows and Linux versions | [16](plans/16-multi-platform-architecture.md) | blueprint — `momr-core` has no `cfg(target_os)`; `momr-platform` has paths, process, fs and sock for macOS, other targets next |
+| Record one side or both; voice enhancement | [17](plans/17-sources-and-voice-enhancement.md) | in progress — Record row on the ready page (both shells) coded and tested; voice enhancement waits for its research; on-screen check needs a display session |
 
 Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: the app is GTK 4 and libadwaita. Screenshots come with the macOS look in plan 07.
 
@@ -37,7 +38,7 @@ Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: 
 - **Chapters by your coding agent**, when one is set up. The agent runs with every tool switched off and can only answer with text.
 - **Keeps your recording safe.** An unfinished recording is offered back on the next start.
 - **Records on a timer.** Stop after a set length, or start and stop at clock times (⌘T).
-- **Records what you choose.** Pick the microphone, and record every app or only the ones you name (Settings › Audio).
+- **Records what you choose.** Pick the microphone, and record every app or only the ones you name (Settings › Audio). On the ready page, record both sides, only the microphone or only the computer audio.
 - **Cleans up after itself.** Settings › Storage shows what the app keeps and clears it; meetings are never touched.
 
 ## Build

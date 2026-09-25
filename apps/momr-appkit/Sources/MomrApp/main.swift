@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private let revealButton = NSButton(title: "Reveal in Finder", target: nil, action: nil)
+    /// Which sides the next recording keeps.
+    private let sourcesPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var micBlock: NSStackView!
+    private var computerBlock: NSStackView!
     private var recorder: Recorder?
     private var clockTimer: Timer?
     private var meetingURL: URL?
@@ -92,6 +96,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         let micLabel = NSTextField(labelWithString: "Microphone")
         let computerLabel = NSTextField(labelWithString: "Computer audio")
+        sourcesPopup.addItems(withTitles: Sources.allCases.map(\.label))
+        sourcesPopup.selectItem(at: Sources.allCases.firstIndex(of: Sources.saved()) ?? 0)
+        sourcesPopup.target = self
+        sourcesPopup.action = #selector(sourcesChanged)
+        let sourcesRow = NSStackView(views: [NSTextField(labelWithString: "Record:"), sourcesPopup])
+        sourcesRow.spacing = 8
+        micBlock = NSStackView(views: [micLabel, micMeter])
+        computerBlock = NSStackView(views: [computerLabel, computerMeter])
+        for block in [micBlock!, computerBlock!] {
+            block.orientation = .vertical
+            block.alignment = .leading
+            block.spacing = 4
+        }
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
         clockLabel.font = .monospacedDigitSystemFont(ofSize: 28, weight: .regular)
@@ -110,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         revealButton.target = self
         revealButton.action = #selector(revealMeeting)
         revealButton.isHidden = true
-        let stack = NSStackView(views: [title, clockLabel, micLabel, micMeter, computerLabel, computerMeter, statusLabel, startButton, pauseButton, stopButton, revealButton])
+        let stack = NSStackView(views: [title, clockLabel, sourcesRow, micBlock, computerBlock, statusLabel, startButton, pauseButton, stopButton, revealButton])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -123,8 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
             micMeter.heightAnchor.constraint(equalToConstant: 24),
             computerMeter.heightAnchor.constraint(equalToConstant: 24),
-            micMeter.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            computerMeter.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            micBlock.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            computerBlock.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            micMeter.widthAnchor.constraint(equalTo: micBlock.widthAnchor),
+            computerMeter.widthAnchor.constraint(equalTo: computerBlock.widthAnchor),
         ])
 
         window = NSWindow(
@@ -137,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
         window.contentView = content
         window.center()
+        sourcesChanged()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }
@@ -144,8 +164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func startRecording() {
         // A track whose capture is down records nothing; with both down the
         // meeting would be silence under a running clock.
-        guard mic.isRunning || computer.isRunning else {
-            show("Nothing is capturing, so there is nothing to record.")
+        let sources = selectedSources
+        // A kept side whose capture is down records nothing; with every
+        // kept side down the meeting would be silence under a running clock.
+        let kept = [(Source.mic, mic), (.system, computer)].filter { sources.records($0.0) }
+        guard kept.contains(where: { $0.1.isRunning }) else {
+            show("Nothing that would be recorded is capturing.")
             return
         }
         // Checked now, not at Stop: finding out after an hour's meeting that
@@ -156,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let recorder: Recorder
         do {
-            recorder = try Recorder(mic: mic, computer: computer, title: "Meeting")
+            recorder = try Recorder(mic: mic, computer: computer, title: "Meeting", sources: sources)
         } catch {
             show("Could not start recording: \(error.localizedDescription)")
             return
@@ -165,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         meetingURL = nil
         message = nil
         problems = []
+        sourcesPopup.isEnabled = false
         revealButton.isHidden = true
         startButton.isHidden = true
         pauseButton.isHidden = false
@@ -186,6 +211,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             : String(format: "%02d:%02d", s / 60, s % 60)
         window.title = recorder.paused ? "Paused" : "● Recording"
         updateStatus()
+    }
+
+    private var selectedSources: Sources {
+        Sources.allCases[max(sourcesPopup.indexOfSelectedItem, 0)]
+    }
+
+    /// Dims the meter of a side the next recording will not keep; it still
+    /// moves, so the user sees that side is live.
+    @objc private func sourcesChanged() {
+        let sources = selectedSources
+        micBlock.alphaValue = sources.records(.mic) ? 1 : 0.4
+        computerBlock.alphaValue = sources.records(.system) ? 1 : 0.4
     }
 
     /// Each source's reason for not capturing, if any.
@@ -220,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         recorder.stop(title: "Meeting") { [weak self] outcome in
             guard let self else { return }
             self.finishing = false
+            self.sourcesPopup.isEnabled = true
             self.startButton.isHidden = false
             self.clockLabel.isHidden = true
             // The folder is offered whenever it exists: it holds the audio

@@ -38,9 +38,12 @@ pub fn menubar_path() -> Option<PathBuf> {
 /// What `momr-audio list` reports.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AudioDevices {
-    /// macOS is new enough for a process tap. Whether it is permitted is only
-    /// known once `system` runs.
+    /// macOS is new enough for a process tap.
     pub tap: bool,
+    /// TCC reports System Audio Recording as refused. Only a refusal is
+    /// certain: "granted" and "unknown" both leave it to the tap, so they
+    /// read as false here.
+    pub tap_denied: bool,
     /// The BlackHole loopback device, when one is installed.
     pub blackhole: Option<String>,
     pub inputs: usize,
@@ -79,6 +82,7 @@ fn parse_list(text: &str) -> Result<AudioDevices, String> {
     let count = |key: &str| value[key].as_array().map_or(0, Vec::len);
     Ok(AudioDevices {
         tap: value["tap"].as_bool().unwrap_or(false),
+        tap_denied: value["tap_permission"].as_str() == Some("denied"),
         blackhole: value["blackhole"].as_str().map(str::to_owned),
         inputs: count("inputs"),
         outputs: count("outputs"),
@@ -112,11 +116,28 @@ mod tests {
             devices,
             AudioDevices {
                 tap: true,
+                tap_denied: false,
                 blackhole: Some("BlackHole 2ch".into()),
                 inputs: 1,
                 outputs: 0,
             }
         );
+    }
+
+    #[test]
+    fn only_a_refusal_counts_as_denied() {
+        let with = |permission: &str| {
+            parse_list(&format!(
+                r#"{{"tap":true,"tap_permission":"{permission}"}}"#
+            ))
+            .unwrap()
+            .tap_denied
+        };
+        assert!(with("denied"));
+        assert!(!with("granted"));
+        assert!(!with("unknown"));
+        // An older helper says nothing about permission.
+        assert!(!parse_list(r#"{"tap":true}"#).unwrap().tap_denied);
     }
 
     #[test]

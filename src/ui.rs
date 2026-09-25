@@ -33,6 +33,9 @@ const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
 const FULL_SIZE: (i32, i32) = (480, 700);
 const COMPACT_SIZE: (i32, i32) = (300, 84);
 const DONE_SIZE: (i32, i32) = (1100, 760);
+/// A recording at least this long with a computer track of exact zeros gets
+/// the permission hint; a shorter one is likely a test.
+const SILENT_HINT_SECS: i64 = 30;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
@@ -255,6 +258,9 @@ fn spawn_menubar(slot: &Rc<RefCell<Option<std::process::Child>>>) {
     match std::process::Command::new(&binary)
         .env("MOMR_SOCKET", ipc::socket_path())
         .env("MOMR_LANG", crate::locales::current().code())
+        // The item quits when this pid ends, so a crash or a kill does not
+        // leave it behind; a clean quit still stops it below.
+        .env("MOMR_PARENT_PID", std::process::id().to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -330,6 +336,8 @@ struct Recorder {
     animation_since: Cell<Option<std::time::Instant>>,
     paused_secs: Cell<i64>,
     pause_began: Cell<i64>,
+    /// Whether the silent computer-track hint has been shown this launch.
+    silent_hint_shown: Cell<bool>,
     /// The `caffeinate` child keeping the Mac awake while recording.
     caffeinate: RefCell<Option<std::process::Child>>,
     pause_button: gtk::Button,
@@ -786,6 +794,7 @@ impl Recorder {
             animation_since: Cell::new(None),
             paused_secs: Cell::new(0),
             pause_began: Cell::new(0),
+            silent_hint_shown: Cell::new(false),
             caffeinate: RefCell::default(),
             pause_button,
             import_button,
@@ -1635,6 +1644,20 @@ impl Recorder {
         audio.add(&mic_row);
         let computer_row = adw::ActionRow::builder().title(t("prefs.computer")).build();
         match &audio_status {
+            Ok(devices) if devices.tap && devices.tap_denied => {
+                computer_row.set_subtitle(t("prefs.computer_tap_denied"));
+                let open = gtk::Button::builder()
+                    .label(t("prefs.open_privacy"))
+                    .valign(gtk::Align::Center)
+                    .build();
+                open.connect_clicked(|_| {
+                    let _ = gio::AppInfo::launch_default_for_uri(
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture",
+                        None::<&gio::AppLaunchContext>,
+                    );
+                });
+                computer_row.add_suffix(&open);
+            }
             Ok(devices) if devices.tap => {
                 computer_row.set_subtitle(t("prefs.computer_tap"));
             }
@@ -2290,9 +2313,17 @@ impl Recorder {
         self.animation_since.set(Some(std::time::Instant::now()));
         // A write that failed mid-recording (a full disk) lost audio; say so
         // now, since the meeting is saved from what did reach the disk.
+        let length = self.elapsed();
         let lost = [self.mic.stop_recording(), self.system.stop_recording()];
         if let Some(e) = lost.iter().flatten().next() {
             self.toast(&tf("banner.audio_write_failed", &[e]));
+        } else if length >= SILENT_HINT_SECS
+            && !self.system.heard_anything()
+            && !self.silent_hint_shown.replace(true)
+        {
+            // A refused tap records digital silence, which no check can tell
+            // from a Mac that played nothing; ask, once per launch.
+            self.toast(t("banner.computer_silent"));
         }
         if let Some(mut caffeinate) = self.caffeinate.borrow_mut().take() {
             let _ = caffeinate.kill();

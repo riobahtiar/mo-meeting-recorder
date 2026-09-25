@@ -47,6 +47,15 @@ func runSystem(rate: Double, channels: AVAudioChannelCount) -> Int32 {
         return 3
     }
 
+    // A refused tap would still be created and record silence, so a
+    // definite refusal is caught here (see Permission.swift).
+    if tapPermission() == .denied {
+        fputs(
+            "momr-audio: System Audio Recording permission was refused; allow it in System Settings > Privacy & Security\n",
+            stderr)
+        return 4
+    }
+
     let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
     desc.name = "MOM Recorder"
     desc.isPrivate = true

@@ -64,6 +64,11 @@ struct Inner {
     note: Option<String>,
     /// A failed write to the recording file, kept until the recording stops.
     write_error: Option<String>,
+    /// Whether a single non-zero sample has been recorded since the recording
+    /// started. A refused process tap delivers exact zeros, as does a Mac
+    /// playing nothing, so this cannot tell the two apart; it only lets the
+    /// app ask the user afterwards.
+    heard: bool,
 }
 
 #[derive(Clone)]
@@ -81,6 +86,7 @@ impl Source {
             paused: false,
             note: None,
             write_error: None,
+            heard: false,
         }));
         let source = Source {
             inner: inner.clone(),
@@ -99,7 +105,14 @@ impl Source {
         inner.file = Some(file);
         inner.paused = false;
         inner.write_error = None;
+        inner.heard = false;
         Ok(())
+    }
+
+    /// Whether the current or last recording holds any sound at all, as
+    /// opposed to digital silence (exact zeros from start to end).
+    pub fn heard_anything(&self) -> bool {
+        self.inner.lock().unwrap().heard
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -442,6 +455,9 @@ fn capture_from(
         let mut inner = shared.lock().unwrap();
         inner.levels.pop_front();
         inner.levels.push_back(peak);
+        if !inner.paused && inner.file.is_some() && !inner.heard && buf.iter().any(|b| *b != 0) {
+            inner.heard = true;
+        }
         if !inner.paused
             && let Some(file) = inner.file.as_mut()
         {
@@ -628,6 +644,7 @@ mod tests {
             paused: false,
             note: Some("old".into()),
             write_error: None,
+            heard: false,
         });
         let args: Vec<String> = ["-c", "echo first >&2; echo why >&2; exit 4"]
             .iter()
@@ -645,5 +662,39 @@ mod tests {
             .collect();
         capture_from("sh", &args, &shared, false).unwrap();
         assert_eq!(shared.lock().unwrap().note, None);
+    }
+
+    /// Digital silence is told from sound, and only while recording.
+    #[test]
+    fn recording_notices_whether_anything_was_heard() {
+        let dir = std::env::temp_dir().join(format!("momr-heard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = Source {
+            inner: Arc::new(Mutex::new(Inner {
+                levels: VecDeque::from(vec![0.0; HISTORY]),
+                file: None,
+                paused: false,
+                note: None,
+                write_error: None,
+                heard: false,
+            })),
+        };
+        let run = |script: &str| {
+            let args: Vec<String> = ["-c", script].iter().map(|s| s.to_string()).collect();
+            capture_from("sh", &args, &source.inner, false).unwrap();
+        };
+        // Sound before the recording does not count.
+        run("printf '\\001' | head -c 1; head -c 7679 /dev/zero");
+        source.start_recording(&dir.join("zeros.raw")).unwrap();
+        run("head -c 76800 /dev/zero");
+        assert!(!source.heard_anything());
+        run("head -c 7679 /dev/zero; printf '\\001'");
+        assert!(source.heard_anything());
+        let _ = source.stop_recording();
+        // A new recording starts over.
+        source.start_recording(&dir.join("again.raw")).unwrap();
+        assert!(!source.heard_anything());
+        let _ = source.stop_recording();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

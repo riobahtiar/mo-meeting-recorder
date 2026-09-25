@@ -14,8 +14,9 @@
 //   2  bad arguments, or `run` could not find or start its program.
 //   3  process taps are unsupported here (macOS older than 14.2).
 //   4  permission denied. For the microphone this is the Microphone
-//      privacy setting; for `system` it means the tap could not be created,
-//      which is almost always the System Audio Recording permission.
+//      privacy setting; for `system` it means TCC reports System Audio
+//      Recording as refused, or the tap could not be created, which is
+//      almost always that same permission.
 //   5  no input device, or the microphone could not start or restart.
 //   6  the tap failed for a Core Audio reason other than permission: reading
 //      the tap format, creating the aggregate device, attaching the IOProc or

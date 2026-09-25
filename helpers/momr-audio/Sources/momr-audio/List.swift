@@ -2,10 +2,11 @@
 // process taps, as one JSON object. The Rust app reads it for the BlackHole
 // fallback (a loopback device by name) and the ready-page banner.
 //
-// `tap` only says the OS is 14.2 or newer. Whether System Audio Recording is
-// allowed cannot be asked without creating a tap, which would prompt the user
-// from a listing, so permission is only known when `system` runs and exits 4.
-// The key keeps its name because the Rust side reads it.
+// `tap` only says the OS is 14.2 or newer; the key keeps its name because the
+// Rust side reads it. `tap_permission` is TCC's answer for System Audio
+// Recording without creating a tap (which would prompt from a listing):
+// "granted", "denied" or "unknown" (see Permission.swift). Only "denied" is
+// certain; "unknown" is common for apps whose tap works.
 
 import CoreAudio
 import Foundation
@@ -101,6 +102,7 @@ func runList() -> Int32 {
     }()
     var info: [String: Any] = [
         "inputs": inputs, "outputs": outputs, "tap": tap,
+        "tap_permission": tapPermission().rawValue,
     ]
     if let blackhole {
         info["blackhole"] = blackhole

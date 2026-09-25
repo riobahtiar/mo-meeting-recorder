@@ -7,7 +7,9 @@
 // same socket.
 //
 // No Dock icon: the activation policy is set to accessory at launch, so no
-// bundle with LSUIElement is needed.
+// bundle with LSUIElement is needed. Started by the app, it gets the app's
+// pid in `MOMR_PARENT_PID` and quits when the app ends, however it ends
+// (see ParentWatch.swift).
 //
 // Strings in English and Indonesian. The app passes its own UI language in
 // `MOMR_LANG` (`en` or `id`) when it spawns the item, so the menu matches the
@@ -84,9 +86,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let client = WatchClient()
     var state = WatchState.off
     var timer: Timer?
+    var parentWatch: DispatchSourceProcess?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if let parent = parentPid(environment: ProcessInfo.processInfo.environment) {
+            parentWatch = watchProcessExit(parent) { NSApp.terminate(nil) }
+        }
         item.isVisible = false
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: menubarText("show"), action: #selector(showApp), keyEquivalent: ""))

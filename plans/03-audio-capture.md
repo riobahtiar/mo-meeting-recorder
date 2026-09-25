@@ -106,7 +106,7 @@ A Swift package, macOS 14 minimum, one executable target `momr-audio` with subco
 | `system [--rate 48000] [--channels 2]` | Process tap on all processes through a private aggregate device, converted to interleaved s16le |
 | `run -- <program> <args…>` | Plan 04: runs a program and kills it when the parent exits |
 
-Exit codes: `0` normal end (stdout closed), `2` bad arguments, `3` tap unsupported on this macOS, `4` permission denied, `5` no device. `audio.rs` reads the code to decide on the BlackHole fallback and the banner.
+Exit codes: `0` normal end (stdout closed), `2` bad arguments, `3` tap unsupported on this macOS, `4` permission denied, `5` no device, `6` tap failed in Core Audio, `7` conversion keeps failing. `audio.rs` reads the code to decide on the BlackHole fallback and the banner.
 
 Layout:
 
@@ -158,7 +158,7 @@ Behaviours to get right:
 - **Format.** The tap may hand non-interleaved Float32. Interleave and clamp to Int16.
 - **Silence.** When nothing plays, the IOProc still fires with zeros. Good: the meter shows a flat line, not a stalled one.
 - **Default output changes.** A global tap follows the mix, not one device. Verify: audio keeps flowing after switching output to a headset. If it does not, listen for `kAudioHardwarePropertyDefaultOutputDevice` and rebuild the tap.
-- **Permission.** The first `AudioHardwareCreateProcessTap` triggers the System Audio Recording prompt for the responsible process. Refusal shows as an `OSStatus` error; map it to exit code 4.
+- **Permission.** The first `AudioHardwareCreateProcessTap` triggers the System Audio Recording prompt for the responsible process. A refused tap is often still created and then delivers digital silence, indistinguishable in-band from a Mac playing nothing. So `system` asks TCC first (`Permission.swift`: `TCCAccessPreflight("kTCCServiceAudioCapture")`, private SPI loaded with dlopen, as insidegui/AudioCap does) and exits 4 on a definite refusal; `list` reports the answer as `tap_permission`, and Settings shows a refusal with a button to the privacy pane. Only "denied" is trusted: on the development Mac the preflight answers "unknown" (2) for a terminal whose tap works. As a second net, a recording of 30 s or more whose computer track was exact zeros from start to end gets a one-time hint to check the permission (`Source::heard_anything`), worded as a question, since silence may be genuine. A refusal that surfaces only as an `OSStatus` error still maps to exit code 4.
 - **Unsupported.** `CATapDescription` is unavailable before 14.2; guard with `if #available(macOS 14.2, *)`, otherwise exit 3.
 
 `Mic.swift`: `AVAudioEngine`, `inputNode.installTap`, convert to the requested format, write. Observe `AVAudioEngineConfigurationChange` and restart the engine so a new default microphone is followed. When this works, switch `Device::Mic` to the helper (D04) and keep ffmpeg as the fallback when the helper is missing.

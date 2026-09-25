@@ -1078,6 +1078,17 @@ strings![
         "Mengunggah audio ke {} dan mentranskripsikan…"
     ),
     ("speaker.row_import", "Speaker {}", "Pembicara {}"),
+    (
+        "banner.computer_silent",
+        "The computer audio stayed completely silent. If the call should be in it, allow System Audio Recording in System Settings › Privacy & Security.",
+        "Audio komputer benar-benar senyap. Jika panggilan seharusnya terekam, izinkan Perekaman Audio Sistem di Pengaturan Sistem › Privasi & Keamanan."
+    ),
+    (
+        "prefs.computer_tap_denied",
+        "System Audio Recording is refused for this app",
+        "Perekaman Audio Sistem ditolak untuk aplikasi ini"
+    ),
+    ("prefs.open_privacy", "Open Settings", "Buka Pengaturan"),
 ];
 
 #[cfg(test)]

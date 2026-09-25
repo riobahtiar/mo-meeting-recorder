@@ -31,6 +31,12 @@ One line per feature added or retired, newest first. Details live in the plan th
 - The strip's custom drag handle and its "Drag to move" hint (plan 14).
 
 ### Fixed
+- AppKit shell launches: the delegate is set by hand, since `@main` needs a nib to create it (plan 12).
+- AppKit pause no longer erases the recording so far: resume appends to the raw tracks (plan 12).
+- AppKit stop no longer hangs on transcripts over the pipe buffer (about 30 minutes of meeting) (plan 12).
+- AppKit capture: a helper that exits is reported with its reason and restarted, no longer spinning a core; Start is refused when nothing captures (plan 12).
+- The socket keeps accepting after a failed accept, so `momr stop`, `watch` and the menu bar item stay connected (plan 12).
+- Plain `cargo test` and `cargo clippy` cover the whole workspace again (`default-members`) (plan 12).
 - Settings dialog: wider (820), the stock × in the header hidden (traffic lights already close it), tighter page-switcher padding, so Indonesian tab titles fit (plan 14 follow-up).
 - Swift helper builds on the macOS 27 SDK: the per-app tap passes process object ids straight to `stereoMixdownOfProcesses` (plan 15).
 - Clippy clean again: the Audio settings process list sorts by key (plan 15).

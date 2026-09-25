@@ -5,6 +5,9 @@ edition = "2024"
 
 [workspace]
 members = [".", "crates/momr-core", "crates/momr-platform"]
+# Plain `cargo test` and `cargo clippy` at the root must cover the crates too:
+# without this they build only the GTK package and skip the engine's tests.
+default-members = [".", "crates/momr-core", "crates/momr-platform"]
 
 [dependencies]
 momr-core = { path = "crates/momr-core" }

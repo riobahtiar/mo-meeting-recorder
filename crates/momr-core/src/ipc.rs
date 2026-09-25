@@ -90,7 +90,25 @@ pub fn serve(
 
     let accepted = clients.clone();
     thread::spawn(move || {
-        for stream in std::iter::from_fn(|| listener.accept().ok()) {
+        loop {
+            // A failed accept must not end this thread: a client that hangs
+            // up before we accept (`momr start` always does) returns
+            // ECONNABORTED, and ending here would leave the socket file
+            // alive with nobody answering. A persistent error (out of file
+            // descriptors) is retried slowly instead of spinning.
+            let stream = match listener.accept() {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if !matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionAborted | ErrorKind::Interrupted
+                    ) {
+                        eprintln!("{APP_NAME}: socket accept: {e}");
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    continue;
+                }
+            };
             // Best effort: macOS refuses SO_SNDTIMEO once the peer has
             // already gone, which fire-and-forget clients (`momr start`)
             // always have. Dropping the connection then would lose the

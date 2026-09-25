@@ -3,11 +3,10 @@ import AppKit
 /// The ready page: two live meters (microphone above, computer below), a
 /// status line and Start. Recording, done and Settings arrive in later
 /// slices; this slice proves the shell, the helper path and the meters.
-@main
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
-    private let mic = SourceCapture("mic")
-    private let computer = SourceCapture("system")
+    private let mic = SourceCapture("mic", label: "Microphone")
+    private let computer = SourceCapture("system", label: "Computer audio")
     private let micMeter = MeterView()
     private let computerMeter = MeterView()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -19,12 +18,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recorder: Recorder?
     private var clockTimer: Timer?
     private var meetingURL: URL?
+    /// What the status line says while no recording runs: the last outcome
+    /// (saved, failed, refused) or nil for the listening hint.
+    private var message: String?
 
     func applicationDidFinishLaunching(_: Notification) {
         buildMenu()
         buildWindow()
         mic.onLevel = { [weak self] in self?.micMeter.level = CGFloat($0) }
         computer.onLevel = { [weak self] in self?.computerMeter.level = CGFloat($0) }
+        mic.onNote = { [weak self] _ in self?.updateStatus() }
+        computer.onNote = { [weak self] _ in self?.updateStatus() }
         mic.start()
         computer.start()
         updateStatus()
@@ -98,12 +102,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startRecording() {
+        // A track whose capture is down records nothing; with both down the
+        // meeting would be silence under a running clock.
+        guard mic.isRunning || computer.isRunning else {
+            show("Nothing is capturing, so there is nothing to record.")
+            return
+        }
         guard let recorder = Recorder(mic: mic, computer: computer) else {
-            statusLabel.stringValue = "Could not open the staging folder."
+            show("Could not open the staging folder.")
             return
         }
         self.recorder = recorder
         meetingURL = nil
+        message = nil
         revealButton.isHidden = true
         startButton.isHidden = true
         pauseButton.isHidden = false
@@ -122,7 +133,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let s = recorder.elapsed
         clockLabel.stringValue = String(format: "%02d:%02d", s / 60, s % 60)
         window.title = recorder.paused ? "Paused" : "● Recording"
-        statusLabel.stringValue = recorder.paused ? "Paused." : "Recording both tracks."
+        updateStatus()
+    }
+
+    /// Each source's reason for not capturing, if any.
+    private var notes: [String] {
+        [mic.note, computer.note].compactMap { $0 }
     }
 
     @objc private func togglePause() {
@@ -144,19 +160,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pauseButton.isHidden = true
         stopButton.isHidden = true
         window.title = "MOM Recorder"
-        statusLabel.stringValue = "Finishing: encoding and transcribing…"
+        show("Finishing: encoding and transcribing…")
         recorder.stop(title: "Meeting") { [weak self] url, error in
             guard let self else { return }
+            self.startButton.isHidden = false
+            self.clockLabel.isHidden = true
             if let url {
                 self.meetingURL = url
                 self.revealButton.isHidden = false
-                self.startButton.isHidden = false
-                self.clockLabel.isHidden = true
-                self.statusLabel.stringValue = "Saved \(url.lastPathComponent)."
+                self.show("Saved \(url.lastPathComponent).")
             } else {
-                self.startButton.isHidden = false
-                self.clockLabel.isHidden = true
-                self.statusLabel.stringValue = error ?? "Something went wrong."
+                self.show(error ?? "Something went wrong.")
             }
         }
     }
@@ -167,12 +181,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The status line: the state or last outcome, then each source's note,
+    /// so a capture that stopped mid-meeting is visible, not hidden behind
+    /// "Recording".
     private func updateStatus() {
-        if SourceCapture.helperURL() == nil {
-            statusLabel.stringValue = "momr-audio helper not found — put it next to MomrApp or on PATH."
+        var parts = notes
+        if let recorder {
+            parts.insert(recorder.paused ? "Paused." : "Recording.", at: 0)
         } else {
-            statusLabel.stringValue = "Listening: speak and play sound to move the meters."
+            parts.insert(message ?? "Listening: speak and play sound to move the meters.", at: 0)
         }
+        statusLabel.stringValue = parts.joined(separator: " ")
+    }
+
+    private func show(_ text: String) {
+        message = text
+        updateStatus()
     }
 
     // MARK: - Menu
@@ -199,3 +223,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 }
+
+// No nib names the delegate, so it is set by hand: `@main` on an AppKit
+// delegate relies on MainMenu.xib to create it, and without one the app
+// runs with no delegate, no window and no menu. `delegate` is weak on
+// NSApplication, so this constant keeps it alive.
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+// An unbundled executable (`swift run`) starts as a background process;
+// regular gives it a Dock icon, a menu bar and key windows.
+app.setActivationPolicy(.regular)
+app.run()

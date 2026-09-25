@@ -48,9 +48,17 @@ final class Recorder {
         computer.recordFile = systemFile
     }
 
+    /// A handle that writes after what `url` already holds: the file is
+    /// created only when missing, and resume reopens it at its end, so a
+    /// pause never costs the audio recorded before it.
     private static func appending(to url: URL) throws -> FileHandle {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        return try FileHandle(forWritingTo: url)
+        if !FileManager.default.fileExists(atPath: url.path),
+           !FileManager.default.createFile(atPath: url.path, contents: nil) {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        return handle
     }
 
     func pause() {
@@ -179,9 +187,13 @@ final class Recorder {
         } catch {
             return (nil, error.localizedDescription)
         }
+        // Read before waiting: the transcript arrives on stdout, and one
+        // larger than the pipe buffer would block `momr` on its write while
+        // we block on its exit.
+        let output = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { return (nil, "transcription failed") }
-        let markdown = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let markdown = String(data: output, encoding: .utf8) ?? ""
         try? markdown.write(to: meeting.appendingPathComponent("transcript.md"), atomically: true, encoding: .utf8)
         try? FileManager.default.removeItem(at: staging)
         return (meeting, nil)

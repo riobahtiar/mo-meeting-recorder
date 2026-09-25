@@ -136,3 +136,12 @@ GTK-identical layout (either shell recovers the other's crash), pause with
 an excluding clock, stop encodes both tracks, writes the manifest and runs
 the core `transcribe` CLI for `transcript.md`, Reveal in Finder included.
 Live record/stop/transcribe run is the next session's job.
+
+Review fixes 2026-09-26 (PR 3, critical): the AppKit shell now launches
+(`@main` needs a nib; the delegate is set by hand), resume appends instead
+of truncating the raw tracks, stop reads the transcript before waiting on
+`momr`, and a capture child that exits is reported and restarted like
+`audio.rs` does. The socket accept loop survives a failed accept, and
+`default-members` makes plain `cargo test` run all 105 tests again. The
+launch was checked by starting the binary (both `momr-audio` children
+came up); meters on screen and a live record are still to watch.

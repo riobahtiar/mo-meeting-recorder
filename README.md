@@ -13,7 +13,7 @@
 | Plays back; compact strip; ⌘ shortcuts | [04](plans/04-playback-window-shortcuts.md) | in progress — audiotoolbox playback, `run` watchdog (kill -9 safe), caffeinate held/reaped, ⌘ accelerators; in-app seek and strip need a display session |
 | Chapters through an agent set in `config.toml` | [05](plans/05-agent-and-config.md) | in progress — `agent = "…"` selects, `ask` runs live (pi), crush refused, hung group killed in test; long-meeting chapters need a display session |
 | Files under `~/Library`; works when launched from Finder | [06](plans/06-paths-and-environment.md) | done — `~/Library` homes (GLib has no Cocoa support here, see D22), socket/staging/watch verified, `open` launch spawns helper (TCC-flat meters until the plan 08 bundle) |
-| Native menu bar, window chrome, system font, Apple colours, Preferences, About | [07](plans/07-macos-look-and-feel.md) | not started |
+| Native menu bar, window chrome, system font, Apple colours, Preferences, About | [07](plans/07-macos-look-and-feel.md) | in progress — actions+menu+About+Preferences coded, Apple palette with tests, Omarchy fully gone; icon and on-screen checks need a display session |
 | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | [08](plans/08-app-bundle-and-distribution.md) | not started |
 | Live recording status in the menu bar | [09](plans/09-menu-bar-item.md) | not started |
 

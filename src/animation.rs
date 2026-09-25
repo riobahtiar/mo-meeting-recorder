@@ -19,8 +19,9 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
 }
 
-// The Omacon colours, used when there is no Omarchy theme. With a theme the
-// scene takes its background, text, accent and cyan from it.
+// Fallback colours for the standalone example binary, which has no theme to
+// read. Inside the app the scene takes its background, text, accent and cyan
+// from the Apple palette in `theme.rs`.
 const OMACON_DARK: Rgb = rgb(13, 8, 38);
 const OMACON_LIGHT: Rgb = rgb(248, 245, 242);
 const OMACON_PINK: Rgb = rgb(255, 138, 255);

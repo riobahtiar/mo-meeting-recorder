@@ -179,13 +179,29 @@ fn label(id: &str) -> &'static str {
     }
 }
 
+/// Every agent the flag table knows, in Preferences order. `supported` and
+/// `build` stay in step through this list: an agent here and missing there
+/// runs nothing, an agent there and missing here would run with its tools.
+const AGENT_IDS: &[&str] = &[
+    "claude", "codex", "opencode", "pi", "omp", "ori", "grok", "copilot", "goose",
+];
+
+/// The table agents found on `PATH`, for the Preferences dropdown.
+pub fn installed_agents() -> Vec<Agent> {
+    AGENT_IDS
+        .iter()
+        .filter(|id| which(id).is_some())
+        .map(|id| Agent {
+            id: id.to_string(),
+            name: label(id),
+        })
+        .collect()
+}
+
 /// Must stay in step with `build`: an agent here and missing there runs
 /// nothing, an agent there and missing here would run with its tools.
 fn supported(id: &str) -> bool {
-    matches!(
-        id,
-        "claude" | "codex" | "opencode" | "pi" | "omp" | "ori" | "grok" | "copilot" | "goose"
-    )
+    AGENT_IDS.contains(&id)
 }
 
 /// A decision rather than a gap, so it says why.

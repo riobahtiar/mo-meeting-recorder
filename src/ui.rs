@@ -23,8 +23,8 @@ use crate::player::Player;
 use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGES};
 use crate::{APP_ID, APP_NAME, settings};
 
-const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
-const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
+const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
+const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
 const FULL_SIZE: (i32, i32) = (480, 700);
 const COMPACT_SIZE: (i32, i32) = (300, 84);
 const DONE_SIZE: (i32, i32) = (1100, 760);
@@ -69,6 +69,77 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
 /// Choices in the import dialog: automatic, then a fixed number.
 const SPEAKER_CHOICES: [&str; 7] = ["Automatic", "1", "2", "3", "4", "5", "6"];
 
+/// The native menu bar: GTK's quartz backend turns this `GMenuModel` into the
+/// NSMenu bar, and adds the standard app menu when `app.about`,
+/// `app.preferences` and `app.quit` exist. Every item is a `GAction` from
+/// `install_actions`, so enabled state is shared with the buttons.
+fn install_menubar(app: &adw::Application) {
+    use gio::Menu;
+    let item = |label: &str, action: &str| gio::MenuItem::new(Some(label), Some(action));
+
+    let file = Menu::new();
+    file.append_item(&item("New Recording", "win.new-recording"));
+    file.append_item(&item("Open Meeting…", "win.open-meeting"));
+    file.append_item(&item("Import Audio File…", "win.import"));
+    let finder = Menu::new();
+    finder.append_item(&item("Reveal in Finder", "win.reveal"));
+    file.append_section(None, &finder);
+    let close = Menu::new();
+    close.append_item(&item("Close Window", "window.close"));
+    file.append_section(None, &close);
+
+    let edit = Menu::new();
+    for (label, action) in [("Undo", "text.undo"), ("Redo", "text.redo")] {
+        edit.append_item(&item(label, action));
+    }
+    let clipboard = Menu::new();
+    for (label, action) in [
+        ("Cut", "clipboard.cut"),
+        ("Copy", "clipboard.copy"),
+        ("Paste", "clipboard.paste"),
+        ("Select All", "selection.select-all"),
+    ] {
+        clipboard.append_item(&item(label, action));
+    }
+    edit.append_section(None, &clipboard);
+    let transcript = Menu::new();
+    transcript.append_item(&item("Copy Transcript", "win.copy-transcript"));
+    edit.append_section(None, &transcript);
+
+    let recording = Menu::new();
+    recording.append_item(&item("Start Recording", "win.start"));
+    recording.append_item(&item("Pause / Resume", "win.pause"));
+    recording.append_item(&item("Stop Recording", "win.stop"));
+
+    let view = Menu::new();
+    view.append_item(&item("Compact Strip", "win.compact"));
+    view.append_item(&item("Enter Full Screen", "win.fullscreen"));
+    let again = Menu::new();
+    for (code, name) in LANGUAGES {
+        let entry = gio::MenuItem::new(Some(name), None);
+        entry.set_action_and_target_value(
+            Some("win.transcribe-again"),
+            Some(&glib::Variant::from(code)),
+        );
+        again.append_item(&entry);
+    }
+    view.append_submenu(Some("Transcribe Again"), &again);
+
+    // macOS manages Minimize, Zoom and the window list itself.
+    let window = Menu::new();
+    let help = Menu::new();
+    help.append_item(&item("MOM Recorder Help", "app.help"));
+
+    let bar = Menu::new();
+    bar.append_submenu(Some("File"), &file);
+    bar.append_submenu(Some("Edit"), &edit);
+    bar.append_submenu(Some("Recording"), &recording);
+    bar.append_submenu(Some("View"), &view);
+    bar.append_submenu(Some("Window"), &window);
+    bar.append_submenu(Some("Help"), &help);
+    app.set_menubar(Some(&bar));
+}
+
 /// Runs the app. `open` is a `.meeting-recorder` file or a meeting folder to show
 /// instead of starting a new recording.
 pub fn run(open: Option<&str>) -> glib::ExitCode {
@@ -78,13 +149,38 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         .build();
     app.connect_startup(|app| {
         load_css();
+        if let Some(settings) = gtk::Settings::default() {
+            // Window buttons on the left, drawn as traffic lights by macos.css.
+            settings.set_gtk_decoration_layout(Some("close,minimize,maximize:"));
+            // GDK reports the system font at 12 pt; macOS body text is 13 pt.
+            // Keep the family it reported, bump the size.
+            let name = settings
+                .gtk_font_name()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let family = name.rsplit_once(' ').map_or(name.as_str(), |(f, _)| f);
+                settings.set_gtk_font_name(Some(&format!("{family} 13")));
+            }
+        }
         crate::theme::follow(|| {
             for window in gtk::Window::list_toplevels() {
                 redraw(&window);
             }
         });
-        app.set_accels_for_action("win.compact", &["<Primary><Shift>m"]);
+        install_menubar(app);
+        app.set_accels_for_action("win.new-recording", &["<Primary>n"]);
+        app.set_accels_for_action("win.open-meeting", &["<Primary>o"]);
+        app.set_accels_for_action("win.import", &["<Primary><Shift>i"]);
+        app.set_accels_for_action("win.reveal", &["<Primary><Alt>r"]);
         app.set_accels_for_action("window.close", &["<Primary>w"]);
+        app.set_accels_for_action("win.start", &["<Primary>r"]);
+        app.set_accels_for_action("win.pause", &["<Primary><Shift>r"]);
+        app.set_accels_for_action("win.stop", &["<Primary>period"]);
+        app.set_accels_for_action("win.compact", &["<Primary><Shift>m"]);
+        app.set_accels_for_action("win.copy-transcript", &["<Primary><Shift>c"]);
+        app.set_accels_for_action("win.fullscreen", &["<Primary><Control>f"]);
+        app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
         app.set_accels_for_action("app.quit", &["<Primary>q"]);
     });
     let recorder: Rc<RefCell<Option<Rc<Recorder>>>> = Rc::default();
@@ -188,6 +284,8 @@ struct Recorder {
     animation_since: Cell<Option<std::time::Instant>>,
     paused_secs: Cell<i64>,
     pause_began: Cell<i64>,
+    /// Fullscreen toggled through the View menu, for the label.
+    fullscreen: Cell<bool>,
     /// The `caffeinate` child keeping the Mac awake while recording.
     caffeinate: RefCell<Option<std::process::Child>>,
     pause_button: gtk::Button,
@@ -220,15 +318,16 @@ impl Recorder {
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
-            .title("Meeting Recorder")
+            .title("MOM Recorder")
             .default_width(FULL_SIZE.0)
             .default_height(FULL_SIZE.1)
             .build();
+        window.add_css_class("macos");
         let view = adw::ToolbarView::new();
         let header = adw::HeaderBar::new();
         let compact_button = gtk::Button::builder()
             .icon_name("view-restore-symbolic")
-            .tooltip_text("Minimize (Ctrl+M)")
+            .tooltip_text("Compact strip (⇧⌘M)")
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
@@ -431,12 +530,14 @@ impl Recorder {
 
         let actions = gtk::Box::builder().spacing(8).homogeneous(true).build();
         let open_button = gtk::Button::builder()
-            .label("Open folder")
+            .label("Reveal in Finder")
             .css_classes(["pill"])
+            .action_name("win.reveal")
             .build();
         let new_button = gtk::Button::builder()
             .label("New recording")
             .css_classes(["pill"])
+            .action_name("win.new-recording")
             .build();
         actions.append(&open_button);
         actions.append(&new_button);
@@ -631,6 +732,7 @@ impl Recorder {
             animation_since: Cell::new(None),
             paused_secs: Cell::new(0),
             pause_began: Cell::new(0),
+            fullscreen: Cell::new(false),
             caffeinate: RefCell::default(),
             pause_button,
             import_button,
@@ -645,7 +747,8 @@ impl Recorder {
             loading: Cell::new(false),
             manifest: RefCell::default(),
         });
-        recorder.connect_signals(&open_button, &new_button, &quit_action);
+        recorder.connect_signals(&quit_action);
+        recorder.install_actions();
         let weak = Rc::downgrade(&recorder);
         glib::spawn_future_local(async move {
             while let Ok(command) = commands_rx.recv().await {
@@ -669,12 +772,7 @@ impl Recorder {
         recorder
     }
 
-    fn connect_signals(
-        self: &Rc<Self>,
-        open_button: &gtk::Button,
-        new_button: &gtk::Button,
-        quit_action: &gio::SimpleAction,
-    ) {
+    fn connect_signals(self: &Rc<Self>, quit_action: &gio::SimpleAction) {
         let weak = Rc::downgrade(self);
         self.button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
@@ -737,27 +835,6 @@ impl Recorder {
         self.window.add_controller(drop);
 
         let weak = Rc::downgrade(self);
-        self.import_button.connect_clicked(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            let filter = gtk::FileFilter::new();
-            filter.set_name(Some("Audio and video"));
-            filter.add_mime_type("audio/*");
-            filter.add_mime_type("video/*");
-            let filters = gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            let dialog = gtk::FileDialog::builder()
-                .title("Import an audio file")
-                .filters(&filters)
-                .build();
-            let this = r.clone();
-            dialog.open(Some(&r.window), gio::Cancellable::NONE, move |result| {
-                if let Some(path) = result.ok().and_then(|f| f.path()) {
-                    this.confirm_import(path);
-                }
-            });
-        });
-
-        let weak = Rc::downgrade(self);
         self.model_banner.connect_button_clicked(move |_| {
             if let Some(r) = weak.upgrade() {
                 r.download_model();
@@ -766,20 +843,13 @@ impl Recorder {
         self.update_model_banner();
 
         let weak = Rc::downgrade(self);
-        self.pause_button.connect_clicked(move |_| {
-            if let Some(r) = weak.upgrade() {
-                r.toggle_pause();
-            }
-        });
-
-        let weak = Rc::downgrade(self);
         self.compact_action.connect_activate(move |_, _| {
             if let Some(r) = weak.upgrade() {
                 r.set_compact(!r.compact.get());
             }
         });
 
-        // Ctrl+Q goes through the same check as the close button.
+        // ⌘Q goes through the same check as the close button.
         let weak = Rc::downgrade(self);
         quit_action.connect_activate(move |_, _| {
             if let Some(r) = weak.upgrade() {
@@ -857,13 +927,6 @@ impl Recorder {
             }
         });
 
-        let weak = Rc::downgrade(self);
-        new_button.connect_clicked(move |_| {
-            if let Some(r) = weak.upgrade() {
-                r.ready();
-            }
-        });
-
         // The name on the done page drives the same title and folder rename.
         let weak = Rc::downgrade(self);
         self.done_title_row.connect_changed(move |row| {
@@ -923,49 +986,9 @@ impl Recorder {
         self.title_row.add_controller(focus);
 
         let weak = Rc::downgrade(self);
-        open_button.connect_clicked(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            if let Some(dir) = r.result_dir.borrow().as_ref() {
-                let uri = gio::File::for_path(dir).uri();
-                let _ = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>);
-            }
-        });
-
-        let weak = Rc::downgrade(self);
-        self.copy_button.connect_clicked(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            let Some(dir) = r.result_dir.borrow().clone() else {
-                return;
-            };
-            match std::fs::read_to_string(dir.join("transcript.md")) {
-                Ok(text) => {
-                    r.window.clipboard().set_text(&text);
-                    r.toast("Copied to clipboard");
-                }
-                Err(_) => r.toast("No transcript found"),
-            }
-        });
-
-        let weak = Rc::downgrade(self);
         self.again_button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
-            let Some(dir) = r.result_dir.borrow().clone() else {
-                return;
-            };
-            let tracks = match r.manifest.borrow().as_ref() {
-                Some(m) if m.imported.is_some() => {
-                    Tracks::Single(source_track(&dir), m.speaker_count)
-                }
-                _ => Tracks::Kept(dir),
-            };
-            let this = r.clone();
-            glib::spawn_future_local(async move {
-                let result = this
-                    .run_transcription(tracks, this.selected_language())
-                    .await;
-                this.hold_animation(&result).await;
-                this.finished(true, result);
-            });
+            r.transcribe_again(r.selected_language());
         });
 
         let weak = Rc::downgrade(self);
@@ -1020,6 +1043,430 @@ impl Recorder {
         self.toasts.add_toast(adw::Toast::new(message));
     }
 
+    /// Every user-facing operation as a `GAction`, so buttons and menu items
+    /// share enabled state instead of each tracking it. Called once, after
+    /// the recorder exists.
+    fn install_actions(self: &Rc<Self>) {
+        let act = |name: &str| {
+            let action = gio::SimpleAction::new(name, None);
+            self.window.add_action(&action);
+            action
+        };
+        Self::on(&act("new-recording"), self, |r| {
+            if matches!(r.state.get(), State::Idle | State::Done) {
+                r.ready();
+            }
+        });
+        Self::on(&act("open-meeting"), self, |r| r.open_meeting_dialog());
+        Self::on(&act("import"), self, |r| r.ask_import_file());
+        Self::on(&act("reveal"), self, |r| r.reveal_in_finder());
+        Self::on(&act("start"), self, |r| {
+            if r.state.get() == State::Idle {
+                r.start();
+            }
+        });
+        Self::on(&act("pause"), self, |r| r.toggle_pause());
+        Self::on(&act("stop"), self, |r| r.stop());
+        Self::on(&act("copy-transcript"), self, |r| r.copy_transcript());
+        Self::on(&act("fullscreen"), self, |r| r.toggle_fullscreen());
+        let again = gio::SimpleAction::new("transcribe-again", Some(glib::VariantTy::STRING));
+        let weak = Rc::downgrade(self);
+        again.connect_activate(move |_, param| {
+            let Some(r) = weak.upgrade() else { return };
+            let language = param.and_then(|p| p.get::<String>()).unwrap_or_default();
+            r.transcribe_again(&language);
+        });
+        // Single-purpose buttons trigger the same actions as the menu.
+        self.pause_button.set_action_name(Some("win.pause"));
+        self.import_button.set_action_name(Some("win.import"));
+        self.copy_button
+            .set_action_name(Some("win.copy-transcript"));
+
+        let app = self.window.application().expect("window has an app");
+        let about = gio::SimpleAction::new("about", None);
+        app.add_action(&about);
+        Self::on(&about, self, |r| r.show_about());
+        let help = gio::SimpleAction::new("help", None);
+        app.add_action(&help);
+        Self::on(&help, self, |r| r.show_help());
+        let preferences = gio::SimpleAction::new("preferences", None);
+        app.add_action(&preferences);
+        Self::on(&preferences, self, |r| r.show_preferences());
+    }
+
+    fn on(action: &gio::SimpleAction, this: &Rc<Self>, run: impl Fn(Rc<Self>) + 'static) {
+        let weak = Rc::downgrade(this);
+        action.connect_activate(move |_, _| {
+            if let Some(r) = weak.upgrade() {
+                run(r);
+            }
+        });
+    }
+
+    /// One `set_enabled` per state transition; the menu greys out with it.
+    fn update_actions(&self) {
+        let state = self.state.get();
+        let enable = |name: &str, on: bool| {
+            if let Some(action) = self.window.lookup_action(name)
+                && let Ok(action) = action.downcast::<gio::SimpleAction>()
+            {
+                action.set_enabled(on);
+            }
+        };
+        let idle_done = matches!(state, State::Idle | State::Done);
+        let recording = state == State::Recording;
+        enable("new-recording", idle_done);
+        enable("open-meeting", true);
+        enable("import", idle_done);
+        enable("reveal", state == State::Done);
+        enable("start", state == State::Idle);
+        enable("pause", recording);
+        enable("stop", recording);
+        enable("compact", recording);
+        enable("copy-transcript", state == State::Done);
+        enable("transcribe-again", state == State::Done);
+        enable("fullscreen", true);
+    }
+
+    /// The import file panel (NSOpenPanel through GTK's quartz chooser).
+    fn ask_import_file(self: &Rc<Self>) {
+        if !matches!(self.state.get(), State::Idle | State::Done) {
+            return;
+        }
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Audio and video"));
+        filter.add_mime_type("audio/*");
+        filter.add_mime_type("video/*");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title("Import an audio file")
+            .filters(&filters)
+            .build();
+        let this = self.clone();
+        dialog.open(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if let Some(path) = result.ok().and_then(|f| f.path()) {
+                this.confirm_import(path);
+            }
+        });
+    }
+
+    /// The open panel: a `.meeting-recorder` file from a meeting folder.
+    fn open_meeting_dialog(self: &Rc<Self>) {
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Meeting recordings"));
+        filter.add_suffix("meeting-recorder");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title("Open a meeting (.meeting-recorder file)")
+            .filters(&filters)
+            .build();
+        let this = self.clone();
+        dialog.open(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if let Some(path) = result.ok().and_then(|f| f.path()) {
+                this.open_meeting(&path);
+            }
+        });
+    }
+
+    /// Selects the meeting's manifest in Finder, the way "Reveal" means here.
+    fn reveal_in_finder(&self) {
+        let Some(dir) = self.result_dir.borrow().clone() else {
+            return;
+        };
+        let target = crate::meeting::find(&dir).unwrap_or(dir);
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    fn copy_transcript(&self) {
+        let Some(dir) = self.result_dir.borrow().clone() else {
+            return;
+        };
+        match std::fs::read_to_string(dir.join("transcript.md")) {
+            Ok(text) => {
+                self.window.clipboard().set_text(&text);
+                self.toast("Copied to clipboard");
+            }
+            Err(_) => self.toast("No transcript found"),
+        }
+    }
+
+    /// Transcribes the done meeting again in `language` (a code from
+    /// `LANGUAGES`, falling back to the selected one).
+    fn transcribe_again(self: &Rc<Self>, language: &str) {
+        if self.state.get() != State::Done {
+            return;
+        }
+        let language: &'static str = crate::transcribe::LANGUAGES
+            .iter()
+            .find(|(code, _)| *code == language)
+            .map(|(code, _)| *code)
+            .unwrap_or_else(|| self.selected_language());
+        let Some(dir) = self.result_dir.borrow().clone() else {
+            return;
+        };
+        let tracks = match self.manifest.borrow().as_ref() {
+            Some(m) if m.imported.is_some() => Tracks::Single(source_track(&dir), m.speaker_count),
+            _ => Tracks::Kept(dir),
+        };
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let result = this.run_transcription(tracks, language).await;
+            this.hold_animation(&result).await;
+            this.finished(true, result);
+        });
+    }
+
+    fn toggle_fullscreen(&self) {
+        let fullscreen = !self.fullscreen.get();
+        self.fullscreen.set(fullscreen);
+        if fullscreen {
+            self.window.fullscreen();
+        } else {
+            self.window.unfullscreen();
+        }
+    }
+
+    fn show_about(&self) {
+        let dialog = adw::AboutDialog::builder()
+            .application_name("MOM Recorder")
+            .application_icon("io.github.riobahtiar.MOMRecorder")
+            .version(env!("CARGO_PKG_VERSION"))
+            .developer_name("Rio Bahtiar")
+            .copyright("© 2026 Rio Bahtiar")
+            .comments("Two-track meeting recorder: your microphone and the computer audio, transcribed on this Mac.")
+            .website("https://github.com/riobahtiar/mo-meeting-recorder")
+            .issue_url("https://github.com/riobahtiar/mo-meeting-recorder/issues")
+            .license_type(gtk::License::MitX11)
+            .build();
+        dialog.add_acknowledgement_section(
+            Some("Transcription"),
+            &[
+                "whisper.cpp through whisper-rs",
+                "Nemotron 3 Diarization (ONNX community export)",
+                "Based on Meeting Recorder by Jankees van Woezik",
+            ],
+        );
+        dialog.present(Some(&self.window));
+    }
+
+    fn show_help(&self) {
+        let uri = "https://github.com/riobahtiar/mo-meeting-recorder";
+        let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+    }
+
+    /// App settings (⌘,): model, agent, format, language, name, meetings
+    /// folder and audio status. Values apply at once; the ready page re-reads
+    /// the model banner and the language on close.
+    fn show_preferences(self: &Rc<Self>) {
+        let dialog = adw::PreferencesDialog::builder().title("Settings").build();
+        let page = adw::PreferencesPage::builder().title("Settings").build();
+        dialog.add(&page);
+        let transcription = adw::PreferencesGroup::builder()
+            .title("Transcription")
+            .build();
+        let model_names: Vec<&str> = crate::models::MODELS.iter().map(|m| m.name).collect();
+        let model_row = adw::ComboRow::builder()
+            .title("Speech model")
+            .model(&gtk::StringList::new(&model_names))
+            .build();
+        let current_model = crate::models::configured();
+        model_row.set_selected(
+            crate::models::MODELS
+                .iter()
+                .position(|m| m.name == current_model)
+                .unwrap_or(0) as u32,
+        );
+        let model_subtitle = |name: &str| {
+            let model = crate::models::MODELS.iter().find(|m| m.name == name);
+            let downloaded = model.is_some_and(|m| {
+                crate::transcribe::models_dir()
+                    .join(format!("ggml-{}.bin", m.name))
+                    .is_file()
+            });
+            match (downloaded, model) {
+                (true, _) => "On this Mac".to_owned(),
+                (_, Some(m)) if m.size_mb >= 1000 => {
+                    format!(
+                        "About {:.1} GB, downloads on first use",
+                        f64::from(m.size_mb) / 1000.0
+                    )
+                }
+                (_, Some(m)) => format!("About {} MB, downloads on first use", m.size_mb),
+                (_, None) => String::new(),
+            }
+        };
+        model_row.set_subtitle(&model_subtitle(&current_model));
+        let weak = Rc::downgrade(self);
+        model_row.connect_selected_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            let name = model_names[row.selected() as usize];
+            crate::models::save_config_value("model", name);
+            row.set_subtitle(&model_subtitle(name));
+            r.update_model_banner();
+        });
+        transcription.add(&model_row);
+        let language_labels: Vec<&str> = LANGUAGES.iter().map(|(_, label)| *label).collect();
+        let prefs_language = adw::ComboRow::builder()
+            .title("Default language")
+            .model(&gtk::StringList::new(&language_labels))
+            .build();
+        let saved_language = settings::load_language();
+        prefs_language.set_selected(
+            LANGUAGES
+                .iter()
+                .position(|(code, _)| *code == saved_language)
+                .unwrap_or(0) as u32,
+        );
+        let weak = Rc::downgrade(self);
+        prefs_language.connect_selected_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            let code = LANGUAGES[row.selected() as usize].0;
+            settings::save_language(code);
+            // The ready page owns the default: keep its dropdown in step.
+            r.loading.set(true);
+            r.language_row.set_selected(row.selected());
+            r.again_language_row.set_selected(row.selected());
+            r.loading.set(false);
+        });
+        transcription.add(&prefs_language);
+        page.add(&transcription);
+        let chapters = adw::PreferencesGroup::builder()
+            .title("Chapters")
+            .description("A coding agent with every tool switched off writes the chapter titles.")
+            .build();
+        let agents = crate::agent::installed_agents();
+        let mut agent_names = vec!["None"];
+        agent_names.extend(agents.iter().map(|a| a.name));
+        let agent_row = adw::ComboRow::builder()
+            .title("Agent")
+            .model(&gtk::StringList::new(&agent_names))
+            .build();
+        let current_agent = crate::models::config_value("agent").unwrap_or_default();
+        agent_row.set_selected(
+            agents
+                .iter()
+                .position(|a| a.id == current_agent)
+                .map(|i| i + 1)
+                .unwrap_or(0) as u32,
+        );
+        agent_row.connect_selected_notify(move |row| {
+            let selected = row.selected() as usize;
+            let id = if selected == 0 {
+                String::new()
+            } else {
+                agents[selected - 1].id.clone()
+            };
+            crate::models::save_config_value("agent", &id);
+        });
+        chapters.add(&agent_row);
+        page.add(&chapters);
+        let recording = adw::PreferencesGroup::builder().title("Recording").build();
+        let format_labels: Vec<&str> = Format::ALL.iter().map(|f| f.label()).collect();
+        let format_row = adw::ComboRow::builder()
+            .title("Default audio format")
+            .model(&gtk::StringList::new(&format_labels))
+            .build();
+        format_row.set_selected(
+            Format::ALL
+                .iter()
+                .position(|f| *f == settings::load_format())
+                .unwrap_or(0) as u32,
+        );
+        format_row.connect_selected_notify(|row| {
+            settings::save_format(Format::ALL[row.selected() as usize]);
+        });
+        recording.add(&format_row);
+        let name_row = adw::EntryRow::builder()
+            .title("Your name in transcripts")
+            .text(settings::load_your_name())
+            .build();
+        name_row.connect_apply(|row| {
+            settings::save_your_name(&row.text());
+        });
+        recording.add(&name_row);
+        let meetings_path = settings::load_meetings_dir().unwrap_or_else(crate::paths::meetings);
+        let meetings_row = adw::ActionRow::builder()
+            .title("Meetings folder")
+            .subtitle(meetings_path.display().to_string())
+            .build();
+        let choose = gtk::Button::builder()
+            .label("Choose…")
+            .valign(gtk::Align::Center)
+            .build();
+        meetings_row.add_suffix(&choose);
+        let this = self.clone();
+        let row = meetings_row.clone();
+        choose.connect_clicked(move |_| {
+            let folders = gtk::FileDialog::builder().title("Meetings folder").build();
+            let (row, window) = (row.clone(), this.window.clone());
+            folders.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
+                if let Some(path) = result.ok().and_then(|f| f.path()) {
+                    settings::save_meetings_dir(&path);
+                    row.set_subtitle(&path.display().to_string());
+                }
+            });
+        });
+        recording.add(&meetings_row);
+        page.add(&recording);
+        let audio = adw::PreferencesGroup::builder().title("Audio").build();
+        let audio_status = crate::helper::path().and_then(|h| crate::helper::list_info(&h));
+        let mic_row = adw::ActionRow::builder().title("Microphone").build();
+        let mic_subtitle = match audio_status {
+            Some((_, _, inputs, _)) if inputs > 0 => {
+                format!("{inputs} input devices, default follows the system")
+            }
+            _ => "No input device found".to_owned(),
+        };
+        mic_row.set_subtitle(&mic_subtitle);
+        audio.add(&mic_row);
+        let computer_row = adw::ActionRow::builder().title("Computer audio").build();
+        match audio_status {
+            Some((true, _, _, _)) => {
+                computer_row.set_subtitle("Records what the Mac plays");
+            }
+            Some((false, Some(device), _, _)) => {
+                computer_row.set_subtitle(&format!("Through {device}"));
+            }
+            _ => {
+                computer_row.set_subtitle("Unavailable: install BlackHole");
+                let install = gtk::Button::builder()
+                    .label("How to set up BlackHole")
+                    .valign(gtk::Align::Center)
+                    .build();
+                install.connect_clicked(|_| {
+                    let _ = gio::AppInfo::launch_default_for_uri(
+                        "https://github.com/ExistentialAudio/BlackHole",
+                        None::<&gio::AppLaunchContext>,
+                    );
+                });
+                computer_row.add_suffix(&install);
+            }
+        }
+        audio.add(&computer_row);
+        page.add(&audio);
+        let weak = Rc::downgrade(self);
+        dialog.connect_closed(move |_| {
+            let Some(r) = weak.upgrade() else { return };
+            r.update_model_banner();
+            let saved = settings::load_language();
+            if let Some(index) = LANGUAGES.iter().position(|(code, _)| *code == saved) {
+                r.loading.set(true);
+                r.language_row.set_selected(index as u32);
+                r.again_language_row.set_selected(index as u32);
+                r.loading.set(false);
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
     fn selected_format(&self) -> Format {
         Format::ALL
             .get(self.format_row.selected() as usize)
@@ -1072,7 +1519,6 @@ impl Recorder {
         self.live.set(recording);
         self.dot.set_visible(recording);
         self.compact_button.set_visible(recording);
-        self.compact_action.set_enabled(recording);
         self.language_row
             .set_sensitive(!matches!(state, State::Stopping | State::Transcribing));
         self.button.set_sensitive(matches!(
@@ -1122,6 +1568,7 @@ impl Recorder {
             State::Done => String::new(),
         };
         self.status_label.set_label(&text);
+        self.update_actions();
     }
 
     /// Shows the page for the current state, edge to edge while transcribing.
@@ -1837,6 +2284,7 @@ impl Recorder {
         }
         self.show_transcript(text.as_deref(), problem.as_deref());
         self.transcript_scroll.vadjustment().set_value(0.0);
+        let ok = problem.is_none();
         if let Some(problem) = problem {
             eprintln!("{APP_NAME}: {problem}");
         } else {
@@ -1847,14 +2295,21 @@ impl Recorder {
                 self.generate_chapters();
             }
         }
+        // Finished while the window was elsewhere: say so. Only fires from
+        // the .app (plan 08); from a terminal it is a no-op.
+        if ok && !self.window.is_active() {
+            let note = gio::Notification::new("Meeting transcribed");
+            note.set_body(Some(&self.title()));
+            if let Some(app) = self.window.application() {
+                app.send_notification(Some("transcribed"), &note);
+            }
+        }
         if self.quit_when_done.get()
             && let Some(app) = self.window.application()
         {
             app.quit();
         }
     }
-
-    /// Shows a saved meeting on the done page, with the settings it was made with.
     fn open_meeting(self: &Rc<Self>, path: &std::path::Path) {
         if matches!(
             self.state.get(),
@@ -2749,7 +3204,8 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    crate::paths::meetings().join(format!("{stamp} {}", safe_name(title)))
+    let root = settings::load_meetings_dir().unwrap_or_else(crate::paths::meetings);
+    root.join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {

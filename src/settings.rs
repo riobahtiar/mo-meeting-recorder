@@ -68,3 +68,15 @@ pub fn load_your_name() -> String {
 pub fn save_your_name(name: &str) {
     save("your_name", name);
 }
+
+/// An overridden meetings folder, or None for the Documents default.
+pub fn load_meetings_dir() -> Option<std::path::PathBuf> {
+    load()["meetings_dir"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+}
+
+pub fn save_meetings_dir(dir: &std::path::Path) {
+    save("meetings_dir", &dir.display().to_string());
+}

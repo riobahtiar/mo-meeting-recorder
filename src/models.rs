@@ -120,6 +120,44 @@ pub fn configured() -> String {
     config_value("model").unwrap_or_else(|| DEFAULT.to_owned())
 }
 
+/// Rewrites `key = "value"` in config.toml, appending it when absent and
+pub fn save_config_value(key: &str, value: &str) {
+    let path = config_file();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = rewrite_config_line(&text, key, value);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// `text` with `key = "value"` replaced or appended.
+fn rewrite_config_line(text: &str, key: &str, value: &str) -> String {
+    let line = format!("{key} = \"{value}\"");
+    let mut replaced = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|existing| {
+            if !replaced
+                && existing
+                    .split_once('=')
+                    .is_some_and(|(k, _)| k.trim() == key)
+            {
+                replaced = true;
+                line.clone()
+            } else {
+                existing.to_owned()
+            }
+        })
+        .collect();
+    if !replaced {
+        out.push(line);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
 fn known(name: &str) -> Option<&'static Model> {
     let name = name.strip_prefix("ggml-").unwrap_or(name);
     let name = name.strip_suffix(".bin").unwrap_or(name);
@@ -219,5 +257,17 @@ mod tests {
         assert_eq!(parse_config_value(text, "agent").as_deref(), Some("claude"));
         assert_eq!(parse_config_value(text, "missing"), None);
         assert_eq!(parse_config_value("agent = \"\"\n", "agent"), None);
+    }
+
+    #[test]
+    fn config_lines_rewrite_and_append() {
+        let text = "# keep me\nmodel = \"tiny\"\n";
+        let rewritten = rewrite_config_line(text, "model", "small");
+        assert!(rewritten.contains("model = \"small\""));
+        assert!(rewritten.contains("# keep me"));
+        assert!(!rewritten.contains("\"tiny\""));
+        let appended = rewrite_config_line(text, "agent", "pi");
+        assert!(appended.contains("model = \"tiny\""));
+        assert!(appended.contains("agent = \"pi\""));
     }
 }

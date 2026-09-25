@@ -134,7 +134,7 @@ Each entry: the context, the decision, what was rejected and why, and what follo
 | Preferences… | ⌘, | Standard |
 | Quit | ⌘Q | Standard |
 
-**Status.** Proposed.
+**Status.** Accepted; implemented as proposed in plan 07 (menu shortcuts match this table).
 
 ## D19 Two architecture-specific DMGs, no universal binary
 

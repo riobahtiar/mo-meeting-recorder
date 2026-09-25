@@ -17,8 +17,8 @@ use gtk::{gio, glib};
 use crate::export;
 
 const BINS: usize = 1000;
-const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
-const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
+const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
+const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
 
 type PositionCallback = Rc<RefCell<Option<Box<dyn Fn(i64)>>>>;
 

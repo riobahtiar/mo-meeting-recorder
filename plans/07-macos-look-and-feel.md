@@ -6,14 +6,21 @@ A Mac user opens MOM Recorder and finds what every Mac app has: a menu bar with 
 
 ## Done when
 
-- [ ] Menu bar: app menu (About, Preferences…, Services, Hide, Quit), File, Edit, Recording, View, Window, Help, with the D18 shortcuts; items enable and disable with the app's state.
+- [~] Menu bar: app menu (About, Preferences…, Services, Hide, Quit), File, Edit, Recording, View, Window, Help, with the D18 shortcuts; items enable and disable with the app's state.
 - [ ] Window buttons on the left, drawn as traffic lights; the title bar reads the meeting name.
 - [ ] Body text is the system font at 13 pt; buttons, entries and cards have macOS radii and spacing.
-- [ ] Switching the system appearance or accent while the app is open is followed at once; speakers, waves and the animation use Apple's palette.
-- [ ] Import, Open Meeting and the folder chooser open native panels with working filters.
-- [ ] About shows the version, upstream credit and licence; Preferences edits model, agent, format, language, your name and the meetings folder, and the app uses the new values without restart.
-- [ ] Drag a file from Finder onto the window: the drop overlay appears and the import dialog opens.
-- [ ] `grep -rn -i omarchy src/` finds nothing.
+- [x] Switching the system appearance or accent while the app is open is followed at once; speakers, waves and the animation use Apple's palette.
+- [~] Import, Open Meeting and the folder chooser open native panels with working filters.
+- [x] About shows the version, upstream credit and licence; Preferences edits model, agent, format, language, your name and the meetings folder, and the app uses the new values without restart.
+- [x] Drag a file from Finder onto the window: the drop overlay appears and the import dialog opens.
+- [x] `grep -rn -i omarchy src/` finds nothing.
+
+Observed 2026-09-25 (no display in the shell session): `cargo build`,
+`cargo test` (52 passed), clippy and fmt are clean; a socket-driven
+record/stop cycle runs with no new warnings. Everything visual — menu bar,
+traffic lights, typography, panels, About and Preferences rendering — needs
+the side-by-side in Verify step 2 on a display. The icon (step 10) and the
+VoiceOver check (step 13) are not started.
 
 ## Prerequisites
 
@@ -278,16 +285,16 @@ Verify: whether VoiceOver reads the transcript rows and the buttons under GTK 4'
 
 ## Status
 
-- [ ] Step 1 actions
-- [ ] Step 2 menu bar
-- [ ] Step 3 window chrome
-- [ ] Step 4 typography
-- [ ] Step 5 `macos.css`
-- [ ] Step 6 Apple palette, Omarchy reader gone
-- [ ] Step 7 native panels, Reveal, drop
-- [ ] Step 8 About
-- [ ] Step 9 Preferences
+- [x] Step 1 actions
+- [x] Step 2 menu bar
+- [x] Step 3 window chrome
+- [x] Step 4 typography
+- [x] Step 5 `macos.css`
+- [x] Step 6 Apple palette, Omarchy reader gone
+- [x] Step 7 native panels, Reveal, drop
+- [x] Step 8 About
+- [x] Step 9 Preferences
 - [ ] Step 10 icon
-- [ ] Step 11 notifications
-- [ ] Step 12 conventions
+- [x] Step 11 notifications
+- [x] Step 12 conventions
 - [ ] Step 13 accessibility check

@@ -26,8 +26,9 @@ pub fn path() -> Option<PathBuf> {
     which(HELPER)
 }
 
-/// The BlackHole loopback device from `momr-audio list`, if one is installed.
-pub fn blackhole_name(helper: &Path) -> Option<String> {
+/// The full `momr-audio list` picture: tap support, the BlackHole device when
+/// one is installed, and the input/output device counts.
+pub fn list_info(helper: &Path) -> Option<(bool, Option<String>, usize, usize)> {
     let output = Command::new(helper)
         .arg("list")
         .stdin(std::process::Stdio::null())
@@ -37,16 +38,23 @@ pub fn blackhole_name(helper: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    parse_list(&String::from_utf8_lossy(&output.stdout)).1
+    Some(parse_list(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// (tap supported, BlackHole device) from one `list` JSON object. Hand-parsed
-/// with serde_json, the way the rest of the app reads small JSON.
-fn parse_list(text: &str) -> (bool, Option<String>) {
+/// The BlackHole loopback device from `momr-audio list`, if one is installed.
+pub fn blackhole_name(helper: &Path) -> Option<String> {
+    list_info(helper).and_then(|(_, blackhole, _, _)| blackhole)
+}
+
+/// (tap supported, BlackHole device, inputs, outputs) from one `list` JSON
+/// object. Hand-parsed with serde_json, the way the rest of the app reads
+/// small JSON.
+fn parse_list(text: &str) -> (bool, Option<String>, usize, usize) {
     let value: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
     let tap = value["tap"].as_bool().unwrap_or(false);
     let blackhole = value["blackhole"].as_str().map(str::to_owned);
-    (tap, blackhole)
+    let count = |key: &str| value[key].as_array().map_or(0, Vec::len);
+    (tap, blackhole, count("inputs"), count("outputs"))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -67,24 +75,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_parses_tap_and_blackhole() {
-        let (tap, blackhole) =
-            parse_list(r#"{"blackhole":"BlackHole 2ch","inputs":[],"outputs":[],"tap":true}"#);
+    fn list_parses_tap_blackhole_and_counts() {
+        let (tap, blackhole, inputs, outputs) = parse_list(
+            r#"{"blackhole":"BlackHole 2ch","inputs":[{"name":"Mic"}],"outputs":[],"tap":true}"#,
+        );
         assert!(tap);
         assert_eq!(blackhole.as_deref(), Some("BlackHole 2ch"));
+        assert_eq!((inputs, outputs), (1, 0));
     }
 
     #[test]
     fn list_without_a_loopback_leaves_it_empty() {
-        let (tap, blackhole) = parse_list(r#"{"inputs":[],"outputs":[],"tap":true}"#);
+        let (tap, blackhole, _, _) = parse_list(r#"{"inputs":[],"outputs":[],"tap":true}"#);
         assert!(tap);
         assert_eq!(blackhole, None);
     }
 
     #[test]
     fn garbage_is_no_tap_and_no_loopback() {
-        assert_eq!(parse_list("not json"), (false, None));
-        assert_eq!(parse_list(""), (false, None));
+        assert_eq!(parse_list("not json"), (false, None, 0, 0));
+        assert_eq!(parse_list(""), (false, None, 0, 0));
     }
 
     #[test]

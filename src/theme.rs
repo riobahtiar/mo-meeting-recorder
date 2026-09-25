@@ -1,64 +1,50 @@
-//! The colours of the current Omarchy theme.
-//!
-//! Every Omarchy theme writes its palette to `colors.toml` in
-//! `~/.local/state/omarchy/current/theme/` (background, foreground, accent,
-//! the terminal colours). The app maps those onto libadwaita's colour
-//! variables, uses the theme's blue and orange for the two speakers, and
-//! follows a theme switch while it runs. Outside Omarchy it falls back to
-//! plain libadwaita.
+//! The colours the app draws with: Apple's system palette, light or dark to
+//! match the appearance libadwaita already follows. Window, text and accent
+//! colours stay libadwaita's own; this module only supplies the waves, the
+//! speakers, the recording dot and the transcription animation, plus the
+//! `macos.css` layer for window chrome.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
-
-use gtk::prelude::*;
-use gtk::{gio, glib};
+use std::rc::Rc;
 
 pub type Rgb = (f64, f64, f64);
 
 #[derive(Clone, Debug, Default)]
 pub struct Theme {
-    pub dark: bool,
     colors: HashMap<String, Rgb>,
 }
 
-thread_local! {
-    static CURRENT: RefCell<Option<Theme>> = const { RefCell::new(None) };
+/// Apple's palette, verified against the HIG system colours. Checked once
+/// with Digital Color Meter; corrections go here, not in the callers.
+fn load() -> Theme {
+    load_for(adw::StyleManager::default().is_dark())
+}
+
+fn load_for(dark: bool) -> Theme {
+    let c = |light: &str, dark_: &str| parse_hex(if dark { dark_ } else { light }).unwrap();
+    let mut colors = HashMap::new();
+    colors.insert("blue".into(), c("#007aff", "#0a84ff"));
+    colors.insert("orange".into(), c("#ff9500", "#ff9f0a"));
+    colors.insert("green".into(), c("#28cd41", "#32d74b"));
+    colors.insert("red".into(), c("#ff3b30", "#ff453a"));
+    colors.insert("yellow".into(), c("#ffcc00", "#ffd60a"));
+    colors.insert("magenta".into(), c("#af52de", "#bf5af2"));
+    colors.insert("cyan".into(), c("#55bef0", "#5ac8f5"));
+    // Aliases for the transcription animation, which needs a scene background
+    // and text in the current appearance: system grays, not libadwaita vars,
+    // because it draws on Cairo, not on widgets.
+    colors.insert("accent".into(), c("#007aff", "#0a84ff"));
+    colors.insert("darker_background".into(), c("#f2f2f7", "#1c1c1e"));
+    colors.insert("foreground".into(), c("#000000", "#ffffff"));
+    colors.insert("bright_foreground".into(), c("#000000", "#ffffff"));
+    Theme { colors }
 }
 
 impl Theme {
     pub fn get(&self, name: &str) -> Option<Rgb> {
         self.colors.get(name).copied()
     }
-}
-
-fn dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".local/state"))
-        .join("omarchy/current/theme")
-}
-
-/// Reads `colors.toml`: `key = "#rrggbb"` lines and `mode = "dark"`.
-fn load() -> Option<Theme> {
-    let text = std::fs::read_to_string(dir().join("colors.toml")).ok()?;
-    let mut theme = Theme {
-        dark: true,
-        ..Default::default()
-    };
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let (key, value) = (key.trim(), value.trim().trim_matches('"'));
-        if key == "mode" {
-            theme.dark = value != "light";
-        } else if let Some(rgb) = parse_hex(value) {
-            theme.colors.insert(key.to_owned(), rgb);
-        }
-    }
-    theme.get("background").map(|_| theme)
 }
 
 fn parse_hex(value: &str) -> Option<Rgb> {
@@ -88,11 +74,13 @@ pub fn mix(a: Rgb, b: Rgb, amount: f64) -> Rgb {
     )
 }
 
-fn luminance((r, g, b): Rgb) -> f64 {
-    0.2126 * r + 0.7152 * g + 0.0722 * b
+thread_local! {
+    static CURRENT: RefCell<Option<Theme>> = const { RefCell::new(None) };
 }
 
-/// A theme colour, or `fallback` when there is no Omarchy theme or it lacks the key.
+/// A system colour by name (`blue`, `orange`, `green`, `red`, `yellow`,
+/// `magenta`, `cyan`, `accent`), or `fallback` when the theme is not loaded
+/// yet, which only happens before the first `follow()` call.
 pub fn color(name: &str, fallback: Rgb) -> Rgb {
     CURRENT.with(|c| {
         c.borrow()
@@ -102,116 +90,54 @@ pub fn color(name: &str, fallback: Rgb) -> Rgb {
     })
 }
 
-/// libadwaita colour variables for `theme`.
+/// The `.speaker-N` rules for transcript rows.
 fn css(theme: &Theme) -> String {
-    let get = |name: &str, fallback: &str| theme.get(name).or_else(|| theme.get(fallback));
-    let (Some(bg), Some(fg)) = (theme.get("background"), theme.get("foreground")) else {
-        return String::new();
-    };
-    let accent = get("accent", "blue").unwrap_or(fg);
-    let dark_bg = get("dark_background", "background").unwrap_or(bg);
-    let lighter = get("lighter_background", "background").unwrap_or(bg);
-    let red = get("red", "bright_red").unwrap_or((0.9, 0.3, 0.3));
-    let green = get("green", "bright_green").unwrap_or((0.3, 0.7, 0.4));
-    let yellow = get("yellow", "bright_yellow").unwrap_or((0.9, 0.7, 0.2));
-    // Text on an accent fill: whichever of background and foreground reads best.
-    let on = |fill: Rgb| {
-        if (luminance(fill) - luminance(bg)).abs() > (luminance(fill) - luminance(fg)).abs() {
-            bg
-        } else {
-            fg
-        }
-    };
-    let blue = get("blue", "bright_blue").unwrap_or(accent);
-    let orange = get("orange", "yellow").unwrap_or(red);
-    let card = mix(bg, lighter, 0.55);
-    let popover = mix(bg, lighter, 0.35);
+    let get = |name: &str| hex(theme.get(name).unwrap_or((0.5, 0.5, 0.5)));
     format!(
-        ":root {{
-            --window-bg-color: {bg}; --window-fg-color: {fg};
-            --view-bg-color: {dark_bg}; --view-fg-color: {fg};
-            --headerbar-bg-color: {bg}; --headerbar-fg-color: {fg};
-            --headerbar-backdrop-color: {bg};
-            --card-bg-color: {card}; --card-fg-color: {fg};
-            --popover-bg-color: {popover}; --popover-fg-color: {fg};
-            --dialog-bg-color: {popover}; --dialog-fg-color: {fg};
-            --sidebar-bg-color: {bg}; --sidebar-fg-color: {fg};
-            --accent-bg-color: {accent}; --accent-fg-color: {on_accent}; --accent-color: {accent};
-            --destructive-bg-color: {red}; --destructive-fg-color: {on_red}; --destructive-color: {red};
-            --error-bg-color: {red}; --error-fg-color: {on_red}; --error-color: {red};
-            --success-bg-color: {green}; --success-fg-color: {on_green}; --success-color: {green};
-            --warning-bg-color: {yellow}; --warning-fg-color: {on_yellow}; --warning-color: {yellow};
-        }}
-        .speaker-0 {{ color: {blue}; }} .speaker-1 {{ color: {orange}; }}
-        .speaker-2 {{ color: {green}; }} .speaker-3 {{ color: {magenta}; }}
-        .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {yellow}; }}",
-        bg = hex(bg),
-        fg = hex(fg),
-        dark_bg = hex(dark_bg),
-        card = hex(card),
-        popover = hex(popover),
-        accent = hex(accent),
-        on_accent = hex(on(accent)),
-        red = hex(red),
-        on_red = hex(on(red)),
-        green = hex(green),
-        on_green = hex(on(green)),
-        yellow = hex(yellow),
-        on_yellow = hex(on(yellow)),
-        blue = hex(blue),
-        orange = hex(orange),
-        magenta = hex(get("magenta", "bright_magenta").unwrap_or(accent)),
-        cyan = hex(get("cyan", "bright_cyan").unwrap_or(accent)),
+        ".speaker-0 {{ color: {blue}; }} .speaker-1 {{ color: {orange}; }} \
+         .speaker-2 {{ color: {green}; }} .speaker-3 {{ color: {magenta}; }} \
+         .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {yellow}; }}",
+        blue = get("blue"),
+        orange = get("orange"),
+        green = get("green"),
+        magenta = get("magenta"),
+        cyan = get("cyan"),
+        yellow = get("yellow"),
     )
 }
 
-/// Applies the current theme and keeps following it. `changed` runs after
-/// every switch, so custom-drawn widgets can repaint.
+/// The `macos.css` chrome layer, bundled with the binary so a bare `cargo
+/// run` and the `.app` load the same rules.
+const MACOS_CSS: &str = include_str!("../data/macos.css");
+
+/// Applies the current palette and keeps following the system appearance and
+/// accent. `changed` runs after every switch, so custom-drawn widgets can
+/// repaint.
 pub fn follow(changed: impl Fn() + 'static) {
     let provider = gtk::CssProvider::new();
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
             &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
-    let apply = move || {
+    let changed = Rc::new(changed);
+    let apply = Rc::new(move |notify: bool| {
         let theme = load();
-        let manager = adw::StyleManager::default();
-        manager.set_color_scheme(match &theme {
-            Some(t) if t.dark => adw::ColorScheme::ForceDark,
-            Some(_) => adw::ColorScheme::ForceLight,
-            None => adw::ColorScheme::Default,
-        });
-        provider.load_from_string(&theme.as_ref().map(css).unwrap_or_default());
-        CURRENT.with(|c| *c.borrow_mut() = theme);
-    };
-    apply();
-
-    // A theme switch rewrites the files in the theme directory; debounce the burst.
-    let file = gio::File::for_path(dir());
-    let Ok(monitor) =
-        file.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
-    else {
-        return;
-    };
-    let pending = std::rc::Rc::new(std::cell::Cell::new(false));
-    let apply = std::rc::Rc::new(apply);
-    let changed = std::rc::Rc::new(changed);
-    monitor.connect_changed(move |_, _, _, _| {
-        if pending.replace(true) {
-            return;
-        }
-        let (pending, apply, changed) = (pending.clone(), apply.clone(), changed.clone());
-        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
-            pending.set(false);
-            apply();
+        provider.load_from_string(&format!("{}\n{}", css(&theme), MACOS_CSS));
+        CURRENT.with(|c| *c.borrow_mut() = Some(theme));
+        if notify {
             changed();
-        });
+        }
     });
-    // The monitor has to outlive this function.
-    std::mem::forget(monitor);
+    apply(false);
+
+    let manager = adw::StyleManager::default();
+    let apply_dark = apply.clone();
+    manager.connect_dark_notify(move |_| apply_dark(true));
+    let apply_accent = apply.clone();
+    manager.connect_accent_color_notify(move |_| apply_accent(true));
 }
 
 #[cfg(test)]
@@ -226,16 +152,24 @@ mod tests {
     }
 
     #[test]
-    fn css_uses_the_palette() {
-        let mut theme = Theme {
-            dark: true,
-            ..Default::default()
-        };
-        theme.colors.insert("background".into(), (0.0, 0.0, 0.0));
-        theme.colors.insert("foreground".into(), (1.0, 1.0, 1.0));
-        theme.colors.insert("accent".into(), (1.0, 0.0, 0.0));
-        let css = css(&theme);
-        assert!(css.contains("--accent-bg-color: #ff0000"));
-        assert!(css.contains("--window-bg-color: #000000"));
+    fn palettes_follow_the_appearance() {
+        let light = load_for(false);
+        let dark = load_for(true);
+        assert!(dark.get("blue").unwrap().0 > light.get("blue").unwrap().0);
+        for key in [
+            "blue", "orange", "green", "red", "yellow", "magenta", "cyan",
+        ] {
+            assert!(light.get(key).is_some(), "{key}");
+            assert!(dark.get(key).is_some(), "{key}");
+        }
+    }
+
+    #[test]
+    fn css_names_every_speaker() {
+        let css = css(&load_for(false));
+        for speaker in 0..6 {
+            assert!(css.contains(&format!(".speaker-{speaker}")), "{css}");
+        }
+        assert!(css.contains("#007aff"));
     }
 }

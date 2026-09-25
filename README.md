@@ -2,13 +2,13 @@
 
 **MOM Recorder** (short: **MOMR**) records your meetings on a Mac: your microphone and the computer audio as two tracks, and when you stop you get a transcript with speakers, chapters and a player. You can also drop in a recording you already have. Everything is transcribed on your own machine with [whisper.cpp](https://github.com/ggml-org/whisper.cpp). No bot joins your call, and no audio leaves your computer. It works with any meeting app, because it simply listens to what your Mac plays and what you say.
 
-> **Status: in development.** MOM Recorder grew out of [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) by Jankees van Woezik, a Linux app. The Rust core is kept; the Linux integrations are being replaced by macOS ones. It does not build on macOS yet. The plan, the porting map and the decisions live in [`plans/`](plans/README.md).
+> **Status: in development.** MOM Recorder grew out of [Meeting Recorder](https://github.com/jankeesvw/omarchy-meeting-recorder) by Jankees van Woezik, a Linux app. The Rust core is kept; the Linux integrations are being replaced by macOS ones. It builds and records on macOS from a terminal checkout; the double-clickable app and the on-screen polish are still landing. The plan, the porting map and the decisions live in [`plans/`](plans/README.md).
 
 ## Where it stands
 
 | Milestone | Plan | Status |
 |---|---|---|
-| Compiles on macOS; command-line transcription works | [02](plans/02-compile-on-macos.md) | done — `cargo build --release`, `cargo test` (24 passed), clippy and fmt clean; `transcribe-file` works on CPU and with `--features metal`; window opens, meters flat (no capture until plan 03) |
+| Compiles on macOS; command-line transcription works | [02](plans/02-compile-on-macos.md) | done — `cargo build --release`, `cargo test`, clippy and fmt clean; `transcribe-file` works on CPU and with `--features metal`; window opens |
 | Records the microphone and the computer audio | [03](plans/03-audio-capture.md) | in progress — helper captures both (tap plays back at 0.77 peak), staging tracks equal length, transcribe gives You and Remote; drawn meters and device switching need a display session |
 | Plays back; compact strip; ⌘ shortcuts | [04](plans/04-playback-window-shortcuts.md) | in progress — audiotoolbox playback, `run` watchdog (kill -9 safe), caffeinate held/reaped, ⌘ accelerators; in-app seek and strip need a display session |
 | Chapters through an agent set in `config.toml` | [05](plans/05-agent-and-config.md) | in progress — `agent = "…"` selects, `ask` runs live (pi), crush refused, hung group killed in test; long-meeting chapters need a display session |
@@ -35,10 +35,10 @@ Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: 
 ```bash
 xcode-select --install
 brew install gtk4 libadwaita adwaita-icon-theme cmake pkgconf ffmpeg
-cargo build --release
+sh scripts/build-macos.sh   # Rust binary + momr-audio/momr-menubar helpers
 ```
 
-Until [plan 02](plans/02-compile-on-macos.md) lands, the build stops in `src/player.rs` on a Linux-only call. The first transcription downloads the whisper model (about 1.6 GB, once); telling voices apart in an imported file downloads the speaker model (about 120 MB) on first use.
+The first transcription downloads the whisper model (about 1.6 GB, once); telling voices apart in an imported file downloads the speaker model (about 120 MB) on first use.
 
 Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here. Models, settings and `config.toml` live under `~/Library/Application Support/momr`; staging, the cache and the live-state socket under `~/Library/Caches/momr`.
 

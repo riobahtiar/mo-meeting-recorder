@@ -1,9 +1,18 @@
 //! The colours the app draws with: Apple's system palette, light or dark to
-//! match the appearance libadwaita already follows. Window, text and accent
+//! match the appearance libadwaita follows. Window, text and accent
 //! colours stay libadwaita's own; this module only supplies the waves, the
 //! speakers, the recording dot and the transcription animation, plus the
 //! `macos.css` layer for window chrome. The palette's own `accent` is fixed
 //! systemBlue: it follows light and dark, not the user's accent colour.
+//!
+//! Which appearance is in force is the user's choice in Settings
+//! (`Appearance`, stored by `settings.rs`): System, Light or Dark, applied through
+//! libadwaita's style manager. libadwaita's macOS backend reads
+//! `AppleInterfaceStyle` itself; a GTK built without that backend reports no
+//! colour-scheme support and would stay light, so for System the appearance
+//! is then read from `defaults` here, at startup and again whenever the
+//! window becomes active, which is when someone who just changed System
+//! Settings comes back to the app.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -93,20 +102,94 @@ pub fn color(name: &str, fallback: Rgb) -> Rgb {
     })
 }
 
-/// The `.speaker-N` rules for transcript rows.
+/// The rules that need the palette: the `.speaker-N` colours for transcript
+/// rows, and the transcribing page, where the header bar sits over the
+/// animation and must use the scene's own background and ink. Everything
+/// else is in `macos.css`.
 fn css(theme: &Theme) -> String {
     let get = |name: &str| hex(theme.get(name).unwrap_or((0.5, 0.5, 0.5)));
     format!(
         ".speaker-0 {{ color: {blue}; }} .speaker-1 {{ color: {orange}; }} \
          .speaker-2 {{ color: {green}; }} .speaker-3 {{ color: {magenta}; }} \
-         .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {yellow}; }}",
+         .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {yellow}; }} \
+         window.immersive {{ background: {scene}; }} \
+         window.immersive headerbar {{ background: transparent; box-shadow: none; color: {ink}; }} \
+         window.immersive headerbar button {{ color: {ink}; }}",
         blue = get("blue"),
         orange = get("orange"),
         green = get("green"),
         magenta = get("magenta"),
         cyan = get("cyan"),
         yellow = get("yellow"),
+        scene = get("darker_background"),
+        ink = get("foreground"),
     )
+}
+
+/// Light, dark or whatever the Mac is set to. Stored by `settings.rs`; the
+/// enum lives here because the animation example builds this module alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Appearance {
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Appearance::System => "system",
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Appearance {
+        match key {
+            "light" => Appearance::Light,
+            "dark" => Appearance::Dark,
+            _ => Appearance::System,
+        }
+    }
+}
+
+/// Puts the chosen appearance in force. For System on a GTK that cannot
+/// follow the Mac itself, `macos_dark` says what the Mac is set to (see
+/// `macos_prefers_dark`).
+pub fn apply_appearance(appearance: Appearance, macos_dark: impl FnOnce() -> bool) {
+    let manager = adw::StyleManager::default();
+    let scheme = match appearance {
+        Appearance::Light => adw::ColorScheme::ForceLight,
+        Appearance::Dark => adw::ColorScheme::ForceDark,
+        Appearance::System if manager.system_supports_color_schemes() => adw::ColorScheme::Default,
+        Appearance::System if macos_dark() => adw::ColorScheme::ForceDark,
+        Appearance::System => adw::ColorScheme::ForceLight,
+    };
+    if manager.color_scheme() != scheme {
+        manager.set_color_scheme(scheme);
+    }
+}
+
+/// Whether the Mac is in Dark mode, from `defaults read -g
+/// AppleInterfaceStyle`, which prints `Dark` or fails when Light is set.
+pub fn macos_prefers_dark() -> bool {
+    let output = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok();
+    dark_from_defaults(
+        output
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()),
+    )
+}
+
+fn dark_from_defaults(output: Option<String>) -> bool {
+    output.is_some_and(|text| text.trim().eq_ignore_ascii_case("dark"))
 }
 
 /// The `macos.css` chrome layer, bundled with the binary so a bare `cargo
@@ -170,10 +253,21 @@ mod tests {
 
     #[test]
     fn css_names_every_speaker() {
-        let css = css(&load_for(false));
+        let rules = css(&load_for(false));
         for speaker in 0..6 {
-            assert!(css.contains(&format!(".speaker-{speaker}")), "{css}");
+            assert!(rules.contains(&format!(".speaker-{speaker}")), "{rules}");
         }
-        assert!(css.contains("#007aff"));
+        assert!(rules.contains("#007aff"));
+        // The transcribing page takes the scene colours of the appearance.
+        assert!(rules.contains("window.immersive { background: #f2f2f7"));
+        assert!(css(&load_for(true)).contains("window.immersive { background: #1c1c1e"));
+    }
+
+    #[test]
+    fn defaults_says_dark_only_when_it_prints_dark() {
+        assert!(dark_from_defaults(Some("Dark\n".into())));
+        assert!(!dark_from_defaults(Some("".into())));
+        // Light mode has no such default: the command fails, so no output.
+        assert!(!dark_from_defaults(None));
     }
 }

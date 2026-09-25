@@ -1,9 +1,13 @@
 // momr-audio: microphone and system-audio capture for MOM Recorder.
 // One executable, four subcommands:
 //
-//   list [--rate …] [--channels …]   devices and tap support, as JSON
-//   mic [--rate N] [--channels N]    default microphone as s16le on stdout
-//   system [--rate N] [--channels N] process tap on all processes as s16le
+//   list [--rate …] [--channels …]   devices, audio processes and tap support, as JSON
+//   mic [--rate N] [--channels N] [--device UID]
+//                                    a microphone as s16le on stdout: the
+//                                    default input, or the device with that UID
+//   system [--rate N] [--channels N] [--bundle ID]…
+//                                    process tap as s16le: every process, or
+//                                    only the apps with those bundle identifiers
 //   run -- <program> <args…>         run a program, killing it when the parent exits
 //
 // Exit codes, shared with src/audio.rs, which maps them to the BlackHole
@@ -32,8 +36,8 @@ import Foundation
 
 enum MomrCommand: Equatable {
     case list
-    case mic(rate: Double, channels: AVAudioChannelCount)
-    case system(rate: Double, channels: AVAudioChannelCount)
+    case mic(rate: Double, channels: AVAudioChannelCount, device: String?)
+    case system(rate: Double, channels: AVAudioChannelCount, bundles: [String])
     case run(program: String, args: [String])
 }
 
@@ -43,6 +47,22 @@ private func flag(_ name: String, in args: [String], default defaultValue: Strin
     guard let i = args.firstIndex(of: name) else { return defaultValue }
     guard i + 1 < args.count else { return nil }
     return args[i + 1]
+}
+
+/// Every value of a repeatable flag, in order; nil when one has no value.
+private func values(_ name: String, in args: [String]) -> [String]? {
+    var out: [String] = []
+    var i = 0
+    while i < args.count {
+        if args[i] == name {
+            guard i + 1 < args.count else { return nil }
+            out.append(args[i + 1])
+            i += 2
+        } else {
+            i += 1
+        }
+    }
+    return out
 }
 
 /// Parsed and validated arguments, or nil for usage.
@@ -64,9 +84,13 @@ func parseCommand(_ args: [String]) -> MomrCommand? {
         if sub == "list" {
             return .list
         }
+        guard let devices = values("--device", in: args), devices.count <= 1,
+            let bundles = values("--bundle", in: args),
+            bundles.allSatisfy({ !$0.isEmpty })
+        else { return nil }
         return sub == "mic"
-            ? .mic(rate: rate, channels: channels)
-            : .system(rate: rate, channels: channels)
+            ? .mic(rate: rate, channels: channels, device: devices.first)
+            : .system(rate: rate, channels: channels, bundles: bundles)
     default:
         return nil
     }
@@ -74,7 +98,7 @@ func parseCommand(_ args: [String]) -> MomrCommand? {
 
 private func usage() -> Never {
     fputs(
-        "usage: momr-audio (list | mic [--rate N] [--channels N] | system [--rate N] [--channels N] | run -- <program> <args…>)\n",
+        "usage: momr-audio (list | mic [--rate N] [--channels N] [--device UID] | system [--rate N] [--channels N] [--bundle ID]… | run -- <program> <args…>)\n",
         stderr)
     exit(2)
 }
@@ -88,10 +112,10 @@ struct MomrAudio {
         switch command {
         case .list:
             code = runList()
-        case let .mic(rate, channels):
-            code = runMic(rate: rate, channels: channels)
-        case let .system(rate, channels):
-            code = runSystem(rate: rate, channels: channels)
+        case let .mic(rate, channels, device):
+            code = runMic(rate: rate, channels: channels, device: device)
+        case let .system(rate, channels, bundles):
+            code = runSystem(rate: rate, channels: channels, bundles: bundles)
         case let .run(program, programArgs):
             code = runRun(program: program, args: programArgs)
         }

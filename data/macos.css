@@ -1,8 +1,14 @@
-/* macos.css: the macOS chrome over libadwaita, scoped to `.macos` on the
+/* macos.css: the app's chrome over libadwaita, scoped to `.macos` on the
  * window. Sibling-of-System-Settings is the stopping rule, not twinship;
  * libadwaita's own scale stands where the HIG is silent. Translucency here is
  * flat alpha layering: GTK cannot do the real Liquid Glass blur, and faking
- * refraction would break under Reduce Transparency (D20). */
+ * refraction would break under Reduce Transparency (D20). Rules that need the
+ * palette (speaker colours, the transcribing page) are made in theme.rs.
+ *
+ * No wildcard focus rule: GTK sets the focus state on the focused widget and
+ * on every ancestor up to the window, so `*:focus-visible` outlined the row,
+ * its group, the page and the toolbar view at once. libadwaita draws a focus
+ * ring on every control that can take focus; that is the one to keep. */
 
 /* Window controls as traffic lights, on the left. */
 .macos windowcontrols { margin-left: 8px; }
@@ -34,5 +40,32 @@
 /* Dialogs read as sheets: slightly larger radius. */
 .macos dialog-host > dialog { border-radius: 12px; }
 
-/* Focus ring in the accent, 3 px, outside. */
-.macos *:focus-visible { outline: 3px solid alpha(var(--accent-color), 0.5); outline-offset: 1px; }
+/* The ready page: the level meters in cards, the big clock. */
+.macos .meter-card { padding: 0; }
+.macos .clock { font-weight: 700; font-size: 2.2em; }
+
+/* The compact strip: the clock lives in the title, one two-lane wave below. */
+.macos .strip-clock { font-weight: 700; }
+.macos .strip-wave { margin: 6px 12px 10px 12px; }
+.macos .strip-stop { color: @error_color; }
+
+/* The transcript on the done page. */
+.transcript { background: transparent; padding: 8px; }
+.transcript row { padding: 7px 10px; border-radius: 8px; }
+.transcript row:hover { background: alpha(currentColor, 0.06); }
+.transcript row.current { background: alpha(@accent_bg_color, 0.25); }
+.transcript row.chapter { padding-top: 16px; }
+.transcript row.chapter:first-child { padding-top: 7px; }
+.chapter-heading { font-weight: 800; font-size: 1.08em; }
+.speaker-0, .speaker-1, .speaker-2, .speaker-3, .speaker-4, .speaker-5 { font-weight: 700; }
+.row-actions { opacity: 0; transition: opacity 120ms; }
+.transcript row:hover .row-actions, .transcript row.editing .row-actions { opacity: 1; }
+.row-actions button { min-height: 24px; min-width: 24px; padding: 2px; }
+.transcript-editor { background: alpha(currentColor, 0.06); border-radius: 6px; padding: 4px 6px; }
+.transcript-editor text { background: transparent; }
+.done-icon { color: @accent_color; }
+.player { padding: 6px 14px 6px 6px; }
+
+/* A file hovering over the window. */
+.drop-hint { margin: 10px; border: 3px dashed @accent_color; border-radius: 14px;
+             background: alpha(@window_bg_color, 0.88); color: @accent_color; }

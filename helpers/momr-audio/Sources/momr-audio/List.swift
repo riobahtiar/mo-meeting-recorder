@@ -1,6 +1,8 @@
-// `list`: input devices, output devices, and whether this macOS supports
-// process taps, as one JSON object. The Rust app reads it for the BlackHole
-// fallback (a loopback device by name) and the ready-page banner.
+// `list`: input devices (with the UID `mic --device` takes), output
+// devices, the running audio processes (with the bundle id `system --bundle`
+// takes) and whether this macOS supports process taps, as one JSON object.
+// The Rust app reads it for the BlackHole fallback (a loopback device by
+// name), the ready-page banner and the source pickers in Settings.
 //
 // `tap` only says the OS is 14.2 or newer; the key keeps its name because the
 // Rust side reads it. `tap_permission` is TCC's answer for System Audio
@@ -12,36 +14,11 @@ import CoreAudio
 import Foundation
 
 private func deviceIDs() -> [AudioObjectID] {
-    var addr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDevices,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-    var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(
-        AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size)
-        == noErr
-    else { return [] }
-    let count = Int(size) / MemoryLayout<AudioObjectID>.size
-    var ids = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
-    let status = ids.withUnsafeMutableBufferPointer { buf in
-        AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size,
-            UnsafeMutableRawPointer(buf.baseAddress!))
-    }
-    guard status == noErr else { return [] }
-    return ids
+    objectIDs(of: AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices)
 }
 
 private func deviceName(_ id: AudioObjectID) -> String {
-    var name: CFString = "" as CFString
-    var size = UInt32(MemoryLayout<CFString>.size)
-    var addr = AudioObjectPropertyAddress(
-        mSelector: kAudioObjectPropertyName,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name) == noErr
-    else { return "Unknown device" }
-    return name as String
+    stringProperty(of: id, kAudioObjectPropertyName) ?? "Unknown device"
 }
 
 private func channelCount(_ id: AudioObjectID, scope: AudioObjectPropertyScope)
@@ -84,7 +61,10 @@ func runList() -> Int32 {
         let outs = channelCount(
             id, scope: kAudioDevicePropertyScopeOutput)
         if ins > 0 {
-            inputs.append(["name": name, "channels": ins])
+            inputs.append([
+                "name": name, "channels": ins,
+                "uid": stringProperty(of: id, kAudioDevicePropertyDeviceUID) ?? "",
+            ])
         }
         if outs > 0 {
             outputs.append(["name": name, "channels": outs])
@@ -100,9 +80,16 @@ func runList() -> Int32 {
         if #available(macOS 14.2, *) { return true }
         return false
     }()
+    let processes: [[String: Any]] = audioProcesses().map { p in
+        [
+            "pid": Int(p.pid), "bundle": p.bundle, "name": p.name,
+            "playing": p.playing,
+        ]
+    }
     var info: [String: Any] = [
         "inputs": inputs, "outputs": outputs, "tap": tap,
         "tap_permission": tapPermission().rawValue,
+        "processes": processes,
     ]
     if let blackhole {
         info["blackhole"] = blackhole

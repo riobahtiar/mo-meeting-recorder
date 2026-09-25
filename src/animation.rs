@@ -57,7 +57,10 @@ fn glitch() -> Rgb {
 
 const TITLE: &str = "TRANSCRIBING";
 const SCRAMBLE: &[u8] = b"#%&*+=<>/\\|01$@?!";
-const FONT: &str = "JetBrains Mono";
+/// Menlo ships with every macOS; a font that is not installed makes Cairo
+/// substitute a proportional one whose wide capitals pushed the title past
+/// the window edge in the first display session.
+const FONT: &str = "Menlo";
 const SEGMENTS: usize = 28;
 /// Transcript lines visible under the bar, and their height in font sizes.
 /// At most this many transcript lines; fewer when the window is low.
@@ -370,10 +373,25 @@ fn font(cr: &Context, size: f64, bold: bool) {
     cr.set_font_size(size);
 }
 
+/// The font size at which the spaced-out title fits `avail` pixels, from a
+/// measurement of the glyphs Cairo really draws (the widest letter times
+/// twelve, plus the spacing), capped by the height budget.
+fn title_size(cr: &Context, avail: f64, h: f64) -> f64 {
+    const PROBE: f64 = 100.0;
+    font(cr, PROBE, true);
+    let advance = cr
+        .text_extents("M")
+        .map(|e| e.x_advance())
+        .unwrap_or(PROBE * 0.6);
+    // Per unit of font size: twelve advances plus eleven spacings of 0.18.
+    let per_unit = (advance / PROBE + 0.18) * TITLE.len() as f64 - 0.18;
+    (avail / per_unit).min(h * 0.12).clamp(10.0, 64.0)
+}
+
 /// "TRANSCRIBING" decrypts from noise, then glitches now and then.
 fn title(cr: &Context, w: f64, h: f64, t: f64) {
-    // Fit the width too: the title is 12 wide letters plus spacing.
-    let size = (h * 0.12).min(w / 11.5).clamp(12.0, 64.0);
+    let pad = (w * 0.06).max(12.0);
+    let size = title_size(cr, w - pad * 2.0, h);
     font(cr, size, true);
     let cycle = t % 8.0;
     let tick = (t * 24.0) as u64;

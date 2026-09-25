@@ -12,6 +12,7 @@ mod agent;
 mod animation;
 mod audio;
 mod chapters;
+mod cleanup;
 mod diarize;
 mod export;
 mod helper;
@@ -25,6 +26,7 @@ mod player;
 mod provider;
 mod settings;
 mod theme;
+mod timer;
 mod transcribe;
 mod ui;
 

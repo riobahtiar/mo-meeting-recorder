@@ -9,6 +9,13 @@
 //! the same contract: raw interleaved s16le at `RATE` and `CHANNELS` on
 //! stdout, until killed.
 //!
+//! Which microphone and which apps are captured comes from Settings
+//! (`Selection`): a device UID for the helper's `mic --device`, bundle
+//! identifiers for `system --bundle`. The ffmpeg fallbacks know neither, so
+//! they record the default input and the loopback as before. A changed
+//! selection calls `restart`, which ends the running child so the loop
+//! respawns it with the new arguments at once.
+//!
 //! The loopback is found by name through the helper's `list`; without the
 //! helper the stock "BlackHole 2ch" name is tried. A source's note says why
 //! it is not capturing and stays until audio flows again; the helper's exit
@@ -64,6 +71,11 @@ struct Inner {
     note: Option<String>,
     /// A failed write to the recording file, kept until the recording stops.
     write_error: Option<String>,
+    /// The running capture child, so `restart` can end it.
+    child_pid: Option<u32>,
+    /// Set by `restart`: the child was ended on purpose, so the loop skips
+    /// its back-off and its failure note.
+    restarting: bool,
     /// Whether a single non-zero sample has been recorded since the recording
     /// started. A refused process tap delivers exact zeros, as does a Mac
     /// playing nothing, so this cannot tell the two apart; it only lets the
@@ -86,6 +98,8 @@ impl Source {
             paused: false,
             note: None,
             write_error: None,
+            child_pid: None,
+            restarting: false,
             heard: false,
         }));
         let source = Source {
@@ -117,6 +131,22 @@ impl Source {
 
     pub fn set_paused(&self, paused: bool) {
         self.inner.lock().unwrap().paused = paused;
+    }
+
+    /// Ends the running capture child so the loop starts a new one with the
+    /// current Settings. A recording in progress keeps its file: the tee
+    /// resumes with the first chunk of the new child, and the gap is the
+    /// respawn time (well under a second).
+    pub fn restart(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.restarting = true;
+        if let Some(pid) = inner.child_pid {
+            // SAFETY: kill(2) on a pid this process spawned and has not
+            // reaped; the loop reaps it in `capture_from`.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
     }
 
     /// Stops the tee. Returns why audio was lost, when a write or the final
@@ -158,21 +188,47 @@ impl Source {
     }
 }
 
+/// What Settings chose to capture: a microphone by Core Audio UID (None
+/// follows the system default) and the apps whose audio counts as computer
+/// audio, by bundle identifier (empty means every app).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub mic_device: Option<String>,
+    pub computer_sources: Vec<String>,
+}
+
+impl Selection {
+    pub fn from_settings() -> Selection {
+        Selection {
+            mic_device: crate::settings::load_mic_device(),
+            computer_sources: crate::settings::load_computer_sources(),
+        }
+    }
+}
+
 /// (program, args) for one capture child, so tests can check it without spawning.
-pub fn capture_args(device: Device, helper: Option<&Path>) -> (String, Vec<String>) {
+pub fn capture_args(
+    device: Device,
+    helper: Option<&Path>,
+    selection: &Selection,
+) -> (String, Vec<String>) {
     let rate = RATE.to_string();
     let channels = CHANNELS.to_string();
     match (device, helper) {
-        (Device::Mic, Some(helper)) => (
-            helper.display().to_string(),
-            vec![
-                "mic".into(),
-                "--rate".into(),
+        (Device::Mic, Some(helper)) => {
+            let mut args = vec![
+                "mic".to_owned(),
+                "--rate".to_owned(),
                 rate,
-                "--channels".into(),
+                "--channels".to_owned(),
                 channels,
-            ],
-        ),
+            ];
+            if let Some(uid) = &selection.mic_device {
+                args.push("--device".to_owned());
+                args.push(uid.clone());
+            }
+            (helper.display().to_string(), args)
+        }
         (Device::Mic, None) => (
             "ffmpeg".into(),
             vec![
@@ -193,16 +249,20 @@ pub fn capture_args(device: Device, helper: Option<&Path>) -> (String, Vec<Strin
                 "-".into(),
             ],
         ),
-        (Device::Computer, Some(helper)) => (
-            helper.display().to_string(),
-            vec![
-                "system".into(),
-                "--rate".into(),
+        (Device::Computer, Some(helper)) => {
+            let mut args = vec![
+                "system".to_owned(),
+                "--rate".to_owned(),
                 rate,
-                "--channels".into(),
+                "--channels".to_owned(),
                 channels,
-            ],
-        ),
+            ];
+            for bundle in &selection.computer_sources {
+                args.push("--bundle".to_owned());
+                args.push(bundle.clone());
+            }
+            (helper.display().to_string(), args)
+        }
         // No helper: the loopback is the only computer source left.
         (Device::Computer, None) => blackhole_args(BLACKHOLE_DEFAULT),
     }
@@ -333,11 +393,22 @@ fn mic_note(exit: Option<i32>, reason: &str) -> String {
     }
 }
 
+/// Whether the child that just ended was ended by `restart`; clears the
+/// flag, so the next end counts as a failure again.
+fn take_restart(shared: &Mutex<Inner>) -> bool {
+    std::mem::take(&mut shared.lock().unwrap().restarting)
+}
+
 fn mic_loop(shared: &Mutex<Inner>) {
     loop {
         let helper = crate::helper::path();
-        let (program, args) = capture_args(Device::Mic, helper.as_deref());
-        let note = match capture_from(&program, &args, shared, false) {
+        let (program, args) =
+            capture_args(Device::Mic, helper.as_deref(), &Selection::from_settings());
+        let result = capture_from(&program, &args, shared, false);
+        if take_restart(shared) {
+            continue;
+        }
+        let note = match result {
             Ok((exit, reason)) => mic_note(exit, &reason),
             Err(_) => crate::locales::t("banner.audio_no_ffmpeg").to_owned(),
         };
@@ -371,7 +442,9 @@ fn computer_loop(shared: &Mutex<Inner>) {
         }
         mode = next;
         let (program, args) = match &mode {
-            ComputerMode::Tap(helper) => capture_args(Device::Computer, Some(helper)),
+            ComputerMode::Tap(helper) => {
+                capture_args(Device::Computer, Some(helper), &Selection::from_settings())
+            }
             ComputerMode::BlackHole(device) => blackhole_args(device),
             ComputerMode::Idle => {
                 thread::sleep(Duration::from_secs(5));
@@ -379,7 +452,13 @@ fn computer_loop(shared: &Mutex<Inner>) {
                 continue;
             }
         };
-        exit = match capture_from(&program, &args, shared, keep_note) {
+        let result = capture_from(&program, &args, shared, keep_note);
+        if take_restart(shared) {
+            // Ended on purpose: the same mode again, as on a first run.
+            exit = None;
+            continue;
+        }
+        exit = match result {
             Ok((code, reason)) => {
                 if !reason.is_empty() {
                     eprintln!("{}: computer audio: {reason}", crate::APP_NAME);
@@ -421,6 +500,7 @@ fn capture_from(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    shared.lock().unwrap().child_pid = Some(child.id());
     let mut stdout = child.stdout.take().expect("piped stdout");
     // Stderr is drained on its own thread (a full pipe would stall the
     // child), keeping only the last line: the helper's reason for exiting.
@@ -488,6 +568,7 @@ fn capture_from(
     }
     let _ = child.kill();
     let code = child.wait().ok().and_then(|status| status.code());
+    shared.lock().unwrap().child_pid = None;
     let reason = stderr
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
@@ -513,16 +594,18 @@ mod tests {
 
     #[test]
     fn mic_prefers_the_helper() {
-        let (program, args) = capture_args(Device::Mic, Some(helper().as_path()));
+        let (program, args) =
+            capture_args(Device::Mic, Some(helper().as_path()), &Selection::default());
         assert_eq!(program, helper().display().to_string());
         assert_eq!(args[0], "mic");
         assert!(args.windows(2).any(|w| w == ["--rate", "48000"]));
         assert!(args.windows(2).any(|w| w == ["--channels", "2"]));
+        assert!(!args.contains(&"--device".to_owned()));
     }
 
     #[test]
     fn mic_falls_back_to_the_default_ffmpeg_input() {
-        let (program, args) = capture_args(Device::Mic, None);
+        let (program, args) = capture_args(Device::Mic, None, &Selection::default());
         assert_eq!(program, "ffmpeg");
         assert!(args.windows(2).any(|w| w == ["-i", ":default"]));
         assert!(args.windows(2).any(|w| w == ["-ar", "48000"]));
@@ -530,16 +613,44 @@ mod tests {
 
     #[test]
     fn computer_uses_the_tap_when_the_helper_is_there() {
-        let (program, args) = capture_args(Device::Computer, Some(helper().as_path()));
+        let (program, args) = capture_args(
+            Device::Computer,
+            Some(helper().as_path()),
+            &Selection::default(),
+        );
         assert_eq!(program, helper().display().to_string());
         assert_eq!(args[0], "system");
+        assert!(!args.contains(&"--bundle".to_owned()));
     }
 
     #[test]
     fn computer_without_a_helper_names_blackhole() {
-        let (program, args) = capture_args(Device::Computer, None);
+        let (program, args) = capture_args(Device::Computer, None, &Selection::default());
         assert_eq!(program, "ffmpeg");
         assert!(args.windows(2).any(|w| w == ["-i", ":BlackHole 2ch"]));
+    }
+
+    /// A chosen microphone and chosen apps reach the helper as flags; the
+    /// ffmpeg fallbacks, which cannot take them, ignore them.
+    #[test]
+    fn a_selection_becomes_helper_flags() {
+        let selection = Selection {
+            mic_device: Some("BuiltInMic".into()),
+            computer_sources: vec!["us.zoom.xos".into(), "com.apple.Safari".into()],
+        };
+        let h = helper();
+        let (_, args) = capture_args(Device::Mic, Some(h.as_path()), &selection);
+        assert!(args.windows(2).any(|w| w == ["--device", "BuiltInMic"]));
+        let (_, args) = capture_args(Device::Computer, Some(h.as_path()), &selection);
+        assert!(args.windows(2).any(|w| w == ["--bundle", "us.zoom.xos"]));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--bundle", "com.apple.Safari"])
+        );
+        let (_, args) = capture_args(Device::Mic, None, &selection);
+        assert!(!args.iter().any(|a| a.contains("BuiltInMic")));
+        let (_, args) = capture_args(Device::Computer, None, &selection);
+        assert!(!args.iter().any(|a| a.contains("zoom")));
     }
 
     fn tap() -> ComputerMode {
@@ -644,6 +755,8 @@ mod tests {
             paused: false,
             note: Some("old".into()),
             write_error: None,
+            child_pid: None,
+            restarting: false,
             heard: false,
         });
         let args: Vec<String> = ["-c", "echo first >&2; echo why >&2; exit 4"]
@@ -676,6 +789,8 @@ mod tests {
                 paused: false,
                 note: None,
                 write_error: None,
+                child_pid: None,
+                restarting: false,
                 heard: false,
             })),
         };
@@ -696,5 +811,37 @@ mod tests {
         assert!(!source.heard_anything());
         let _ = source.stop_recording();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `restart` ends the running child and marks the end as intended.
+    #[test]
+    fn restart_ends_the_child_on_purpose() {
+        let source = Source {
+            inner: Arc::new(Mutex::new(Inner {
+                levels: VecDeque::from(vec![0.0; HISTORY]),
+                file: None,
+                paused: false,
+                note: None,
+                write_error: None,
+                child_pid: None,
+                restarting: false,
+                heard: false,
+            })),
+        };
+        let inner = source.inner.clone();
+        let reader = thread::spawn(move || {
+            let args: Vec<String> = ["-c", "sleep 30"].iter().map(|s| s.to_string()).collect();
+            capture_from("sh", &args, &inner, false).unwrap()
+        });
+        while source.inner.lock().unwrap().child_pid.is_none() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        source.restart();
+        let (code, _) = reader.join().unwrap();
+        // SIGTERM leaves no exit code, and the flag says it was on purpose.
+        assert_eq!(code, None);
+        assert!(take_restart(&source.inner));
+        assert!(!take_restart(&source.inner));
+        assert!(source.inner.lock().unwrap().child_pid.is_none());
     }
 }

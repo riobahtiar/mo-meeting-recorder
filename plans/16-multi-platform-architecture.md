@@ -36,15 +36,18 @@ Whatever the shell, the first step is the one plan 12 already describes: a Cargo
 momr/                     workspace
 ├── crates/momr-core      audio staging and levels, export, transcribe, diarize, meeting, chapters,
 │                         agent, models, provider, settings, cleanup, timer, ipc protocol
-├── crates/momr-platform  the seam trait: capture command, playback, keep-awake, secrets, paths,
-│   ├── macos.rs          die-with-parent; one file per platform behind cfg(target_os)
-│   ├── windows.rs
-│   └── linux.rs
-├── apps/momr-gtk         the GTK app as it is today, depending on the two crates
+├── crates/momr-platform  one module per seam, each with its per-OS branches inside:
+│   ├── paths.rs          built: config, cache, models, meetings
+│   ├── process.rs        built: detached spawn, terminate, group kill
+│   ├── fs.rs             built: private dirs, no-follow reads, links
+│   ├── sock.rs           built: local sockets (named pipes later)
+│   └── …                 still in the core: capture command, playback wrapper, keep-awake, secrets
+├── src/                  the GTK app as it is today, depending on the two crates
+├── apps/momr-appkit      the AppKit shell (plan 12), running the `momr` binary
 └── apps/momr-<shell>     the next shell
 ```
 
-The seam trait is small because every seam is already a `Command` or a path. `cfg(target_os)` is allowed in `momr-platform` and nowhere else; D02's rule ("no gating") keeps applying to the core and the shells.
+Free functions per seam, not a trait: the target is chosen at build time, so a trait with one implementation per build would add indirection and nothing else. Every seam is already a `Command` or a path, which keeps each module small. `cfg(target_os)` is allowed in `momr-platform` and nowhere else; D02's rule ("no gating") keeps applying to the core and the shells.
 
 ## Which shell
 
@@ -66,7 +69,7 @@ The macOS shell stays GTK until plan 12's criteria say otherwise. For Windows th
 ## Steps, when entered
 
 1. Workspace split (pure refactor; the GTK app behaves identically, CI proves it).
-2. `momr-platform` trait with the macOS implementation moved in from `audio.rs`, `player.rs`, `paths.rs`, `helper.rs`, `provider.rs` (Keychain).
+2. `momr-platform` seam modules with the macOS implementation moved in: paths, processes, files and sockets are done; capture (`audio.rs`), the playback wrapper (`playback.rs`), the system language (`settings.rs`) and Keychain (`provider.rs`) are next.
 3. Windows implementations, one seam at a time, each with its `cargo test` behind a closure the way plan 10 describes; `momr-audio.exe` in Rust (`wasapi` crate), since there is no Swift on Windows.
 4. Tauri shell: ready page with live meters, then record and strip, then done page and player, then Settings; each step judged against the smoke checklist.
 5. Installer and signing; file association; a Windows CI runner.
@@ -82,5 +85,7 @@ The macOS shell stays GTK until plan 12's criteria say otherwise. For Windows th
 ## Status
 
 Entered 2026-09-25 as the multi-target blueprint (D25): macOS first, core
-compiling for Windows 11+ from slice 1. Next: the `momr-platform` seam
-trait, then Windows implementations seam by seam when scheduled.
+compiling for Windows 11+ from slice 1. `momr-platform` has the paths,
+process, fs and sock seams (plan 12 slices 2 and 5). Next: capture,
+playback wrapper, system language and Keychain into it (step 2), then
+Windows implementations seam by seam when scheduled.

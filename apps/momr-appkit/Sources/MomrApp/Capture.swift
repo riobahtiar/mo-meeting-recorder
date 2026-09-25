@@ -2,7 +2,9 @@ import Foundation
 
 /// One capture source: a `momr-audio mic|system` child writing raw s16le
 /// 48 kHz stereo on stdout (the D03 contract), read in 20 ms chunks with a
-/// peak per chunk for the meter. Mirrors `audio.rs` chunk math.
+/// peak per chunk for the meter. Mirrors `audio.rs`: the peak is taken over
+/// both channels and shown on the same -60 dB scale (`to_meter`), so the
+/// two shells' meters read alike.
 ///
 /// Like `audio.rs`, the child runs for the life of the app and is started
 /// again a second after it exits on its own (tap refused, device unplugged,
@@ -171,16 +173,7 @@ final class SourceCapture {
         while leftover.count >= Self.chunkBytes {
             let chunk = leftover.prefix(Self.chunkBytes)
             leftover.removeFirst(Self.chunkBytes)
-            let peak = chunk.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> Float in
-                let samples = ptr.bindMemory(to: Int16.self)
-                var top: Int32 = 0
-                // Left channel only is enough for a meter; both lanes move together.
-                for i in stride(from: 0, to: samples.count, by: 2) {
-                    let v = abs(Int32(samples[i]))
-                    if v > top { top = v }
-                }
-                return Float(top) / 32768
-            }
+            let peak = Self.meterLevel(Self.peak(chunk))
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 // Audio flows again, so whatever the note said is over.
@@ -188,6 +181,32 @@ final class SourceCapture {
                 self.onLevel?(peak)
             }
         }
+    }
+}
+
+extension SourceCapture {
+    /// The loudest sample in `chunk` of interleaved s16le, both channels,
+    /// from 0 to 1: a sound on one side only still moves the meter.
+    static func peak(_ chunk: Data) -> Float {
+        var top: UInt16 = 0
+        chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            // Byte pairs, not a bound Int16 buffer: a Data slice need not be
+            // aligned for Int16.
+            var i = raw.startIndex
+            while i + 1 < raw.endIndex {
+                let sample = Int16(bitPattern: UInt16(raw[i]) | UInt16(raw[i + 1]) << 8)
+                top = max(top, sample.magnitude)
+                i += 2
+            }
+        }
+        return Float(top) / 32768
+    }
+
+    /// `audio::to_meter`: a linear peak on a -60 dB..0 dB scale, 0..1.
+    static func meterLevel(_ peak: Float) -> Float {
+        guard peak > 0 else { return 0 }
+        let floorDB: Float = -60
+        return min(max(1 - 20 * log10(peak) / floorDB, 0), 1)
     }
 }
 

@@ -1328,6 +1328,7 @@ mod tests {
             include_str!("cleanup.rs"),
             include_str!("diarize.rs"),
             include_str!("export.rs"),
+            include_str!("finish.rs"),
             include_str!("helper.rs"),
             include_str!("ipc.rs"),
             include_str!("meeting.rs"),
@@ -1338,7 +1339,10 @@ mod tests {
             include_str!("settings.rs"),
             include_str!("timer.rs"),
             include_str!("transcribe.rs"),
+            // The GTK shell looks its strings up in this table too, so its
+            // sources are scanned from here, three levels up at the root.
             include_str!("../../../src/main.rs"),
+            include_str!("../../../src/player.rs"),
             include_str!("../../../src/ui.rs"),
         ];
         let mut missing = Vec::new();

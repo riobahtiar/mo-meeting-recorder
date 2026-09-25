@@ -140,7 +140,7 @@ fn parse_list(text: &str) -> Result<AudioDevices, String> {
 }
 
 /// Whether `which` may hand this path to `Command`: a real file that the OS
-/// would execute. The only `cfg` in the core (D25 allows this one leaf):
+/// would execute. The only non-test `cfg` in the core (D25 allows this one leaf):
 /// Unix checks the mode bits, Windows has no such bit and tries the spawn.
 /// Shared with the agent runner, which finds its agents the same way.
 pub fn is_executable(path: &Path) -> bool {

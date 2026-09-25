@@ -3,7 +3,9 @@
 One line per feature added or retired, newest first. Details live in the plan the line names; the pull request has the full story.
 
 ## Unreleased
+
 ### Added
+- `momr finish <staging>`: saves a stopped recording (audio, tracks, manifest, transcript) with the saved settings; the AppKit shell's Stop runs it (plan 12).
 - Settings › General › Appearance: System, Light or Dark, applied at once (plan 14).
 - Gear button in the header bar that opens Settings; ⌘, unchanged (plan 14).
 - Settings split into General, Transcription, Recording, Audio and Storage pages (plan 14).
@@ -13,13 +15,12 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Settings › Audio: choose the microphone and record all apps or only chosen ones (plan 15; `momr-audio mic --device`, `system --bundle`).
 - Plans folder: `plans/archives/` with an index for finished plans; plan 16 on Windows and Linux versions.
 
-- `momr finish <staging>`: saves a stopped recording (audio, tracks, manifest, transcript) with the saved settings; the AppKit shell's Stop runs it (plan 12).
 ### Changed
 - AppKit shell writes the `recording.json` staging note, so the GTK shell's recovery finishes its crashed recordings (plan 12).
 - Compact strip reworked: the header bar stays (clock as the title, Pause, Stop, Expand), one two-lane wave under it (plan 14).
 - Transcribing scene: the title is measured and fitted to the window, in Menlo (plan 14).
 - API key rows are expanders with the status and the where-to-get-it hint in full (plan 14).
-- Rust workspace: `momr-core` holds cleanup, export, helper and locales with no UI or platform code; the GTK app behaves identically, and the core checks on Windows MSVC (plans 12, 16).
+- Rust workspace: `momr-core` holds cleanup, export, helper and locales with no UI code; the GTK app behaves identically, and the core checked on Windows MSVC until ureq joined it (plans 12, 16).
 - `momr-platform` seam crate with de-glibbed `paths` (`$HOME`/`%USERPROFILE%`, absolute `XDG_*`, `~/Documents`); both new crates check on Windows MSVC, lib and tests (plans 12, 16).
 - Recording timer and filename sanitizer in `momr-core` (chrono clock, DST gaps yield None); shell behavior unchanged (plan 12).
 - Transcribe chain in `momr-core` (transcribe, models, meeting, provider, nemotron, diarize, settings, appearance enum); CLI exits convert at the shell boundary, behavior unchanged (plan 12).
@@ -27,6 +28,7 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Playback mechanics in `momr-core` with the output sink as a parameter; widget and colors stay in the shell (plan 12).
 - Native AppKit shell started: ready window with live meters from `momr-audio`, app menu and About (plan 12).
 - AppKit recording: staging in the shared layout, pause with clock, stop exports the meeting folder and transcribes (plan 12).
+
 ### Retired
 - The unused `libc` dependency of the GTK shell (plan 12).
 - `open_no_follow`'s Linux flag values, wrong on aarch64; other targets refuse to build until plan 16 (plan 16).
@@ -51,7 +53,10 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Stopping playback, captures and agents calls kill(2) directly and reports failures; grok's binary link error is reported again (plan 12).
 - Agent workdirs are created fresh (never reused) with 0700 on every level (plan 12).
 - The dialog corner radius rule in `macos.css` is back (plan 14).
-- Settings dialog: wider (820), the stock × in the header hidden (traffic lights already close it), tighter page-switcher padding, so Indonesian tab titles fit (plan 14 follow-up).
+- AppKit meters use the GTK shell's scale (both channels, -60 dB), so the two shells' meters read alike (plan 12).
+- The home directory never falls back to a relative path, so no file lands relative to wherever the app runs (plan 06).
+- Module docs, AGENTS.md, the porting map and plans 12, 14 and 16 describe the workspace as built (plans 12, 16).
+- Settings dialog: wider (820), the stock × in the header hidden (Escape closes it; a display check decides whether that is enough), tighter page-switcher padding, so Indonesian tab titles fit (plan 14 follow-up).
 - Swift helper builds on the macOS 27 SDK: the per-app tap passes process object ids straight to `stereoMixdownOfProcesses` (plan 15).
 - Clippy clean again: the Audio settings process list sorts by key (plan 15).
 

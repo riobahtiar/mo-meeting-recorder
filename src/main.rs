@@ -204,9 +204,10 @@ fn login_shell_path() -> Option<String> {
     Some(path)
 }
 
-/// One lock for every test that changes the process environment: `set_var`
-/// racing a `getenv` elsewhere (GLib's included) is undefined behaviour, so
-/// such tests must not run alongside each other.
+/// One lock for every test in this crate that changes the process
+/// environment: `set_var` racing a `getenv` elsewhere (GLib's included) is
+/// undefined behaviour, so such tests must not run alongside each other.
+/// `momr-platform` has its own, since each crate's tests are one process.
 #[cfg(test)]
 pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

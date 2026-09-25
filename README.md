@@ -22,7 +22,7 @@
 | Cloud transcription and Indonesian UI | [13](plans/13-transcription-providers.md) | in progress — ElevenLabs, Google and OpenRouter routed with Keychain keys, EN/ID locales; live cloud runs need user keys, UI walk needs a display session |
 | UI polish after the first display session | [14](plans/14-ui-polish.md) | in progress — focus rings, remembered window size, appearance switch, Settings pages and gear button, compact strip and animation fit coded; the on-screen check is next |
 | Storage reset, recording timer, audio sources | [15](plans/15-reset-timer-sources.md) | in progress — cleanup and timer logic tested, Settings › Storage, Timer dialog, microphone and per-app pickers coded; helper builds with tested `--device`/`--bundle` flags, on-screen source switching needs a display session |
-| Windows and Linux versions | [16](plans/16-multi-platform-architecture.md) | blueprint — core compiles for Windows 11+ from slice 1, `momr-platform` seam next |
+| Windows and Linux versions | [16](plans/16-multi-platform-architecture.md) | blueprint — `momr-core` has no `cfg(target_os)`; `momr-platform` has paths, process, fs and sock for macOS, other targets next |
 
 Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: the app is GTK 4 and libadwaita. Screenshots come with the macOS look in plan 07.
 

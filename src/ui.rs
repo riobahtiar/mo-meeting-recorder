@@ -6,7 +6,8 @@
 //! launches; pages adapt to it, and only the strip changes it. Around it:
 //! the native menu bar and the actions behind it, the Settings dialog in
 //! pages, the Timer dialog, the About window, and the menu bar item launched
-//! next to the app. Every other module is a leaf this one calls.
+//! next to the app. Every other module, here and in `momr-core` and
+//! `momr-platform`, is a leaf this one calls.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -1629,11 +1630,13 @@ impl Recorder {
     }
 
     /// Hides the × libadwaita packs at the start of a PreferencesDialog
-    /// header. The dialog window already has traffic lights, so the extra
-    /// button only duplicates Close while stealing width from the page
-    /// switcher, whose longer titles ("Transkripsi", "Penyimpanan") then
-    /// ellipsize. Matches by icon, so a future libadwaita that moves the
-    /// button only means it stays visible, never a crash.
+    /// header: it steals width from the page switcher, whose longer titles
+    /// ("Transkripsi", "Penyimpanan") then ellipsize. The dialog is drawn
+    /// inside the main window, not in one of its own with traffic lights,
+    /// so without the × it closes with Escape; whether that is enough is a
+    /// display check (plan 14 Verify 7). Matches by icon, so a future
+    /// libadwaita that moves the button only means it stays visible, never
+    /// a crash.
     fn hide_prefs_close(dialog: &adw::PreferencesDialog) {
         fn walk(widget: &gtk::Widget) {
             if let Ok(button) = widget.clone().downcast::<gtk::Button>()

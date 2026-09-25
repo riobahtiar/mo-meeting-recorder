@@ -3,8 +3,8 @@
 //! not count, like the clock on screen); `start_at` starts one from the
 //! ready page at that moment; `stop_at` stops it at that moment. Times of
 //! day are resolved to the next occurrence when the plan is set, so the
-//! plan itself only holds Unix seconds and `ui.rs` checks it from its
-//! half-second tick. The plan lives for one session; stopping clears it.
+//! plan itself only holds Unix seconds and the shell (GTK: `ui.rs`) checks
+//! it from its half-second tick. The plan lives for one session; stopping clears it.
 
 use chrono::{Days, Local, NaiveDate, NaiveTime, TimeZone};
 
@@ -74,7 +74,7 @@ pub fn length(secs: i64) -> String {
 }
 
 /// A Unix time as the local clock, with the day when it is not today.
-/// Out-of-range times read empty, as before.
+/// Out-of-range times read empty.
 pub fn clock_time(at: i64) -> String {
     let Some(when) = Local.timestamp_opt(at, 0).single() else {
         return String::new();

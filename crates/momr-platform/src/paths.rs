@@ -1,7 +1,7 @@
 //! Where the app keeps things: `~/Library/Application Support/momr` for config,
 //! settings and models, `~/Library/Caches/momr` for staging and the socket,
 //! `~/Documents/Meetings` for meetings (or the folder picked in Settings,
-//! see the shell's `settings::meetings_dir`). Every path but the meetings is
+//! see `momr_core::settings::meetings_dir`). Every path but the meetings is
 //! under `APP_NAME`.
 //!
 //! The locations are built from environment variables with a home-directory
@@ -71,14 +71,17 @@ pub fn settings_file() -> PathBuf {
 
 /// The home directory: `$HOME` on macOS and Linux, `%USERPROFILE%` on
 /// Windows. Both are always set for a launched app; without either there is
-/// no home to build from, so the current directory is the last resort.
+/// no home to build from, so the current directory is the last resort, and
+/// the temp dir when even that is gone: every path built on this stays
+/// absolute, never relative to wherever the process happens to run.
 /// Shared with runners that keep dotfiles there (agents, shells).
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// The meetings folder. macOS and Linux keep it at `~/Documents`, Windows at

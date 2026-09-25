@@ -17,6 +17,7 @@
 #       - run: cargo build --release --features metal
 #       - run: swift build -c release --package-path helpers/momr-audio
 #       - run: swift test --package-path helpers/momr-audio
+#       - run: swift build --package-path apps/momr-appkit
 #       - uses: actions/upload-artifact@v4
 #         with:
 #           name: momr-macos-14

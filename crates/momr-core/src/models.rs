@@ -191,15 +191,14 @@ fn file_name(model: &Model) -> String {
 }
 
 /// voxtype's models: same files, no need to have them twice. voxtype keeps
-/// XDG paths wherever it runs, so this lookup replicates GLib's
-/// `user_data_dir` exactly (`$XDG_DATA_HOME` when absolute, else
-/// `$HOME/.local/share`) instead of following this app's `~/Library` move.
+/// XDG paths wherever it runs, so this lookup follows GLib's
+/// `user_data_dir` (`$XDG_DATA_HOME` when absolute, else
+/// `~/.local/share`) instead of this app's `~/Library` move.
 fn voxtype_models() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from(".local/share"))
+        .unwrap_or_else(|| momr_platform::paths::home_dir().join(".local/share"))
         .join("voxtype/models")
 }
 

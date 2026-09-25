@@ -474,8 +474,8 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
 /// The `sh` wrapper around the agent: `sh -c <script> sh <file-limit-kb>
 /// <program> <args…>`, with `gtimeout -k 5 <timeout>` inside when it is on
 /// `PATH`. Takes the flag as a parameter so tests can cover both shapes.
-/// The command runs through `process::spawn_detached`, which puts it in its
-/// own session (so `kill_group` reaches the whole tree) on Unix.
+/// `run_built` spawns it through `process::spawn_detached`, which puts it in
+/// its own session (so `kill_group` reaches the whole tree) on Unix.
 fn sh_command(built: &Built, timeout: Duration, gtimeout: bool) -> Command {
     let script = if gtimeout {
         format!(
@@ -509,9 +509,9 @@ fn run_built(
 
     // `ulimit -f` has to be set in the process that becomes the agent, so it
     // goes through a shell that execs it. The agent's stdout and stderr go to
-    // files, which is what the limit bounds. The spawn detaches it into its
-    // own session (platform), and wraps it in `gtimeout` when that
-    // is on PATH, so the agent is bounded even when this process dies before
+    // files, which is what the limit bounds. `sh_command` wraps it in
+    // `gtimeout` when that is on PATH and `spawn_detached` gives it its own
+    // session, so the agent is bounded even when this process dies before
     // the loop below can kill it; the loop is the backstop.
     let mut command = sh_command(built, timeout, crate::helper::which("gtimeout").is_some());
     command

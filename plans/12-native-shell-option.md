@@ -2,7 +2,7 @@
 
 ## Goal
 
-Know when the GTK app is not good enough and what to build if so: a SwiftUI front end on the same Rust core. This plan is a reference until the criteria below say otherwise; nothing here is scheduled.
+Know when the GTK app is not good enough and what to build if so: a native front end on the same Rust core. Entered 2026-09-25 (D24, see Status): the shell is AppKit, and the steps below are the work.
 
 ## When to enter this plan
 

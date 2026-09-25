@@ -6,6 +6,24 @@
 //
 // No Dock icon: the activation policy is set to accessory at launch, so no
 // bundle with LSUIElement is needed.
+//
+// Strings in English and Indonesian from the system locale. (The Rust app
+// holds the full tables in src/locales.rs; the status item needs its dozen.)
+private func menubarText(_ key: String) -> String {
+    let indonesian = (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?
+        .first?.hasPrefix("id") ?? false
+    let table: [String: (en: String, id: String)] = [
+        "show": ("Show MOM Recorder", "Tampilkan MOM Recorder"),
+        "pause": ("Pause", "Jeda"),
+        "resume": ("Resume", "Lanjutkan"),
+        "stop": ("Stop", "Hentikan"),
+        "compact": ("Compact Strip", "Strip Ringkas"),
+        "quit": ("Quit Item", "Keluar"),
+        "paused": ("paused", "dijeda"),
+    ]
+    guard let entry = table[key] else { return key }
+    return indonesian ? entry.id : entry.en
+}
 
 import AppKit
 import MomrWatch
@@ -39,6 +57,7 @@ final class StatusView: NSView {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let view = StatusView(frame: NSRect(x: 0, y: 0, width: 60, height: 18))
+    var pauseItem: NSMenuItem?
     let client = WatchClient()
     var state = WatchState.off
     var timer: Timer?
@@ -47,12 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         item.isVisible = false
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Show MOM Recorder", action: #selector(showApp), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Pause", action: #selector(togglePause), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Stop", action: #selector(stop), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Compact Strip", action: #selector(compact), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: menubarText("show"), action: #selector(showApp), keyEquivalent: ""))
+        let pause = NSMenuItem(title: menubarText("pause"), action: #selector(togglePause), keyEquivalent: "")
+        pauseItem = pause
+        menu.addItem(pause)
+        menu.addItem(NSMenuItem(title: menubarText("stop"), action: #selector(stop), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: menubarText("compact"), action: #selector(compact), keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit Item", action: #selector(quit), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: menubarText("quit"), action: #selector(quit), keyEquivalent: ""))
         item.menu = menu
         Thread.detachNewThread { [client] in client.run() }
         client.onState = { [weak self] state in
@@ -72,12 +93,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.state = state
         switch state.state {
         case "recording":
+            pauseItem?.title = menubarText("pause")
             view.history.append(mic: state.mic, computer: state.computer)
             view.recording = true
             item.button?.title = "● " + clock(state.elapsed)
         case "paused":
             view.recording = false
-            item.button?.title = "❚❚ paused " + clock(state.elapsed)
+            pauseItem?.title = menubarText("resume")
+            item.button?.title = "❚❚ " + menubarText("paused") + " " + clock(state.elapsed)
         case "transcribing":
             view.recording = false
             item.button?.title = "⟳ \(Int(state.progress * 100))%"

@@ -10,11 +10,13 @@ mod diarize;
 mod export;
 mod helper;
 mod ipc;
+mod locales;
 mod meeting;
 mod models;
 mod nemotron;
 mod paths;
 mod player;
+mod provider;
 mod settings;
 mod theme;
 mod transcribe;
@@ -37,7 +39,7 @@ fn main() -> glib::ExitCode {
             if ipc::send(command) {
                 glib::ExitCode::SUCCESS
             } else {
-                eprintln!("{APP_NAME}: the recorder is not running");
+                eprintln!("{APP_NAME}: {}", crate::locales::t("cli.not_running"));
                 glib::ExitCode::FAILURE
             }
         }
@@ -48,21 +50,15 @@ fn main() -> glib::ExitCode {
         Some("transcribe") => transcribe::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("ask") => agent::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("-h" | "--help") => {
-            println!(
-                "Usage: {APP_NAME} [start | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]"
-            );
+            println!("{}", crate::locales::t("cli.usage").replace("{}", APP_NAME));
             println!();
-            println!("  (no command)  open the recorder, ready to record");
-            println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
-            println!("  start         start recording in the open window (for a keybinding)");
-            println!("  stop          stop the running recording (for a keybinding)");
-            println!(
-                "  watch         stream the recorder state as NDJSON, for a menu bar item or any other client"
-            );
-            println!("  transcribe    transcribe two tracks and print the transcript as Markdown");
-            println!(
-                "  ask           run a prompt over stdin through the default agent, without tools"
-            );
+            println!("  {}", crate::locales::t("cli.no_command"));
+            println!("  {}", crate::locales::t("cli.meeting"));
+            println!("  {}", crate::locales::t("cli.start"));
+            println!("  {}", crate::locales::t("cli.stop"));
+            println!("  {}", crate::locales::t("cli.watch"));
+            println!("  {}", crate::locales::t("cli.transcribe"));
+            println!("  {}", crate::locales::t("cli.ask"));
             glib::ExitCode::SUCCESS
         }
         Some(path)
@@ -72,7 +68,10 @@ fn main() -> glib::ExitCode {
             ui::run(Some(path))
         }
         Some(other) => {
-            eprintln!("{APP_NAME}: unknown command '{other}', see --help");
+            eprintln!(
+                "{APP_NAME}: {}",
+                crate::locales::t("cli.unknown").replace("{}", other)
+            );
             glib::ExitCode::from(2)
         }
     }

@@ -89,7 +89,7 @@ pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
         download(
             &format!("{REPO}/{file}"),
             &path,
-            "Downloading the speaker model",
+            crate::locales::t("download.speaker"),
             min_bytes,
             events,
             abort,

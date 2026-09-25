@@ -13,8 +13,26 @@ use crate::chapters::Chapter;
 use crate::export::Format;
 
 pub const EXTENSION: &str = "meeting-recorder";
-pub const DEFAULT_YOU: &str = "You";
-pub const DEFAULT_REMOTE: &str = "Remote";
+/// The default speaker names in the interface language. Meetings store
+/// whatever these returned when recorded; opening an older meeting keeps its
+/// stored names either way.
+pub fn default_you() -> &'static str {
+    crate::locales::t("speaker.you")
+}
+
+pub fn default_remote() -> &'static str {
+    crate::locales::t("speaker.remote")
+}
+
+/// "Remote N" for several voices on the computer audio.
+pub fn remote_n(n: usize) -> String {
+    crate::locales::t("speaker.remote_n").replace("{}", &n.to_string())
+}
+
+/// "Speaker N" for imports and fallbacks.
+pub fn speaker_n(n: usize) -> String {
+    crate::locales::t("speaker.import_default").replace("{}", &n.to_string())
+}
 
 #[derive(Clone, Debug)]
 pub struct Manifest {
@@ -71,15 +89,15 @@ impl Manifest {
             speakers: match &value["speakers"] {
                 // Before imports existed, a recording kept {"you", "remote"}.
                 Value::Object(_) => vec![
-                    name(&value["speakers"]["you"], DEFAULT_YOU),
-                    name(&value["speakers"]["remote"], DEFAULT_REMOTE),
+                    name(&value["speakers"]["you"], default_you()),
+                    name(&value["speakers"]["remote"], default_remote()),
                 ],
                 Value::Array(list) => list
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| name(v, &format!("Speaker {}", i + 1)))
+                    .map(|(i, v)| name(v, &speaker_n(i + 1)))
                     .collect(),
-                _ => vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()],
+                _ => vec![default_you().to_owned(), default_remote().to_owned()],
             },
             imported: value["imported"].as_str().map(str::to_owned),
             speaker_count: value["speaker_count"].as_u64().map(|n| n as usize),
@@ -108,16 +126,14 @@ impl Manifest {
     /// audio holds several voices) for a recording, Speaker N for an import.
     pub fn default_labels(&self) -> Vec<String> {
         if self.imported.is_some() {
-            (1..=self.speakers.len().max(1))
-                .map(|i| format!("Speaker {i}"))
-                .collect()
+            (1..=self.speakers.len().max(1)).map(speaker_n).collect()
         } else if self.speakers.len() > 2 {
             // Several voices on the computer audio: Remote 1, Remote 2, ...
-            std::iter::once(DEFAULT_YOU.to_owned())
-                .chain((1..self.speakers.len()).map(|i| format!("{DEFAULT_REMOTE} {i}")))
+            std::iter::once(default_you().to_owned())
+                .chain((1..self.speakers.len()).map(remote_n))
                 .collect()
         } else {
-            vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()]
+            vec![default_you().to_owned(), default_remote().to_owned()]
         }
     }
 }
@@ -238,7 +254,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
         duration_secs: 0,
         format,
         language: "auto".to_owned(),
-        speakers: vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()],
+        speakers: vec![default_you().to_owned(), default_remote().to_owned()],
         imported: None,
         speaker_count: None,
         model: None,

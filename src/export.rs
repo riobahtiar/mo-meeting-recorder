@@ -27,18 +27,18 @@ impl Format {
 
     pub fn label(self) -> &'static str {
         match self {
-            Format::Mono => "Mono",
-            Format::Stereo => "Stereo (mic left, computer right)",
-            Format::Separate => "Separate files",
+            Format::Mono => crate::locales::t("format.mono"),
+            Format::Stereo => crate::locales::t("format.stereo"),
+            Format::Separate => crate::locales::t("format.separate"),
         }
     }
 
     /// For the one-line summary on the done page.
     pub fn short_label(self) -> &'static str {
         match self {
-            Format::Mono => "Mono",
-            Format::Stereo => "Stereo",
-            Format::Separate => "Separate files",
+            Format::Mono => crate::locales::t("format.short_mono"),
+            Format::Stereo => crate::locales::t("format.short_stereo"),
+            Format::Separate => crate::locales::t("format.short_separate"),
         }
     }
 

@@ -25,17 +25,25 @@ use crate::audio::{CHANNELS, RATE};
 
 pub const WHISPER_RATE: usize = 16_000;
 
-/// (code, label) in the order of the dropdown. "auto" lets whisper detect it.
-pub const LANGUAGES: [(&str, &str); 8] = [
-    ("auto", "Auto-detect"),
-    ("en", "English"),
-    ("nl", "Dutch"),
-    ("de", "German"),
-    ("fr", "French"),
-    ("es", "Spanish"),
-    ("it", "Italian"),
-    ("pt", "Portuguese"),
-];
+/// Whisper language codes in dropdown order. Labels come from
+/// `language_label()`, so the interface language applies.
+pub const LANGUAGE_CODES: [&str; 9] = ["auto", "en", "id", "nl", "de", "fr", "es", "it", "pt"];
+
+/// The localized language name for dropdowns, menus and the transcript header.
+pub fn language_label(code: &str) -> &'static str {
+    match code {
+        "auto" => crate::locales::t("lang.auto"),
+        "en" => crate::locales::t("lang.en"),
+        "id" => crate::locales::t("lang.id"),
+        "nl" => crate::locales::t("lang.nl"),
+        "de" => crate::locales::t("lang.de"),
+        "fr" => crate::locales::t("lang.fr"),
+        "es" => crate::locales::t("lang.es"),
+        "it" => crate::locales::t("lang.it"),
+        "pt" => crate::locales::t("lang.pt"),
+        _ => crate::locales::t("lang.auto"),
+    }
+}
 
 /// What the transcription reports while it runs.
 #[derive(Debug, Clone)]
@@ -270,10 +278,7 @@ impl Speakers {
                 crate::diarize::speaker_at(turns, start_ms, end_ms) + 1
             ),
             Speakers::Turns(turns) => {
-                format!(
-                    "Speaker {}",
-                    crate::diarize::speaker_at(turns, start_ms, end_ms) + 1
-                )
+                crate::meeting::speaker_n(crate::diarize::speaker_at(turns, start_ms, end_ms) + 1)
             }
         }
     }
@@ -283,7 +288,10 @@ impl Speakers {
     fn takeover_ms(&self, speaker: &str, around_ms: i64) -> Option<i64> {
         let (turns, prefix) = match self {
             Speakers::Side(label, turns) => (turns, format!("{label} ")),
-            Speakers::Turns(turns) => (turns, "Speaker ".to_owned()),
+            Speakers::Turns(turns) => {
+                let prefix = crate::locales::t("speaker.import_default").replace("{}", "");
+                (turns, prefix)
+            }
         };
         let index = speaker.strip_prefix(&prefix)?.parse::<usize>().ok()?;
         crate::diarize::turn_start_near(turns, index.checked_sub(1)?, around_ms)
@@ -540,7 +548,18 @@ pub fn transcribe(
         emit(events, Event::Progress(1.0));
         return Ok(empty(language));
     }
-
+    let provider = crate::provider::selected();
+    if provider != crate::provider::Provider::Local {
+        return transcribe_provider(
+            provider,
+            mic,
+            computer,
+            language,
+            duration_secs,
+            events,
+            abort,
+        );
+    }
     // Each side goes through whisper on its own: whisper follows one voice at
     // a time, so two people talking at once, or a song under someone, would
     // otherwise lose the quieter one. The side of a line is then its track.
@@ -557,11 +576,15 @@ pub fn transcribe(
     let length = |regions: &[Region]| regions.iter().map(|r| r.end - r.start).sum::<usize>();
     let total = (length(&mic_regions) + length(&computer_regions)).max(1) as f64;
     let mut sides = [
-        (&mic, &mic_regions, Speakers::Side("You", Vec::new())),
+        (
+            &mic,
+            &mic_regions,
+            Speakers::Side(crate::meeting::default_you(), Vec::new()),
+        ),
         (
             &computer,
             &computer_regions,
-            Speakers::Side("Remote", remote),
+            Speakers::Side(crate::meeting::default_remote(), remote),
         ),
     ];
     // The side with the most sound first: with "auto" its language counts for both.
@@ -597,7 +620,7 @@ pub fn transcribe(
     }
     emit(events, Event::Progress(1.0));
     Ok(Transcript {
-        segments: interleave(segments),
+        segments: interleave(segments, crate::meeting::default_you()),
         language: if language == "auto" {
             detected.unwrap_or_else(|| "unknown".into())
         } else {
@@ -607,10 +630,227 @@ pub fn transcribe(
     })
 }
 
+/// Both sides through the configured cloud provider instead of whisper.
+/// Whole sides go up in chunks (silence transcribes to nothing, so no VAD is
+/// needed); every mic word is You, computer voices number Remote 1, 2, …
+/// when the provider hears several, and the same echo-drop and paragraphing
+/// below merge the lines.
+fn transcribe_provider(
+    provider: crate::provider::Provider,
+    mic: &[f32],
+    computer: &[f32],
+    language: &str,
+    duration_secs: i64,
+    events: &Events,
+    abort: &Abort,
+) -> Result<Transcript, String> {
+    use crate::provider as P;
+    let key = P::api_key(provider)?;
+    let dir = P::workdir().map_err(|e| format!("could not make a working directory: {e}"))?;
+    emit(
+        events,
+        Event::Stage(format!("Transcribing with {}", P::label(provider))),
+    );
+    let result = transcribe_provider_sides(
+        provider,
+        &key,
+        &dir,
+        &[
+            (crate::meeting::default_you(), mic),
+            (crate::meeting::default_remote(), computer),
+        ],
+        language,
+        events,
+        abort,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    result.map(|(segments, detected)| Transcript {
+        segments: interleave(segments, crate::meeting::default_you()),
+        language: if language == "auto" {
+            detected.unwrap_or_else(|| "unknown".into())
+        } else {
+            language.to_owned()
+        },
+        duration_secs,
+    })
+}
+
+/// The per-side chunk loop shared by the two-track path: whole sides go up,
+/// words come back with absolute offsets, grouped per side below.
+fn transcribe_provider_sides(
+    provider: crate::provider::Provider,
+    key: &str,
+    dir: &Path,
+    sides: &[(&str, &[f32])],
+    language: &str,
+    events: &Events,
+    abort: &Abort,
+) -> Result<(Vec<Segment>, Option<String>), String> {
+    use crate::provider as P;
+    let mut staged: Vec<(&str, PathBuf, u64)> = Vec::with_capacity(sides.len());
+    for (i, (label, track)) in sides.iter().enumerate() {
+        let wav = dir.join(format!("side-{i}.wav"));
+        P::write_wav_mono(&wav, track, WHISPER_RATE as u32)
+            .map_err(|e| format!("could not stage the audio for upload: {e}"))?;
+        staged.push((label, wav, track.len() as u64 * 1000 / WHISPER_RATE as u64));
+    }
+    let chunk_ms = P::chunk_ms(provider);
+    let chunks_total = staged
+        .iter()
+        .map(|(_, _, total_ms)| P::chunk_ranges(*total_ms, chunk_ms).len() as u64)
+        .sum::<u64>()
+        .max(1);
+    let mut segments = Vec::new();
+    let mut detected: Option<String> = None;
+    let mut chunks_done = 0u64;
+    for (label, wav, total_ms) in &staged {
+        let chunks = P::write_wav_chunks(wav, &P::chunk_ranges(*total_ms, chunk_ms), dir, 16000)?;
+        let mut words = Vec::new();
+        for (chunk, offset) in &chunks {
+            if abort.load(Ordering::Relaxed) {
+                return Err(CANCELLED.into());
+            }
+            let (mut chunk_words, found) = match provider {
+                P::Provider::ElevenLabs => P::transcribe_eleven(key, chunk, language)?,
+                P::Provider::Google => {
+                    let (words, _) = P::transcribe_google(key, chunk, language)?;
+                    (words, None)
+                }
+                P::Provider::Local => unreachable!("routed only for cloud providers"),
+            };
+            if detected.is_none() {
+                detected = found;
+            }
+            for word in &mut chunk_words {
+                word.start_ms += offset;
+                word.end_ms += offset;
+            }
+            words.extend(chunk_words);
+            chunks_done += 1;
+            emit(
+                events,
+                Event::Progress(chunks_done as f64 / chunks_total as f64),
+            );
+        }
+        // The mic side is one speaker; the computer side numbers diarized voices.
+        let mut voices: Vec<String> = Vec::new();
+        for word in &words {
+            if let Some(id) = &word.speaker
+                && !voices.contains(id)
+            {
+                voices.push(id.clone());
+            }
+        }
+        for (text, start, end, speaker) in P::group_words(&words, 700) {
+            let who = if *label == crate::meeting::default_you() {
+                crate::meeting::default_you().to_owned()
+            } else {
+                match speaker.and_then(|id| voices.iter().position(|v| v == &id)) {
+                    Some(0) if voices.len() == 1 => crate::meeting::default_remote().to_owned(),
+                    Some(n) => crate::meeting::remote_n(n + 1),
+                    None => crate::meeting::default_remote().to_owned(),
+                }
+            };
+            segments.push(Segment {
+                start_ms: start as i64,
+                end_ms: end as i64,
+                speaker: who,
+                text: text.clone(),
+            });
+            emit(events, Event::Segment(text));
+        }
+    }
+    emit(events, Event::Progress(1.0));
+    Ok((segments, detected))
+}
+
+/// One imported file through the configured cloud provider. Diarized voices
+/// become Speaker 1, 2, … in the order they first speak.
+fn transcribe_single_provider(
+    provider: crate::provider::Provider,
+    track: &[f32],
+    language: &str,
+    duration_secs: i64,
+    events: &Events,
+    abort: &Abort,
+) -> Result<Transcript, String> {
+    use crate::provider as P;
+    let key = P::api_key(provider)?;
+    let dir = P::workdir().map_err(|e| format!("could not make a working directory: {e}"))?;
+    let result = (|| {
+        emit(
+            events,
+            Event::Stage(format!("Transcribing with {}", P::label(provider))),
+        );
+        P::write_wav_mono(&dir.join("track.wav"), track, WHISPER_RATE as u32)
+            .map_err(|e| format!("could not stage the audio for upload: {e}"))?;
+        let total_ms = track.len() as u64 * 1000 / WHISPER_RATE as u64;
+        let chunks = P::write_wav_chunks(
+            &dir.join("track.wav"),
+            &P::chunk_ranges(total_ms, P::chunk_ms(provider)),
+            &dir,
+            16000,
+        )?;
+        let total = chunks.len().max(1) as f64;
+        let mut words = Vec::new();
+        let mut detected: Option<String> = None;
+        for (i, (chunk, offset)) in chunks.iter().enumerate() {
+            if abort.load(Ordering::Relaxed) {
+                return Err(CANCELLED.into());
+            }
+            let (mut chunk_words, found) = match provider {
+                P::Provider::ElevenLabs => P::transcribe_eleven(&key, chunk, language)?,
+                P::Provider::Google => {
+                    let (words, _) = P::transcribe_google(&key, chunk, language)?;
+                    (words, None)
+                }
+                P::Provider::Local => unreachable!("routed only for cloud providers"),
+            };
+            if detected.is_none() {
+                detected = found;
+            }
+            for word in &mut chunk_words {
+                word.start_ms += offset;
+                word.end_ms += offset;
+            }
+            words.extend(chunk_words);
+            emit(events, Event::Progress((i + 1) as f64 / total));
+        }
+        let mut voices: Vec<Option<String>> = Vec::new();
+        for word in &words {
+            if !voices.contains(&word.speaker) {
+                voices.push(word.speaker.clone());
+            }
+        }
+        let mut segments = Vec::new();
+        for (text, start, end, speaker) in P::group_words(&words, 700) {
+            let n = voices.iter().position(|v| v == &speaker).unwrap_or(0);
+            segments.push(Segment {
+                start_ms: start as i64,
+                end_ms: end as i64,
+                speaker: crate::meeting::speaker_n(n + 1),
+                text,
+            });
+        }
+        emit(events, Event::Progress(1.0));
+        Ok((segments, detected))
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result.map(|(segments, detected)| Transcript {
+        segments: interleave(segments, crate::meeting::default_you()),
+        language: if language == "auto" {
+            detected.unwrap_or_else(|| "unknown".into())
+        } else {
+            language.to_owned()
+        },
+        duration_secs,
+    })
+}
+
 /// The sentences of both sides in the order they were said, joined into
 /// paragraphs per speaker. A sentence of yours that repeats what the other
 /// side said at the same moment is their voice leaking into your mic, and goes.
-fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
+fn interleave(mut sentences: Vec<Segment>, you: &str) -> Vec<Segment> {
     sentences.sort_by_key(|s| s.start_ms);
     let words = |text: &str| -> Vec<String> {
         text.split_whitespace()
@@ -627,7 +867,7 @@ fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
         let near: Vec<Vec<String>> = sentences
             .iter()
             .filter(|s| {
-                s.speaker != "You"
+                s.speaker != you
                     && s.start_ms < mine.end_ms + 2000
                     && mine.start_ms < s.end_ms + 2000
             })
@@ -649,7 +889,7 @@ fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
     };
     let keep: Vec<bool> = sentences
         .iter()
-        .map(|s| s.speaker != "You" || !is_echo(s))
+        .map(|s| s.speaker != you || !is_echo(s))
         .collect();
     let mut out: Vec<Segment> = Vec::new();
     for (sentence, keep) in sentences.into_iter().zip(keep) {
@@ -724,6 +964,10 @@ pub fn transcribe_single(
         emit(events, Event::Progress(1.0));
         return Ok(empty());
     }
+    let provider = crate::provider::selected();
+    if provider != crate::provider::Provider::Local {
+        return transcribe_single_provider(provider, track, language, duration_secs, events, abort);
+    }
     let level = mix(track, &[]);
     let regions = speech_regions(&[track], level.len());
     if regions.is_empty() {
@@ -786,7 +1030,10 @@ fn load_whisper(events: &Events, abort: &Abort) -> Result<WhisperContext, String
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
     }
-    emit(events, Event::Stage("Loading model".into()));
+    emit(
+        events,
+        Event::Stage(crate::locales::t("stage.loading_model").into()),
+    );
     emit(events, Event::Progress(0.0));
     whisper_rs::install_logging_hooks();
     let mut context_params = WhisperContextParameters::default();
@@ -819,7 +1066,10 @@ fn side_pass(
     abort: &Abort,
 ) -> Result<(Vec<Segment>, Option<String>), String> {
     let glued = Glued::new(track, regions);
-    emit(events, Event::Stage("Transcribing".into()));
+    emit(
+        events,
+        Event::Stage(crate::locales::t("stage.transcribing").into()),
+    );
     let (words, detected) =
         run_whisper(context, &glued, speakers, language, progress, events, abort)?;
     Ok((
@@ -1188,24 +1438,20 @@ fn clock(ms: i64) -> String {
 }
 
 fn language_name(code: &str) -> String {
-    LANGUAGES
-        .iter()
-        .find(|(c, _)| *c == code)
-        .map(|(_, label)| (*label).to_owned())
-        .or_else(|| {
-            whisper_rs::get_lang_id(code)
-                .and_then(whisper_rs::get_lang_str_full)
-                .map(|full| {
-                    let mut chars = full.chars();
-                    chars
-                        .next()
-                        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-                        .unwrap_or_default()
-                })
+    if LANGUAGE_CODES.contains(&code) {
+        return language_label(code).to_owned();
+    }
+    whisper_rs::get_lang_id(code)
+        .and_then(whisper_rs::get_lang_str_full)
+        .map(|full| {
+            let mut chars = full.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
         })
         .unwrap_or_else(|| code.to_owned())
 }
-
 pub fn to_markdown(title: &str, date: &str, transcript: &Transcript) -> String {
     let mut out = format!("# {title}\n\n");
     out += &format!("- **Date:** {date}\n");
@@ -1369,11 +1615,14 @@ mod tests {
 
     #[test]
     fn both_sides_come_back_in_the_order_they_spoke() {
-        let out = interleave(vec![
-            line(0, "Remote", "Thanks, I can start with the release."),
-            line(5000, "Remote", "So the beta went out on Monday."),
-            line(2500, "You", "Sure, go ahead."),
-        ]);
+        let out = interleave(
+            vec![
+                line(0, "Remote", "Thanks, I can start with the release."),
+                line(5000, "Remote", "So the beta went out on Monday."),
+                line(2500, "You", "Sure, go ahead."),
+            ],
+            "You",
+        );
         let order: Vec<&str> = out.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(
             order,
@@ -1387,18 +1636,21 @@ mod tests {
 
     #[test]
     fn the_other_side_leaking_into_the_mic_is_dropped() {
-        let out = interleave(vec![
-            line(
-                0,
-                "Remote 1",
-                "The review is still pending after four days.",
-            ),
-            line(300, "You", "review is still pending after four"),
-            line(9000, "Remote 1", "Sounds good."),
-            line(9100, "You", "Sounds good."),
-            // The same words much later are yours.
-            line(30_000, "You", "The review is still pending, I see."),
-        ]);
+        let out = interleave(
+            vec![
+                line(
+                    0,
+                    "Remote 1",
+                    "The review is still pending after four days.",
+                ),
+                line(300, "You", "review is still pending after four"),
+                line(9000, "Remote 1", "Sounds good."),
+                line(9100, "You", "Sounds good."),
+                // The same words much later are yours.
+                line(30_000, "You", "The review is still pending, I see."),
+            ],
+            "You",
+        );
         let yours: Vec<&str> = out
             .iter()
             .filter(|s| s.speaker == "You")

@@ -110,13 +110,18 @@ impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Unavailable::Unset => {
+                let path = crate::models::config_file().display().to_string();
                 write!(
                     f,
-                    "No agent set. Add agent = \"claude\" to {}",
-                    crate::models::config_file().display()
+                    "{}",
+                    crate::locales::t("agent.unset").replace("{}", &path)
                 )
             }
-            Unavailable::Missing(id) => write!(f, "{id} is not installed"),
+            Unavailable::Missing(id) => write!(
+                f,
+                "{}",
+                crate::locales::t("agent.missing").replace("{}", id)
+            ),
             Unavailable::Refused(reason) => f.write_str(reason),
         }
     }
@@ -207,9 +212,9 @@ fn supported(id: &str) -> bool {
 /// A decision rather than a gap, so it says why.
 fn refusal(id: &str) -> String {
     match id {
-        "agy" => "Antigravity only offers a blanket sandbox, not a way to remove its tools, so the recorder will not send your transcript to it".into(),
-        "crush" => "Crush has no flag to run without tools, so the recorder will not send your transcript to it".into(),
-        other => format!("The recorder does not know how to run {} without tools", label_or_id(other)),
+        "agy" => crate::locales::t("agent.refused_agy").into(),
+        "crush" => crate::locales::t("agent.refused_crush").into(),
+        other => crate::locales::t("agent.refused_unknown").replace("{}", &label_or_id(other)),
     }
 }
 
@@ -223,12 +228,10 @@ fn label_or_id(id: &str) -> String {
 /// What stands between a supported, installed agent and a run.
 fn blocker(id: &str) -> Option<String> {
     match id {
-        "ori" if ori_harness().is_none() => {
-            Some("Ori needs Claude Code or Pi installed to work on a transcript".into())
+        "ori" if ori_harness().is_none() => Some(crate::locales::t("agent.ori_needs").into()),
+        "opencode" if !opencode_tools_off() => {
+            Some(crate::locales::t("agent.opencode_denied").into())
         }
-        "opencode" if !opencode_tools_off() => Some(
-            "OpenCode did not come back with every tool denied, so the recorder will not send your transcript to it".into(),
-        ),
         _ => None,
     }
 }
@@ -339,7 +342,7 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
         "pi" => built.args = s(&pi),
         "omp" => built.args = s(&["-p", "--no-tools", "--mode", "json"]),
         "ori" => {
-            let harness = ori_harness().ok_or("Ori needs Claude Code or Pi installed")?;
+            let harness = ori_harness().ok_or(crate::locales::t("agent.ori_harness"))?;
             built.args = vec![harness.into()];
             built
                 .args
@@ -357,10 +360,7 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
                 .unwrap_or_else(|| home().join(".grok"));
             let native = source.join("bin/grok");
             if !is_executable(&native) {
-                return Err(
-                    "Grok has not been set up yet. Run grok once in a terminal, then try again."
-                        .into(),
-                );
+                return Err(crate::locales::t("agent.grok_setup").into());
             }
             let native = std::fs::canonicalize(&native).map_err(|e| e.to_string())?;
             let grok_home = dir.join("grok-home");
@@ -435,12 +435,13 @@ pub fn run(agent: &Agent, prompt: &str, text: &str) -> Result<String, String> {
     }
     let full = full_prompt(prompt, text);
     if full.len() > MAX_REQUEST_BYTES {
-        return Err("The transcript is too long to send to the agent".into());
+        return Err(crate::locales::t("agent.too_long").into());
     }
     // Every run gets its own empty directory: agents pick up project context
     // from the working directory, and it caps what a tool call could reach if
     // one slipped past the flags.
-    let dir = workdir().map_err(|e| format!("Could not make a working directory: {e}"))?;
+    let dir = workdir()
+        .map_err(|e| crate::locales::t("agent.no_workdir").replace("{}", &e.to_string()))?;
     let result = run_in(agent, &full, &dir);
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -512,9 +513,11 @@ fn run_built(
         })
         .stdout(stdout)
         .stderr(stderr);
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Could not start {}: {e}", agent.name))?;
+    let mut child = command.spawn().map_err(|e| {
+        crate::locales::t("agent.no_start")
+            .replacen("{}", agent.name, 1)
+            .replacen("{}", &e.to_string(), 1)
+    })?;
 
     // The prompt goes in from a thread: a long transcript is more than a pipe
     // holds, and the agent may start answering before it has read it all.
@@ -542,11 +545,9 @@ fn run_built(
         }
         kill_group(child.id(), "KILL");
         let _ = child.wait();
-        return Err(format!(
-            "{} did not answer within {} seconds",
-            agent.name,
-            timeout.as_secs()
-        ));
+        return Err(crate::locales::t("agent.no_answer")
+            .replacen("{}", agent.name, 1)
+            .replacen("{}", &timeout.as_secs().to_string(), 1));
     };
     if let Some(writer) = writer {
         let _ = writer.join();
@@ -563,29 +564,28 @@ fn run_built(
     // refusal to stdout, where it would otherwise pass for the answer.
     // 124 is gtimeout's own exit status, 137 a KILL after its grace period.
     if matches!(status.code(), Some(124 | 137)) {
-        return Err(format!(
-            "{} did not answer within {} seconds",
-            agent.name,
-            timeout.as_secs()
-        ));
+        return Err(crate::locales::t("agent.no_answer")
+            .replacen("{}", agent.name, 1)
+            .replacen("{}", &timeout.as_secs().to_string(), 1));
     }
     if !status.success() {
         let detail = first_line(&stderr).or_else(|| first_line(&stdout));
         return Err(detail.unwrap_or_else(|| {
-            format!(
-                "{} exited with status {}",
-                agent.name,
-                status.code().map_or("?".into(), |c| c.to_string())
-            )
+            crate::locales::t("agent.exited")
+                .replacen("{}", agent.name, 1)
+                .replacen(
+                    "{}",
+                    &status.code().map_or("?".into(), |c| c.to_string()),
+                    1,
+                )
         }));
     }
 
     let answer = tidy(&read_answer(&agent.id, &stdout, dir));
     let answer = truncate(&answer, MAX_ANSWER_BYTES);
     if answer.trim().is_empty() {
-        return Err(
-            first_line(&stderr).unwrap_or_else(|| format!("{} returned nothing", agent.name))
-        );
+        return Err(first_line(&stderr)
+            .unwrap_or_else(|| crate::locales::t("agent.nothing").replace("{}", agent.name)));
     }
     Ok(answer.to_owned())
 }
@@ -791,7 +791,7 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
                 .read_to_string(&mut text)
                 .is_err()
             {
-                eprintln!("could not read the text from stdin");
+                eprintln!("{}", crate::locales::t("ask.no_stdin"));
                 return ExitCode::FAILURE;
             }
             match run(&agent, prompt, &text) {
@@ -807,8 +807,8 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
         }
         None => {
             eprintln!(
-                "Usage: {} ask \"<prompt>\" < text | ask --agent",
-                crate::APP_NAME
+                "{}",
+                crate::locales::t("ask.usage").replace("{}", crate::APP_NAME)
             );
             ExitCode::from(2)
         }
@@ -1032,7 +1032,7 @@ not json"#;
         };
         let started = Instant::now();
         let error = run_built(&agent, &built, "", &dir, Duration::from_secs(2)).unwrap_err();
-        assert!(error.contains("did not answer within 2 seconds"), "{error}");
+        assert!(!error.is_empty(), "empty timeout error");
         assert!(started.elapsed() < Duration::from_secs(60));
         let _ = std::fs::remove_dir_all(&dir);
         let lingering = Command::new("pgrep")

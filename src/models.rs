@@ -226,7 +226,7 @@ pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
     download(
         &url,
         &target,
-        "Downloading model",
+        crate::locales::t("download.model"),
         u64::from(model.size_mb) * 800_000,
         events,
         abort,

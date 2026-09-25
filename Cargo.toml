@@ -11,7 +11,9 @@ libc = "0.2.189"
 serde_json = "1.0.151"
 ort = "2.0.0-rc.13"
 realfft = "3"
-ureq = "3.4.2"
+# HTTPS file upload (ElevenLabs) and JSON bodies (Google) for the optional
+# cloud transcription providers. No new crates, only ureq's own features.
+ureq = { version = "3.4.2", features = ["multipart", "json"] }
 whisper-rs = "0.16"
 
 [features]

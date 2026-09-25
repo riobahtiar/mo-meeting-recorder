@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use crate::export::Format;
-use crate::transcribe::LANGUAGES;
+use crate::transcribe::LANGUAGE_CODES;
 
 fn path() -> PathBuf {
     crate::paths::settings_file()
@@ -40,14 +40,14 @@ pub fn save_format(format: Format) {
     save("format", format.key());
 }
 
-/// A whisper language code from `LANGUAGES`, "auto" when unset or unknown.
+/// A whisper language code from `LANGUAGE_CODES`, "auto" when unset or unknown.
 pub fn load_language() -> &'static str {
     let settings = load();
     let saved = settings["language"].as_str().unwrap_or("auto");
-    LANGUAGES
+    LANGUAGE_CODES
         .iter()
-        .map(|(code, _)| *code)
-        .find(|code| *code == saved)
+        .find(|code| **code == saved)
+        .copied()
         .unwrap_or("auto")
 }
 
@@ -61,7 +61,7 @@ pub fn load_your_name() -> String {
         .as_str()
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .unwrap_or(crate::meeting::DEFAULT_YOU)
+        .unwrap_or(crate::meeting::default_you())
         .to_owned()
 }
 
@@ -79,4 +79,23 @@ pub fn load_meetings_dir() -> Option<std::path::PathBuf> {
 
 pub fn save_meetings_dir(dir: &std::path::Path) {
     save("meetings_dir", &dir.display().to_string());
+}
+
+/// The interface language: "id" for Indonesian, anything else English.
+/// Defaults from $LANG so an Indonesian system starts in Indonesian.
+pub fn load_ui_language() -> &'static str {
+    let settings = load();
+    let saved = settings["ui_language"].as_str().unwrap_or("");
+    if saved == "id" || saved == "en" {
+        return if saved == "id" { "id" } else { "en" };
+    }
+    if std::env::var("LANG").is_ok_and(|lang| lang.starts_with("id")) {
+        "id"
+    } else {
+        "en"
+    }
+}
+
+pub fn save_ui_language(code: &str) {
+    save("ui_language", code);
 }

@@ -30,6 +30,7 @@ Checkbox states: `[ ]` not started, `[~]` in progress, `[x]` done.
 | [10 Testing and CI](10-testing-and-ci.md) | Tests for the new seams; CI on macOS | 02 | all | `[~]` |
 | [11 Identity](11-identity.md) | Confirm the bundle id, UTI and folder names; last brand sweep | 08 | 3 Ships | `[~]` |
 | [12 Native shell option](12-native-shell-option.md) | When and how to build a SwiftUI front end on the Rust core | 07 | 4 Optional | reference |
+| [13 Transcription providers](13-transcription-providers.md) | ElevenLabs/Google transcription, English + Indonesian UI | 05, 07 | 5 Providers | `[~]` |
 
 Phases: **1 Works** is a usable app started from a terminal. **2 Feels native** is what a Mac user expects from the chrome. **3 Ships** is something a person can download and double-click. **4 Optional** is only entered if phase 2 falls short by the criteria in plan 12.
 

@@ -139,7 +139,7 @@ impl Player {
     pub fn new() -> Self {
         let button = gtk::Button::builder()
             .icon_name("media-playback-start-symbolic")
-            .tooltip_text("Play")
+            .tooltip_text(crate::locales::t("player.play"))
             .valign(gtk::Align::Center)
             .css_classes(["circular", "flat"])
             .build();
@@ -391,8 +391,11 @@ impl Player {
         } else {
             "media-playback-start-symbolic"
         });
-        self.button
-            .set_tooltip_text(Some(if playing { "Pause" } else { "Play" }));
+        self.button.set_tooltip_text(Some(if playing {
+            crate::locales::t("player.pause")
+        } else {
+            crate::locales::t("player.play")
+        }));
     }
 
     fn start_ticking(&self) {

@@ -14,9 +14,9 @@
 | Chapters through an agent set in `config.toml` | [05](plans/05-agent-and-config.md) | in progress — `agent = "…"` selects, `ask` runs live (pi), crush refused, hung group killed in test; long-meeting chapters need a display session |
 | Files under `~/Library`; works when launched from Finder | [06](plans/06-paths-and-environment.md) | done — `~/Library` homes (GLib has no Cocoa support here, see D22), socket/staging/watch verified, `open` launch spawns helper (TCC-flat meters until the plan 08 bundle) |
 | Native menu bar, window chrome, system font, Apple colours, Preferences, About | [07](plans/07-macos-look-and-feel.md) | in progress — actions+menu+About+Preferences coded, Apple palette with tests, Omarchy fully gone; icon and on-screen checks need a display session |
-| Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | [08](plans/08-app-bundle-and-distribution.md) | not started |
+| Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | [08](plans/08-app-bundle-and-distribution.md) | in progress — bundle assembles and launches, formula + workflow staged; signing, DMG and install docs wait for cert and tag |
 | Live recording status in the menu bar | [09](plans/09-menu-bar-item.md) | in progress — SwiftBar script renders, native item builds with tested protocol, app spawns/kills it; on-screen check needs a display session |
-
+| Cloud transcription and Indonesian UI | [13](plans/13-transcription-providers.md) | in progress — ElevenLabs/Google routed with Keychain keys, full EN/ID locales; live cloud runs need user keys, UI walk needs a display session |
 Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: the app is GTK 4 and libadwaita. Screenshots come with the macOS look in plan 07.
 
 ## What it does
@@ -58,7 +58,16 @@ The `transcribe` commands need no window or audio device, so they are the first 
 
 ## Privacy
 
-The audio, the transcript and everything else stay on your Mac. The only thing that leaves it is the transcript text for the chapters, and only when you have set up an agent: it goes to that agent's service, the one you already chose and pay for.
+With the default local transcription, the audio, the transcript and
+everything else stay on your Mac. Two things can leave it, each only when
+you set it up:
+
+- Chapters: the transcript text goes to the agent's service, the one you
+  already chose and pay for.
+- Cloud transcription (Settings › Transcription › ElevenLabs or Google):
+  the meeting audio goes to that provider for transcription. API keys stay
+  in your Keychain. ElevenLabs and Google keep and process uploads under
+  their own terms — use the local default for anything sensitive.
 
 ## Contributing
 

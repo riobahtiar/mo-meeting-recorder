@@ -209,35 +209,27 @@ fn next_mode(
     // The helper's exit codes for an unavailable tap (see helpers/momr-audio).
     let tap_dead = matches!(exit, Some(3) | Some(4));
     let tap_note = |code| match code {
-        Some(4) => {
-            "System Audio Recording permission was refused — allow it in System Settings › Privacy & Security, then restart the app."
-        }
-        _ => {
-            "This macOS cannot tap the system audio — install BlackHole to record the computer audio."
-        }
+        Some(4) => crate::locales::t("banner.audio_tap_permission"),
+        _ => crate::locales::t("banner.audio_tap_unsupported"),
     };
+    let install = crate::locales::t("banner.audio_install_blackhole");
     let loopback_or_idle = |reason: &str| match blackhole {
         Some(_) => (ComputerMode::BlackHole, None),
-        None => (
-            ComputerMode::Idle,
-            Some(format!(
-                "{reason} Install BlackHole to record the computer audio instead."
-            )),
-        ),
+        None => (ComputerMode::Idle, Some(format!("{reason} {install}"))),
+    };
+    let missing_helper = || {
+        format!(
+            "{} {}",
+            crate::locales::t("banner.audio_helper_missing"),
+            install
+        )
     };
     match current {
         ComputerMode::Tap => {
             if !helper {
                 return match blackhole {
                     Some(_) => (ComputerMode::BlackHole, None),
-                    None => (
-                        ComputerMode::Idle,
-                        Some(
-                            "The momr-audio helper was not found — reinstall MOM Recorder. \
-                             Install BlackHole to record the computer audio instead."
-                                .into(),
-                        ),
-                    ),
+                    None => (ComputerMode::Idle, Some(missing_helper())),
                 };
             }
             match exit {
@@ -255,11 +247,7 @@ fn next_mode(
             _ if helper => (ComputerMode::Tap, None),
             _ => (
                 ComputerMode::BlackHole,
-                Some(
-                    "The computer-audio device went away — retrying. \
-                     Check it in System Settings › Sound."
-                        .into(),
-                ),
+                Some(crate::locales::t("banner.audio_device_gone").to_owned()),
             ),
         },
         // Something changed while idle (a device installed, the helper back):
@@ -270,14 +258,7 @@ fn next_mode(
             } else {
                 match blackhole {
                     Some(_) => (ComputerMode::BlackHole, None),
-                    None => (
-                        ComputerMode::Idle,
-                        Some(
-                            "The momr-audio helper was not found — reinstall MOM Recorder. \
-                             Install BlackHole to record the computer audio instead."
-                                .into(),
-                        ),
-                    ),
+                    None => (ComputerMode::Idle, Some(missing_helper())),
                 }
             }
         }
@@ -295,14 +276,14 @@ fn mic_loop(shared: &Mutex<Inner>) {
         match capture_from(&program, &args, shared) {
             Ok(code) => set_note(
                 shared,
-                Some(format!(
-                    "Microphone capture failed (exit {}) — check System Settings › Privacy & Security › Microphone.",
-                    code.unwrap_or(-1)
-                )),
+                Some(
+                    crate::locales::t("banner.audio_mic_failed")
+                        .replace("{}", &code.unwrap_or(-1).to_string()),
+                ),
             ),
             Err(_) => set_note(
                 shared,
-                Some("Could not start microphone capture — is ffmpeg installed?".into()),
+                Some(crate::locales::t("banner.audio_no_ffmpeg").to_owned()),
             ),
         }
         // ffmpeg exits when the device goes away; the helper when it has no
@@ -352,7 +333,7 @@ fn computer_loop(shared: &Mutex<Inner>) {
                 // path was checked. Back off and re-evaluate.
                 set_note(
                     shared,
-                    Some(format!("Could not start {program} — is it installed?")),
+                    Some(crate::locales::t("banner.audio_no_program").replace("{}", &program)),
                 );
                 thread::sleep(Duration::from_secs(idle_secs));
                 None
@@ -477,8 +458,15 @@ mod tests {
         assert_eq!(mode, ComputerMode::Idle);
         assert!(note.unwrap().contains("BlackHole"));
         // An old macOS names the cause, not the permission page.
-        let (_, note) = next_mode(&ComputerMode::Tap, true, None, Some(3));
-        assert!(note.unwrap().contains("cannot tap"));
+        let (_, old) = next_mode(&ComputerMode::Tap, true, None, Some(3));
+        let (_, refused) = next_mode(&ComputerMode::Tap, true, None, Some(4));
+        assert_ne!(old, refused);
+        let expected = format!(
+            "{} {}",
+            crate::locales::t("banner.audio_tap_unsupported"),
+            crate::locales::t("banner.audio_install_blackhole")
+        );
+        assert_eq!(old.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -487,7 +475,7 @@ mod tests {
         assert_eq!(mode, ComputerMode::BlackHole);
         let (mode, note) = next_mode(&ComputerMode::Tap, false, None, None);
         assert_eq!(mode, ComputerMode::Idle);
-        assert!(note.unwrap().contains("helper"));
+        assert!(note.unwrap().contains("momr-audio"));
     }
 
     #[test]
@@ -502,7 +490,10 @@ mod tests {
         // Alone with no helper, it retries the loopback and says so.
         let (mode, note) = next_mode(&ComputerMode::BlackHole, false, None, Some(1));
         assert_eq!(mode, ComputerMode::BlackHole);
-        assert!(note.unwrap().contains("went away"));
+        assert_eq!(
+            note.as_deref(),
+            Some(crate::locales::t("banner.audio_device_gone"))
+        );
     }
 
     #[test]

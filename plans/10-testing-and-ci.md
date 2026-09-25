@@ -8,14 +8,15 @@ Every platform seam has a unit test that runs without audio hardware, the transc
 
 - [x] `cargo test` covers the command builders, the paths module, config parsing, agent selection, the menu model's action names and the socket-path fallback.
 - [x] An end-to-end test transcribes a `say`-generated fixture and finds the expected words.
-- [x] `.github/workflows/ci.yml` runs fmt, clippy with `-D warnings`, tests, a release build and the Swift package's tests on `macos-14`, green.
+- [ ] `.github/workflows/ci.yml` runs fmt, clippy with `-D warnings`, tests, a release build and the Swift package's tests on `macos-14`, green. (Disabled 2026-09-25: both workflows are commented out with a TODO; uncomment to reactivate.)
 - [ ] The smoke checklist below has been walked once per milestone and the results noted in the pull request.
 
 Observed 2026-09-25: 55 unit tests pass; `tests/transcribe.rs` (`#[ignore]`)
 passes with `-- --ignored` in ~3 s; 6 Swift tests pass; the meeting fixture
 (`tests/fixtures/meeting`, invented Maya/Tom lines) opens in both manifest
-shapes. CI is written but has never run — the first push turns it green or
-red. The smoke list is walked in headless slices only (socket-driven record,
+shapes. Both workflows are commented out with a reactivation TODO, so no CI
+runs on push and no DMGs build on tags until they are uncommented. The smoke
+list is walked in headless slices only (socket-driven record,
 tap loopback, kill -9 safety); the on-screen lines need a display session.
 
 ## Prerequisites

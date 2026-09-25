@@ -1,21 +1,25 @@
-name: ci
-on: [push, pull_request]
-jobs:
-  macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - run: brew install gtk4 libadwaita adwaita-icon-theme cmake pkgconf ffmpeg
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release --features metal
-      - run: swift build -c release --package-path helpers/momr-audio
-      - run: swift test --package-path helpers/momr-audio
-      - uses: actions/upload-artifact@v4
-        with:
-          name: momr-macos-14
-          path: |
-            target/release/momr
-            helpers/momr-audio/.build/release/momr-audio
+# TODO: reactivate CI when automated macOS builds are wanted again. To do
+# so, uncomment the workflow below (or restore this file from git history).
+# Disabled 2026-09-25: no builds run on push/PR until this is re-enabled.
+#
+# name: ci
+# on: [push, pull_request]
+# jobs:
+#   macos:
+#     runs-on: macos-14
+#     steps:
+#       - uses: actions/checkout@v4
+#       - run: brew install gtk4 libadwaita adwaita-icon-theme cmake pkgconf ffmpeg
+#       - uses: Swatinem/rust-cache@v2
+#       - run: cargo fmt --check
+#       - run: cargo clippy --all-targets -- -D warnings
+#       - run: cargo test
+#       - run: cargo build --release --features metal
+#       - run: swift build -c release --package-path helpers/momr-audio
+#       - run: swift test --package-path helpers/momr-audio
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: momr-macos-14
+#           path: |
+#             target/release/momr
+#             helpers/momr-audio/.build/release/momr-audio

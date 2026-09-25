@@ -86,7 +86,7 @@ pub fn set_override(name: &str) {
     *OVERRIDE.lock().unwrap() = Some(name.trim().to_owned());
 }
 
-fn config_file() -> PathBuf {
+pub fn config_file() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -95,24 +95,34 @@ fn config_file() -> PathBuf {
         .join("config.toml")
 }
 
+/// The value of `key = "…"` in config.toml, comments stripped; None when the
+/// key is absent or empty.
+pub fn config_value(key: &str) -> Option<String> {
+    std::fs::read_to_string(config_file())
+        .ok()
+        .and_then(|text| parse_config_value(&text, key))
+}
+
+/// The value of `key = "…"` in one config file's text, so tests can cover the
+/// shape without touching the real file.
+fn parse_config_value(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| {
+            let (found, value) = line.split_once('=')?;
+            (found.trim() == key).then(|| {
+                let value = value.split('#').next().unwrap_or("");
+                value.trim().trim_matches('"').to_owned()
+            })
+        })
+        .filter(|value| !value.is_empty())
+}
+
 /// The configured model: a name from `MODELS` or a path to a model file.
 pub fn configured() -> String {
     if let Some(name) = OVERRIDE.lock().unwrap().clone() {
         return name;
     }
-    std::fs::read_to_string(config_file())
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "model").then(|| {
-                    let value = value.split('#').next().unwrap_or("");
-                    value.trim().trim_matches('"').to_owned()
-                })
-            })
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| DEFAULT.to_owned())
+    config_value("model").unwrap_or_else(|| DEFAULT.to_owned())
 }
 
 fn known(name: &str) -> Option<&'static Model> {
@@ -206,5 +216,14 @@ mod tests {
         assert_eq!(known("large-v3").map(|m| m.name), Some("large-v3"));
         assert_eq!(known("ggml-small.en.bin").map(|m| m.name), Some("small.en"));
         assert!(known("gpt-5").is_none());
+    }
+
+    #[test]
+    fn config_values_read_by_key() {
+        let text = "model = \"tiny\" # for tests\nagent = \"claude\"\n";
+        assert_eq!(parse_config_value(text, "model").as_deref(), Some("tiny"));
+        assert_eq!(parse_config_value(text, "agent").as_deref(), Some("claude"));
+        assert_eq!(parse_config_value(text, "missing"), None);
+        assert_eq!(parse_config_value("agent = \"\"\n", "agent"), None);
     }
 }

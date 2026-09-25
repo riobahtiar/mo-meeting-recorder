@@ -1,10 +1,10 @@
-//! Runs a prompt through the coding agent Omarchy is set up with
-//! (`omarchy-default-agent`), headless and without tools.
+//! Runs a prompt through the coding agent named by `agent = "…"` in
+//! config.toml, headless and without tools.
 //!
-//! This is a port of the runner in the text-transform plugin
-//! (github.com/jankeesvw/omarchy-text-transform, `bin/text-transform`: agent
-//! detection, `build_command`, `read_answer`, `tidy`). The per-agent flags are
-//! the part that goes stale when an agent ships a new feature, so keep the two
+//! The runner is a port of the agent runner in the upstream author's
+//! text-transform plugin (`bin/text-transform`: agent detection,
+//! `build_command`, `read_answer`, `tidy`). The per-agent flags are the part
+//! that goes stale when an agent ships a new feature, so keep the two
 //! in sync.
 //!
 //! The text handed to the agent is untrusted: a transcript is whatever was said
@@ -31,6 +31,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -88,7 +89,7 @@ const CODEX_NO_TOOLS: &[&str] = &[
 /// The default agent, when one is set and can be driven safely.
 #[derive(Clone, Debug)]
 pub struct Agent {
-    /// The id `omarchy-default-agent` prints, e.g. "claude".
+    /// The id from `agent = "…"` in config.toml, e.g. "claude".
     pub id: String,
     /// For the UI, e.g. "Claude Code".
     pub name: &'static str,
@@ -97,7 +98,7 @@ pub struct Agent {
 /// Why there is no usable agent, for a message in the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unavailable {
-    /// No default agent picked (`omarchy default agent <name>`).
+    /// No agent named in config.toml.
     Unset,
     /// Picked but not on PATH.
     Missing(String),
@@ -111,7 +112,8 @@ impl std::fmt::Display for Unavailable {
             Unavailable::Unset => {
                 write!(
                     f,
-                    "No default agent. Pick one with: omarchy default agent <name>"
+                    "No agent set. Add agent = \"claude\" to {}",
+                    crate::models::config_file().display()
                 )
             }
             Unavailable::Missing(id) => write!(f, "{id} is not installed"),
@@ -127,20 +129,19 @@ pub fn default_agent() -> Option<Agent> {
 
 /// The default agent, or why it cannot be used.
 pub fn status() -> Result<Agent, Unavailable> {
-    let id = Command::new("omarchy-default-agent")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .split_whitespace()
-                .collect::<String>()
-        })
-        .unwrap_or_default();
+    status_with(
+        || crate::models::config_value("agent"),
+        |id| which(id).is_some(),
+    )
+}
+
+/// The default agent from an id source and an install check passed as
+/// closures, so tests can cover selection without a config file or PATH.
+fn status_with(
+    configured_id: impl FnOnce() -> Option<String>,
+    installed: impl FnOnce(&str) -> bool,
+) -> Result<Agent, Unavailable> {
+    let id = configured_id().unwrap_or_default();
     if id.is_empty() {
         return Err(Unavailable::Unset);
     }
@@ -148,7 +149,7 @@ pub fn status() -> Result<Agent, Unavailable> {
     if !supported(&id) {
         return Err(Unavailable::Refused(refusal(&id)));
     }
-    if which(&id).is_none() {
+    if !installed(&id) {
         return Err(Unavailable::Missing(id));
     }
     if let Some(blocker) = blocker(&id) {
@@ -431,32 +432,61 @@ pub fn run(agent: &Agent, prompt: &str, text: &str) -> Result<String, String> {
 
 fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
     let built = build(&agent.id, prompt, dir)?;
+    run_built(agent, &built, prompt, dir, TIMEOUT)
+}
+
+/// The `sh` wrapper around the agent: `sh -c <script> sh <file-limit-kb>
+/// <program> <args…>`, with `gtimeout -k 5 <timeout>` inside when it is on
+/// `PATH`. Takes the flag as a parameter so tests can cover both shapes.
+fn sh_command(built: &Built, timeout: Duration, gtimeout: bool) -> Command {
+    let script = if gtimeout {
+        format!(
+            r#"ulimit -f "$1" && shift && exec gtimeout -k 5 {} "$@" "#,
+            timeout.as_secs()
+        )
+    } else {
+        r#"ulimit -f "$1" && shift && exec "$@" "#.to_owned()
+    };
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .arg(built.file_limit_kb.to_string())
+        .arg(&built.program)
+        .args(&built.args);
+    // SAFETY: setsid is async-signal-safe and touches only the child's own
+    // state. It is the direct equivalent of the `setsid` binary: a new
+    // session, so its own process group (pid == pgid, which `kill_group`
+    // relies on) and no controlling terminal.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command
+}
+
+fn run_built(
+    agent: &Agent,
+    built: &Built,
+    prompt: &str,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
     let (out_path, err_path) = (dir.join("stdout.txt"), dir.join("stderr.txt"));
     let stdout = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
     let stderr = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
 
     // `ulimit -f` has to be set in the process that becomes the agent, so it
     // goes through a shell that execs it. The agent's stdout and stderr go to
-    // files, which is what the limit bounds.
-    //
-    // `setsid` gives it a session of its own: its own process group, so a
-    // timeout kills everything it started, and no controlling terminal. With
-    // only a new process group, an agent that touches the terminal it
-    // inherited is stopped by the kernel (SIGTTIN) and hangs until the timeout.
-    // The child is not a group leader, so setsid execs in place and keeps its
-    // pid, which is then also the group id.
-    let mut command = Command::new("setsid");
+    // files, which is what the limit bounds. `sh_command` puts it in its own
+    // session through `pre_exec(setsid)`, and wraps it in `gtimeout` when that
+    // is on PATH, so the agent is bounded even when this process dies before
+    // the loop below can kill it; the loop is the backstop.
+    let mut command = sh_command(built, timeout, which("gtimeout").is_some());
     command
-        .arg("sh")
-        .arg("-c")
-        // GNU timeout inside as well, so the agent is bounded even when this
-        // process dies before it can kill it; the loop below is the backstop.
-        .arg(r#"ulimit -f "$1" && secs=$2 && shift 2 && exec timeout -k 5 "$secs" "$@""#)
-        .arg("sh")
-        .arg(built.file_limit_kb.to_string())
-        .arg(TIMEOUT.as_secs().to_string())
-        .arg(&built.program)
-        .args(&built.args)
         .envs(built.env.iter().map(|(k, v)| (k, v)))
         .current_dir(dir)
         .stdin(if built.stdin {
@@ -483,7 +513,7 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() > TIMEOUT + KILL_GRACE * 2 => break None,
+            Ok(None) if started.elapsed() > timeout + KILL_GRACE * 2 => break None,
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(e.to_string()),
         }
@@ -499,7 +529,7 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
         return Err(format!(
             "{} did not answer within {} seconds",
             agent.name,
-            TIMEOUT.as_secs()
+            timeout.as_secs()
         ));
     };
     if let Some(writer) = writer {
@@ -515,12 +545,12 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
 
     // A failing agent says why, and not always on stderr: some print their
     // refusal to stdout, where it would otherwise pass for the answer.
-    // 124 is timeout's own exit status, 137 a KILL after its grace period.
+    // 124 is gtimeout's own exit status, 137 a KILL after its grace period.
     if matches!(status.code(), Some(124 | 137)) {
         return Err(format!(
             "{} did not answer within {} seconds",
             agent.name,
-            TIMEOUT.as_secs()
+            timeout.as_secs()
         ));
     }
     if !status.success() {
@@ -904,5 +934,96 @@ not json"#;
         );
         assert_eq!(first_line("\n  \nboom\nmore").as_deref(), Some("boom"));
         assert_eq!(first_line("   "), None);
+    }
+
+    #[test]
+    fn empty_and_missing_config_give_unset() {
+        let missing = |_: &str| false;
+        assert!(matches!(
+            status_with(|| None, missing),
+            Err(Unavailable::Unset)
+        ));
+        assert!(matches!(
+            status_with(|| Some(String::new()), missing),
+            Err(Unavailable::Unset)
+        ));
+    }
+
+    #[test]
+    fn refused_missing_and_usable_agents_pass_through() {
+        let missing = |_: &str| false;
+        assert!(matches!(
+            status_with(|| Some("crush".into()), missing),
+            Err(Unavailable::Refused(_))
+        ));
+        assert_eq!(
+            status_with(|| Some("claude".into()), missing).map(|agent| agent.id),
+            Err(Unavailable::Missing("claude".into()))
+        );
+        let installed = |_: &str| true;
+        assert_eq!(
+            status_with(|| Some("claude".into()), installed).map(|agent| agent.id),
+            Ok("claude".to_owned())
+        );
+    }
+
+    fn command_argv(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn fake_built() -> Built {
+        Built {
+            program: "agent".into(),
+            args: vec!["-p".into()],
+            env: Vec::new(),
+            stdin: true,
+            file_limit_kb: FILE_LIMIT_KB,
+        }
+    }
+
+    #[test]
+    fn wrapper_argv_without_gtimeout() {
+        let argv = command_argv(&sh_command(&fake_built(), Duration::from_secs(300), false));
+        assert_eq!(argv[0], "-c");
+        assert!(argv[1].contains("ulimit -f"));
+        assert!(!argv[1].contains("gtimeout"));
+        assert_eq!(&argv[2..6], ["sh", "2048", "agent", "-p"]);
+    }
+
+    #[test]
+    fn wrapper_argv_with_gtimeout_inserts_the_inner_bound() {
+        let argv = command_argv(&sh_command(&fake_built(), Duration::from_secs(300), true));
+        assert!(argv[1].contains("gtimeout -k 5 300"));
+        assert_eq!(&argv[2..6], ["sh", "2048", "agent", "-p"]);
+    }
+
+    #[test]
+    fn hung_agent_is_killed_with_its_group() {
+        let dir = workdir().expect("workdir");
+        let agent = Agent {
+            id: "pi".into(),
+            name: "Pi",
+        };
+        let built = Built {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 1000".into()],
+            env: Vec::new(),
+            stdin: false,
+            file_limit_kb: FILE_LIMIT_KB,
+        };
+        let started = Instant::now();
+        let error = run_built(&agent, &built, "", &dir, Duration::from_secs(2)).unwrap_err();
+        assert!(error.contains("did not answer within 2 seconds"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lingering = Command::new("pgrep")
+            .args(["-f", "sleep 1000"])
+            .output()
+            .map(|out| !out.stdout.is_empty())
+            .unwrap_or(false);
+        assert!(!lingering, "the agent's process group survived");
     }
 }

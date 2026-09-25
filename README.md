@@ -11,7 +11,7 @@
 | Compiles on macOS; command-line transcription works | [02](plans/02-compile-on-macos.md) | done — `cargo build --release`, `cargo test` (24 passed), clippy and fmt clean; `transcribe-file` works on CPU and with `--features metal`; window opens, meters flat (no capture until plan 03) |
 | Records the microphone and the computer audio | [03](plans/03-audio-capture.md) | in progress — helper captures both (tap plays back at 0.77 peak), staging tracks equal length, transcribe gives You and Remote; drawn meters and device switching need a display session |
 | Plays back; compact strip; ⌘ shortcuts | [04](plans/04-playback-window-shortcuts.md) | in progress — audiotoolbox playback, `run` watchdog (kill -9 safe), caffeinate held/reaped, ⌘ accelerators; in-app seek and strip need a display session |
-| Chapters through an agent set in `config.toml` | [05](plans/05-agent-and-config.md) | not started |
+| Chapters through an agent set in `config.toml` | [05](plans/05-agent-and-config.md) | in progress — `agent = "…"` selects, `ask` runs live (pi), crush refused, hung group killed in test; long-meeting chapters need a display session |
 | Files under `~/Library`; works when launched from Finder | [06](plans/06-paths-and-environment.md) | not started |
 | Native menu bar, window chrome, system font, Apple colours, Preferences, About | [07](plans/07-macos-look-and-feel.md) | not started |
 | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | [08](plans/08-app-bundle-and-distribution.md) | not started |

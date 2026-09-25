@@ -6,11 +6,19 @@ Chapters work with an agent the user names in `config.toml`, run under the same 
 
 ## Done when
 
-- [ ] `momr ask --agent` prints the configured agent.
-- [ ] `echo "Say hi" | momr ask "Answer in one word"` returns text within the timeout.
+- [x] `momr ask --agent` prints the configured agent.
+- [x] `echo "Say hi" | momr ask "Answer in one word"` returns text within the timeout.
 - [ ] A three-minute-plus meeting gets chapters; the Chapters header regenerates them.
-- [ ] A hung agent is killed with its whole process group at the timeout (fake agent: `sh -c 'sleep 1000'`).
-- [ ] `grep -n omarchy src/agent.rs` finds nothing.
+- [x] A hung agent is killed with its whole process group at the timeout (fake agent: `sh -c 'sleep 1000'`).
+- [x] `grep -n omarchy src/agent.rs` finds nothing.
+
+Observed 2026-09-25: with `agent = "pi"` in config.toml, `ask --agent`
+prints `Pi (pi)` and a live run repeats its stdin through the new
+`pre_exec(setsid)` wrapper in 2.5 s; `agent = "crush"` refuses with the
+reason; a missing key names the config file path. `ulimit -f` caps writes on
+macOS `sh` as the wrapper assumes. No `gtimeout` is installed here, so the
+inner bound is covered by the argv-shape test only. Chapters on a long
+meeting still need a display session (record three minutes, check chapters).
 
 ## Prerequisites
 
@@ -103,8 +111,8 @@ The flag table needs no change: `claude`, `codex`, `opencode`, `pi`, `copilot`, 
 
 ## Status
 
-- [ ] Step 1 `config_value`
-- [ ] Step 2 selection from config, Omarchy lookup gone
-- [ ] Step 3 `pre_exec(setsid)`, optional `gtimeout`
-- [ ] Step 4 agents found (depends on plan 06 for GUI)
-- [ ] Step 5 tests
+- [x] Step 1 `config_value`
+- [x] Step 2 selection from config, Omarchy lookup gone
+- [x] Step 3 `pre_exec(setsid)`, optional `gtimeout`
+- [x] Step 4 agents found (depends on plan 06 for GUI)
+- [x] Step 5 tests

@@ -22,7 +22,7 @@ Checkbox states: `[ ]` not started, `[~]` in progress, `[x]` done.
 | [02 Compile on macOS](02-compile-on-macos.md) | `cargo build` and `cargo test` pass; Omarchy leftovers that only a compiler can check are gone | | 1 Works | `[x]` |
 | [03 Audio capture](03-audio-capture.md) | Both meters move; recording writes both tracks | 02 | 1 Works | `[~]` |
 | [04 Playback, window, shortcuts](04-playback-window-shortcuts.md) | Play and seek; children die with the app; compact strip; ⌘ shortcuts | 02 | 1 Works | `[~]` |
-| [05 Agent and config](05-agent-and-config.md) | Chapters through an agent named in config, same no-tools boundary | 02 | 1 Works | `[ ]` |
+| [05 Agent and config](05-agent-and-config.md) | Chapters through an agent named in config, same no-tools boundary | 02 | 1 Works | `[~]` |
 | [06 Paths and environment](06-paths-and-environment.md) | Files under `~/Library`; Finder-launched app finds its tools | 02 | 1 Works | `[ ]` |
 | [07 macOS look and feel](07-macos-look-and-feel.md) | Native menu bar, window chrome, typography, controls, colours, Preferences, About | 03, 04, 06 | 2 Feels native | `[ ]` |
 | [08 App bundle and distribution](08-app-bundle-and-distribution.md) | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | 03, 04, 05, 06 | 3 Ships | `[ ]` |

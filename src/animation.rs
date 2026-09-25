@@ -1,11 +1,12 @@
-//! The transcribing animation: a 90s demoscene take on the Omacon look.
+//! The transcribing animation: a 90s demoscene look.
 //!
 //! A synthwave grid scrolls towards you under a setting, striped neon sun, with
 //! a decrypting, glitching title, a segmented progress bar, the last lines of
 //! transcript typing themselves out, and CRT scanlines plus stepped film grain
 //! on top.
 //!
-//! The colours come from omacom/omacon-site.
+//! Inside the app the colours come from the Apple palette in `theme.rs`; the
+//! constants below are upstream's original scene colours, kept as fallbacks.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,26 +20,27 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
 }
 
-// The Omacon colours, used when there is no Omarchy theme. With a theme the
-// scene takes its background, text, accent and cyan from it.
-const OMACON_DARK: Rgb = rgb(13, 8, 38);
-const OMACON_LIGHT: Rgb = rgb(248, 245, 242);
-const OMACON_PINK: Rgb = rgb(255, 138, 255);
-const OMACON_CYAN: Rgb = rgb(80, 220, 255);
+// Fallback colours, used only until `theme::follow` has loaded a palette
+// (both the app and the preview example call it at startup). After that the
+// scene takes its background, text, accent and cyan from `theme.rs`.
+const FALLBACK_DARK: Rgb = rgb(13, 8, 38);
+const FALLBACK_LIGHT: Rgb = rgb(248, 245, 242);
+const FALLBACK_PINK: Rgb = rgb(255, 138, 255);
+const FALLBACK_CYAN: Rgb = rgb(80, 220, 255);
 
 fn dark() -> Rgb {
-    crate::theme::color("darker_background", OMACON_DARK)
+    crate::theme::color("darker_background", FALLBACK_DARK)
 }
 
 fn light() -> Rgb {
     crate::theme::color(
         "bright_foreground",
-        crate::theme::color("foreground", OMACON_LIGHT),
+        crate::theme::color("foreground", FALLBACK_LIGHT),
     )
 }
 
 fn neon_color() -> Rgb {
-    crate::theme::color("accent", OMACON_PINK)
+    crate::theme::color("accent", FALLBACK_PINK)
 }
 
 fn neon_dark() -> Rgb {
@@ -50,7 +52,7 @@ fn neon_light() -> Rgb {
 }
 
 fn glitch() -> Rgb {
-    crate::theme::color("cyan", OMACON_CYAN)
+    crate::theme::color("cyan", FALLBACK_CYAN)
 }
 
 const TITLE: &str = "TRANSCRIBING";
@@ -64,7 +66,7 @@ const ROW: f64 = 1.55;
 /// The transcript lines are set smaller than the stage line, so more of them fit.
 const TEXT_SCALE: f64 = 0.8;
 
-/// The same cubic in-out the Omacon header uses.
+/// A cubic ease-in-out.
 fn ease(t: f64) -> f64 {
     if t < 0.5 {
         4.0 * t * t * t
@@ -469,6 +471,8 @@ fn hud(cr: &Context, w: f64, h: f64, horizon: f64, m: &Model) {
 
     font(cr, size, true);
     let line1 = panel_top + size * 1.5;
+    // The app sets a stage before the animation runs; only the preview
+    // example, which has no locales, ever shows this placeholder.
     let stage = if m.stage.is_empty() {
         "Warming up"
     } else {

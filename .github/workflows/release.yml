@@ -1,0 +1,52 @@
+# TODO: reactivate release builds when DMGs are wanted again. To do so,
+# uncomment the workflow below (or restore this file from git history).
+# Disabled 2026-09-25: no DMGs build on tags until this is re-enabled.
+#
+# name: release
+# on:
+#   push:
+#     tags: ["v*"]
+# jobs:
+#   dmg:
+#     # Two architecture-specific DMGs (D19): arm64 and Intel. Adjust the Intel
+#     # label if GitHub retires it; the point is one DMG per architecture.
+#     strategy:
+#       matrix:
+#         include:
+#           - runner: macos-14
+#             arch: arm64
+#           - runner: macos-15-intel
+#             arch: x86_64
+#     runs-on: ${{ matrix.runner }}
+#     steps:
+#       - uses: actions/checkout@v4
+#       - run: brew install gtk4 libadwaita adwaita-icon-theme ffmpeg cmake pkgconf dylibbundler create-dmg
+#       - uses: Swatinem/rust-cache@v2
+#       - run: sh scripts/bundle-macos.sh
+#       - name: Sign
+#         if: ${{ secrets.APPLE_IDENTITY != '' }}
+#         run: |
+#           APP="target/bundle/MOM Recorder.app"
+#           find "$APP/Contents/Frameworks" -name '*.dylib' -exec codesign --force --timestamp --options runtime --sign "${{ secrets.APPLE_IDENTITY }}" {} \;
+#           for b in momr-audio momr-menubar ffmpeg ffprobe; do
+#             codesign --force --timestamp --options runtime --sign "${{ secrets.APPLE_IDENTITY }}" "$APP/Contents/MacOS/$b"
+#           done
+#           codesign --force --timestamp --options runtime --entitlements packaging/macos/entitlements.plist --sign "${{ secrets.APPLE_IDENTITY }}" "$APP"
+#           codesign --verify --deep --strict --verbose=2 "$APP"
+#       - name: DMG
+#         run: |
+#           VERSION="${GITHUB_REF_NAME#v}"
+#           create-dmg --volname "MOM Recorder" --app-drop-link 450 200 \
+#             "MOMRecorder-$VERSION-${{ matrix.arch }}.dmg" "target/bundle/"
+#       - name: Notarize
+#         if: ${{ secrets.APPLE_ID != '' }}
+#         run: |
+#           xcrun notarytool submit "MOMRecorder-${GITHUB_REF_NAME#v}-${{ matrix.arch }}.dmg" \
+#             --apple-id "${{ secrets.APPLE_ID }}" \
+#             --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+#             --password "${{ secrets.APPLE_APP_PASSWORD }}" --wait
+#           xcrun stapler staple "MOMRecorder-${GITHUB_REF_NAME#v}-${{ matrix.arch }}.dmg"
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: momr-${{ matrix.arch }}
+#           path: "MOMRecorder-*.dmg"

@@ -28,7 +28,9 @@ pub fn turns(
     abort: &Abort,
 ) -> Result<Vec<Turn>, String> {
     let path = crate::nemotron::ensure(events, abort)?;
-    let _ = events.send_blocking(Event::Stage("Finding speakers".into()));
+    let _ = events.send_blocking(Event::Stage(
+        crate::locales::t("stage.finding_speakers").into(),
+    ));
     let _ = events.send_blocking(Event::Progress(0.0));
     let mut model = crate::nemotron::Model::load(&path)?;
     let probs = model.probabilities(samples, events, abort)?;
@@ -209,7 +211,10 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("Usage: {} diarize <audio> [--speakers N]", crate::APP_NAME);
+        eprintln!(
+            "{}",
+            crate::locales::t("cli.diarize").replace("{}", crate::APP_NAME)
+        );
         return gtk::glib::ExitCode::from(2);
     };
     let result = crate::transcribe::load_track(&path).and_then(|samples| {

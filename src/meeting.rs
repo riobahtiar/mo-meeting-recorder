@@ -13,8 +13,43 @@ use crate::chapters::Chapter;
 use crate::export::Format;
 
 pub const EXTENSION: &str = "meeting-recorder";
+/// The default speaker labels. They are transcript content, not chrome:
+/// `transcript.md` is read by users' scripts and shared with upstream, so
+/// the labels stay English whatever the interface language, and a meeting
+/// from either app renames the same way.
 pub const DEFAULT_YOU: &str = "You";
 pub const DEFAULT_REMOTE: &str = "Remote";
+const REMOTE_PREFIX: &str = "Remote ";
+const SPEAKER_PREFIX: &str = "Speaker ";
+
+pub fn default_you() -> &'static str {
+    DEFAULT_YOU
+}
+
+pub fn default_remote() -> &'static str {
+    DEFAULT_REMOTE
+}
+
+/// "Remote N" for several voices on the computer audio.
+pub fn remote_n(n: usize) -> String {
+    format!("{REMOTE_PREFIX}{n}")
+}
+
+/// "Speaker N" for imports and fallbacks.
+pub fn speaker_n(n: usize) -> String {
+    format!("{SPEAKER_PREFIX}{n}")
+}
+
+/// The N of a `remote_n` label, the inverse kept next to the formatter so the
+/// two cannot drift apart.
+pub fn parse_remote_n(label: &str) -> Option<usize> {
+    label.strip_prefix(REMOTE_PREFIX)?.parse().ok()
+}
+
+/// The N of a `speaker_n` label.
+pub fn parse_speaker_n(label: &str) -> Option<usize> {
+    label.strip_prefix(SPEAKER_PREFIX)?.parse().ok()
+}
 
 #[derive(Clone, Debug)]
 pub struct Manifest {
@@ -32,8 +67,12 @@ pub struct Manifest {
     pub imported: Option<String>,
     /// How many speakers were asked for on import; None means automatic.
     pub speaker_count: Option<usize>,
-    /// The whisper model the transcript was made with.
+    /// The whisper model the transcript was made with, when it was local.
     pub model: Option<String>,
+    /// Which engine made the transcript: a `provider::Provider` id such as
+    /// "local" or "elevenlabs". Absent in meetings from upstream and from
+    /// before providers existed; older readers ignore the key.
+    pub provider: Option<String>,
     /// Chapters made by an agent, empty when there are none.
     pub chapters: Vec<Chapter>,
     /// Which agent made them, e.g. "claude".
@@ -54,6 +93,7 @@ impl Manifest {
             "imported": self.imported,
             "speaker_count": self.speaker_count,
             "model": self.model,
+            "provider": self.provider,
             "chapters": self.chapters.iter()
                 .map(|c| json!({ "start_ms": c.start_ms, "title": c.title }))
                 .collect::<Vec<_>>(),
@@ -71,19 +111,20 @@ impl Manifest {
             speakers: match &value["speakers"] {
                 // Before imports existed, a recording kept {"you", "remote"}.
                 Value::Object(_) => vec![
-                    name(&value["speakers"]["you"], DEFAULT_YOU),
-                    name(&value["speakers"]["remote"], DEFAULT_REMOTE),
+                    name(&value["speakers"]["you"], default_you()),
+                    name(&value["speakers"]["remote"], default_remote()),
                 ],
                 Value::Array(list) => list
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| name(v, &format!("Speaker {}", i + 1)))
+                    .map(|(i, v)| name(v, &speaker_n(i + 1)))
                     .collect(),
-                _ => vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()],
+                _ => vec![default_you().to_owned(), default_remote().to_owned()],
             },
             imported: value["imported"].as_str().map(str::to_owned),
             speaker_count: value["speaker_count"].as_u64().map(|n| n as usize),
             model: value["model"].as_str().map(str::to_owned),
+            provider: value["provider"].as_str().map(str::to_owned),
             chapters: value["chapters"]
                 .as_array()
                 .map(|list| {
@@ -108,16 +149,14 @@ impl Manifest {
     /// audio holds several voices) for a recording, Speaker N for an import.
     pub fn default_labels(&self) -> Vec<String> {
         if self.imported.is_some() {
-            (1..=self.speakers.len().max(1))
-                .map(|i| format!("Speaker {i}"))
-                .collect()
+            (1..=self.speakers.len().max(1)).map(speaker_n).collect()
         } else if self.speakers.len() > 2 {
             // Several voices on the computer audio: Remote 1, Remote 2, ...
-            std::iter::once(DEFAULT_YOU.to_owned())
-                .chain((1..self.speakers.len()).map(|i| format!("{DEFAULT_REMOTE} {i}")))
+            std::iter::once(default_you().to_owned())
+                .chain((1..self.speakers.len()).map(remote_n))
                 .collect()
         } else {
-            vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()]
+            vec![default_you().to_owned(), default_remote().to_owned()]
         }
     }
 }
@@ -238,10 +277,11 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
         duration_secs: 0,
         format,
         language: "auto".to_owned(),
-        speakers: vec![DEFAULT_YOU.to_owned(), DEFAULT_REMOTE.to_owned()],
+        speakers: vec![default_you().to_owned(), default_remote().to_owned()],
         imported: None,
         speaker_count: None,
         model: None,
+        provider: None,
         chapters: Vec::new(),
         chapters_by: None,
     })
@@ -249,7 +289,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
 
 #[cfg(test)]
 mod tests {
-    use super::relabel;
+    use super::{Chapter, Format, Manifest, json, relabel};
 
     const MD: &str = "# Weekly\n\n**[00:01] You:** Hi.\n\n**[00:03] Remote:** You: said hi.\n";
 
@@ -268,5 +308,87 @@ mod tests {
         let out = relabel(&tmp, "\u{1}", "Remote");
         assert!(out.contains("**[00:01] Remote:** Hi."));
         assert!(out.contains("**[00:03] You:** You: said hi."));
+    }
+
+    /// The checked-in invented meeting opens with its names and settings.
+    #[test]
+    fn fixture_folder_opens() {
+        let dir = std::path::Path::new("tests/fixtures/meeting");
+        let (folder, manifest) = super::open(dir).expect("fixture opens");
+        assert_eq!(folder, dir);
+        assert_eq!(manifest.title, "Demo");
+        assert_eq!(manifest.speakers, vec!["Maya".to_owned(), "Tom".to_owned()]);
+        assert_eq!(manifest.language, "en");
+        let (mic, computer) = crate::export::tracks(&folder);
+        assert!(mic.is_file() && computer.is_file());
+    }
+
+    /// An upstream manifest in the old `{"you", "remote"}` shape still reads.
+    #[test]
+    fn legacy_manifest_shape_reads() {
+        let (_, manifest) = super::open(std::path::Path::new(
+            "tests/fixtures/legacy/Legacy.meeting-recorder",
+        ))
+        .expect("legacy opens");
+        assert_eq!(manifest.title, "Legacy");
+        assert_eq!(manifest.speakers, vec!["Maya".to_owned(), "Tom".to_owned()]);
+        assert_eq!(manifest.provider, None);
+    }
+
+    /// Missing names fall back to the labels upstream wrote into the
+    /// transcript, so renaming an old meeting finds them.
+    #[test]
+    fn missing_speakers_default_to_upstream_labels() {
+        let manifest = Manifest::from_json(&json!({"title": "x", "started_at": 0})).expect("reads");
+        assert_eq!(
+            manifest.speakers,
+            vec!["You".to_owned(), "Remote".to_owned()]
+        );
+        let half = Manifest::from_json(
+            &json!({"title": "x", "started_at": 0, "speakers": {"you": "Maya"}}),
+        )
+        .expect("reads");
+        assert_eq!(half.speakers, vec!["Maya".to_owned(), "Remote".to_owned()]);
+    }
+
+    #[test]
+    fn manifest_round_trips() {
+        let manifest = Manifest {
+            title: "Weekly".into(),
+            started_at: 1_767_225_600,
+            duration_secs: 42,
+            format: Format::Separate,
+            language: "id".into(),
+            speakers: vec!["Speaker 1".into(), "Speaker 2".into()],
+            imported: Some("call.mp3".into()),
+            speaker_count: Some(2),
+            model: None,
+            provider: Some("elevenlabs".into()),
+            chapters: vec![Chapter {
+                start_ms: 1000,
+                title: "Intro".into(),
+            }],
+            chapters_by: Some("claude".into()),
+        };
+        let back = Manifest::from_json(&manifest.to_json()).expect("reads back");
+        assert_eq!(back.title, manifest.title);
+        assert_eq!(back.duration_secs, 42);
+        assert_eq!(back.format.key(), Format::Separate.key());
+        assert_eq!(back.language, "id");
+        assert_eq!(back.speakers, manifest.speakers);
+        assert_eq!(back.imported.as_deref(), Some("call.mp3"));
+        assert_eq!(back.speaker_count, Some(2));
+        assert_eq!(back.provider.as_deref(), Some("elevenlabs"));
+        assert_eq!(back.chapters.len(), 1);
+        assert_eq!(back.chapters[0].title, "Intro");
+        assert_eq!(back.chapters_by.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn numbered_labels_parse_back() {
+        assert_eq!(super::parse_remote_n(&super::remote_n(3)), Some(3));
+        assert_eq!(super::parse_speaker_n(&super::speaker_n(12)), Some(12));
+        assert_eq!(super::parse_remote_n("Remote"), None);
+        assert_eq!(super::parse_speaker_n("Remote 2"), None);
     }
 }

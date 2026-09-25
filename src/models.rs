@@ -1,7 +1,7 @@
 //! Which whisper model transcribes, where it is on disk, and fetching it.
 //!
 //! The model is picked with `--model` on the command line, or `model = "…"`
-//! in `~/.config/omarchy-meeting-recorder/config.toml`, and is
+//! in config.toml (`~/Library/Application Support/momr/config.toml`), and is
 //! `large-v3-turbo` otherwise. A name from `MODELS` is looked for in the app's
 //! own model folder and in voxtype's (same files, no need to have them twice),
 //! and downloaded when it is in neither. A path to a `.bin` file is used as is.
@@ -86,13 +86,34 @@ pub fn set_override(name: &str) {
     *OVERRIDE.lock().unwrap() = Some(name.trim().to_owned());
 }
 
-fn config_file() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".config"))
-        .join(crate::APP_NAME)
-        .join("config.toml")
+pub fn config_file() -> PathBuf {
+    crate::paths::config_file()
+}
+
+/// The value of `key = "…"` in config.toml, comments stripped; None when the
+/// key is absent or empty.
+pub fn config_value(key: &str) -> Option<String> {
+    std::fs::read_to_string(config_file())
+        .ok()
+        .and_then(|text| parse_config_value(&text, key))
+}
+
+/// The value of `key = "…"` in one config file's text, so tests can cover the
+/// shape without touching the real file. A quoted value runs to its closing
+/// quote, so a `#` inside it is kept; after an unquoted one it starts a comment.
+fn parse_config_value(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| {
+            let (found, value) = line.split_once('=')?;
+            (found.trim() == key).then(|| {
+                let value = value.trim();
+                match value.strip_prefix('"') {
+                    Some(quoted) => quoted.split('"').next().unwrap_or("").to_owned(),
+                    None => value.split('#').next().unwrap_or("").trim().to_owned(),
+                }
+            })
+        })
+        .filter(|value| !value.is_empty())
 }
 
 /// The configured model: a name from `MODELS` or a path to a model file.
@@ -100,19 +121,64 @@ pub fn configured() -> String {
     if let Some(name) = OVERRIDE.lock().unwrap().clone() {
         return name;
     }
-    std::fs::read_to_string(config_file())
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "model").then(|| {
-                    let value = value.split('#').next().unwrap_or("");
-                    value.trim().trim_matches('"').to_owned()
-                })
-            })
+    config_value("model").unwrap_or_else(|| DEFAULT.to_owned())
+}
+
+/// Rewrites `key = "value"` in config.toml, appending it when absent and
+/// keeping every other line and comment as the user wrote it. A config that
+/// exists but cannot be read is an error, never an empty file: writing only
+/// this key back would silently drop every other setting.
+pub fn save_config_value(key: &str, value: &str) -> std::io::Result<()> {
+    if value.contains(['"', '\n', '\r']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{key}: a value cannot contain quotes or line breaks"),
+        ));
+    }
+    let path = config_file();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    crate::settings::write_atomic(&path, rewrite_config_line(&text, key, value).as_bytes())
+}
+
+/// Whether the menu bar item runs, `menubar = "false"` in config.toml to turn
+/// it off. On unless switched off, since it is how a hidden window is found.
+pub fn menubar_enabled() -> bool {
+    config_value("menubar").as_deref() != Some("false")
+}
+
+pub fn save_menubar_enabled(on: bool) -> std::io::Result<()> {
+    save_config_value("menubar", if on { "true" } else { "false" })
+}
+
+/// `text` with `key = "value"` replaced or appended.
+fn rewrite_config_line(text: &str, key: &str, value: &str) -> String {
+    let line = format!("{key} = \"{value}\"");
+    let mut replaced = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|existing| {
+            if !replaced
+                && existing
+                    .split_once('=')
+                    .is_some_and(|(k, _)| k.trim() == key)
+            {
+                replaced = true;
+                line.clone()
+            } else {
+                existing.to_owned()
+            }
         })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| DEFAULT.to_owned())
+        .collect();
+    if !replaced {
+        out.push(line);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
 }
 
 fn known(name: &str) -> Option<&'static Model> {
@@ -125,11 +191,11 @@ fn file_name(model: &Model) -> String {
     format!("ggml-{}.bin", model.name)
 }
 
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".local/share"))
+/// voxtype's models: same files, no need to have them twice. Homebrew's GLib
+/// has no Cocoa support (D22), so this is `~/.local/share/voxtype/models`,
+/// where voxtype keeps them; that is on purpose (plan 06), not a leftover.
+fn voxtype_models() -> PathBuf {
+    glib::user_data_dir().join("voxtype/models")
 }
 
 /// A complete model file: at least most of its expected size.
@@ -142,7 +208,7 @@ fn usable(path: &Path, model: Option<&Model>) -> bool {
 pub fn find() -> Option<PathBuf> {
     let name = configured();
     match known(&name) {
-        Some(model) => [models_dir(), data_dir().join("voxtype/models")]
+        Some(model) => [models_dir(), voxtype_models()]
             .into_iter()
             .map(|dir| dir.join(file_name(model)))
             .find(|path| usable(path, Some(model))),
@@ -184,7 +250,7 @@ pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
     download(
         &url,
         &target,
-        "Downloading model",
+        crate::locales::t("download.model"),
         u64::from(model.size_mb) * 800_000,
         events,
         abort,
@@ -206,5 +272,35 @@ mod tests {
         assert_eq!(known("large-v3").map(|m| m.name), Some("large-v3"));
         assert_eq!(known("ggml-small.en.bin").map(|m| m.name), Some("small.en"));
         assert!(known("gpt-5").is_none());
+    }
+
+    #[test]
+    fn config_values_read_by_key() {
+        let text = "model = \"tiny\" # for tests\nagent = \"claude\"\n";
+        assert_eq!(parse_config_value(text, "model").as_deref(), Some("tiny"));
+        assert_eq!(parse_config_value(text, "agent").as_deref(), Some("claude"));
+        assert_eq!(parse_config_value(text, "missing"), None);
+        assert_eq!(parse_config_value("agent = \"\"\n", "agent"), None);
+        // A '#' inside quotes is part of the value; after a bare one, a comment.
+        assert_eq!(
+            parse_config_value("openrouter_model = \"a#b\" # c\n", "openrouter_model").as_deref(),
+            Some("a#b")
+        );
+        assert_eq!(
+            parse_config_value("menubar = false # off\n", "menubar").as_deref(),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn config_lines_rewrite_and_append() {
+        let text = "# keep me\nmodel = \"tiny\"\n";
+        let rewritten = rewrite_config_line(text, "model", "small");
+        assert!(rewritten.contains("model = \"small\""));
+        assert!(rewritten.contains("# keep me"));
+        assert!(!rewritten.contains("\"tiny\""));
+        let appended = rewrite_config_line(text, "agent", "pi");
+        assert!(appended.contains("model = \"tiny\""));
+        assert!(appended.contains("agent = \"pi\""));
     }
 }

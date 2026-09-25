@@ -1,6 +1,9 @@
 //! The recorder window. It has one page per phase: recording (which can shrink
 //! to a compact strip with only the waves and the clock), transcribing (the
 //! animation, edge to edge) and done (the transcript and what to do with it).
+//! Around it: the native menu bar and the actions behind it, the Settings
+//! dialog, the About window, and the menu bar item launched next to the app.
+//! Every other module is a leaf this one calls.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -14,20 +17,25 @@ use gtk::{gio, glib};
 
 use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
-use crate::audio::{HISTORY, Source, to_meter};
+use crate::audio::{Device, HISTORY, Source, to_meter};
 use crate::chapters::{self, Chapter};
 use crate::export::{self, Format, export_audio, export_tracks};
 use crate::ipc::{self, SharedStatus, Status};
+use crate::locales::{Lang, t, tf};
 use crate::meeting::{self, Manifest};
 use crate::player::Player;
-use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGES};
+use crate::provider::{Cloud, Provider};
+use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGE_CODES, language_label};
 use crate::{APP_ID, APP_NAME, settings};
 
-const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
-const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
+const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
+const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
 const FULL_SIZE: (i32, i32) = (480, 700);
 const COMPACT_SIZE: (i32, i32) = (300, 84);
 const DONE_SIZE: (i32, i32) = (1100, 760);
+/// A recording at least this long with a computer track of exact zeros gets
+/// the permission hint; a shorter one is likely a test.
+const SILENT_HINT_SECS: i64 = 30;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
@@ -67,7 +75,86 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
 }
 
 /// Choices in the import dialog: automatic, then a fixed number.
-const SPEAKER_CHOICES: [&str; 7] = ["Automatic", "1", "2", "3", "4", "5", "6"];
+const SPEAKER_NUMBERS: [&str; 6] = ["1", "2", "3", "4", "5", "6"];
+
+/// The menu structure alone, so tests can walk every item without an app.
+fn menu_model() -> gio::Menu {
+    use gio::Menu;
+    let item = |label: &str, action: &str| gio::MenuItem::new(Some(label), Some(action));
+
+    let file = Menu::new();
+    file.append_item(&item(t("menu.new"), "win.new-recording"));
+    file.append_item(&item(t("menu.open"), "win.open-meeting"));
+    file.append_item(&item(t("menu.import"), "win.import"));
+    let finder = Menu::new();
+    finder.append_item(&item(t("menu.reveal"), "win.reveal"));
+    file.append_section(None, &finder);
+    let close = Menu::new();
+    close.append_item(&item(t("menu.close_window"), "window.close"));
+    file.append_section(None, &close);
+
+    let edit = Menu::new();
+    for (label, action) in [(t("menu.undo"), "text.undo"), (t("menu.redo"), "text.redo")] {
+        edit.append_item(&item(label, action));
+    }
+    let clipboard = Menu::new();
+    for (label, action) in [
+        (t("menu.cut"), "clipboard.cut"),
+        (t("menu.copy"), "clipboard.copy"),
+        (t("menu.paste"), "clipboard.paste"),
+        (t("menu.select_all"), "selection.select-all"),
+    ] {
+        clipboard.append_item(&item(label, action));
+    }
+    edit.append_section(None, &clipboard);
+    let transcript = Menu::new();
+    transcript.append_item(&item(t("menu.copy_transcript"), "win.copy-transcript"));
+    edit.append_section(None, &transcript);
+
+    let recording = Menu::new();
+    recording.append_item(&item(t("menu.start"), "win.start"));
+    recording.append_item(&item(t("menu.pause_resume"), "win.pause"));
+    recording.append_item(&item(t("menu.stop"), "win.stop"));
+
+    let view = Menu::new();
+    view.append_item(&item(t("menu.compact"), "win.compact"));
+    view.append_item(&item(t("menu.fullscreen"), "win.fullscreen"));
+    let again = Menu::new();
+    for code in LANGUAGE_CODES {
+        let name = language_label(code);
+        let entry = gio::MenuItem::new(Some(name), None);
+        entry.set_action_and_target_value(
+            Some("win.transcribe-again"),
+            Some(&glib::Variant::from(code)),
+        );
+        again.append_item(&entry);
+    }
+    view.append_submenu(Some(t("menu.transcribe_again")), &again);
+
+    // macOS manages Minimize, Zoom and the window list itself.
+    let window = Menu::new();
+    let help = Menu::new();
+    help.append_item(&item(t("menu.help"), "app.help"));
+
+    let bar = Menu::new();
+    bar.append_submenu(Some(t("menu.file")), &file);
+    bar.append_submenu(Some(t("menu.edit")), &edit);
+    bar.append_submenu(Some(t("menu.recording")), &recording);
+    bar.append_submenu(Some(t("menu.view")), &view);
+    bar.append_submenu(Some(t("menu.window")), &window);
+    bar.append_submenu(Some(t("menu.help")), &help);
+    bar
+}
+
+/// The native menu bar: GTK's quartz backend turns this `GMenuModel` into the
+/// NSMenu bar, and adds the standard app menu when `app.about`,
+/// `app.preferences` and `app.quit` exist. The app's own items are `GAction`s
+/// from `install_actions`, so enabled state is shared with the buttons; the
+/// Edit items are GTK's built-in `text.*`, `clipboard.*` and `selection.*`
+/// actions, and Close Window is `window.close`.
+fn install_menubar(app: &adw::Application) {
+    app.set_menubar(Some(&menu_model()));
+}
 
 /// Runs the app. `open` is a `.meeting-recorder` file or a meeting folder to show
 /// instead of starting a new recording.
@@ -76,16 +163,44 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
-    app.connect_startup(|app| {
+    let menubar: Rc<RefCell<Option<std::process::Child>>> = Rc::new(RefCell::new(None));
+    let menubar_startup = menubar.clone();
+    app.connect_startup(move |app| {
+        spawn_menubar(&menubar_startup);
         load_css();
+        if let Some(settings) = gtk::Settings::default() {
+            // Window buttons on the left, drawn as traffic lights by macos.css.
+            settings.set_gtk_decoration_layout(Some("close,minimize,maximize:"));
+            // GDK reports the system font at 12 pt; macOS body text is 13 pt.
+            // Keep the family it reported, bump the size.
+            let name = settings
+                .gtk_font_name()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let family = name.rsplit_once(' ').map_or(name.as_str(), |(f, _)| f);
+                settings.set_gtk_font_name(Some(&format!("{family} 13")));
+            }
+        }
         crate::theme::follow(|| {
             for window in gtk::Window::list_toplevels() {
                 redraw(&window);
             }
         });
-        app.set_accels_for_action("win.compact", &["<Control>m"]);
-        app.set_accels_for_action("window.close", &["<Control>w"]);
-        app.set_accels_for_action("app.quit", &["<Control>q"]);
+        install_menubar(app);
+        app.set_accels_for_action("win.new-recording", &["<Primary>n"]);
+        app.set_accels_for_action("win.open-meeting", &["<Primary>o"]);
+        app.set_accels_for_action("win.import", &["<Primary><Shift>i"]);
+        app.set_accels_for_action("win.reveal", &["<Primary><Alt>r"]);
+        app.set_accels_for_action("window.close", &["<Primary>w"]);
+        app.set_accels_for_action("win.start", &["<Primary>r"]);
+        app.set_accels_for_action("win.pause", &["<Primary><Shift>r"]);
+        app.set_accels_for_action("win.stop", &["<Primary>period"]);
+        app.set_accels_for_action("win.compact", &["<Primary><Shift>m"]);
+        app.set_accels_for_action("win.copy-transcript", &["<Primary><Shift>c"]);
+        app.set_accels_for_action("win.fullscreen", &["<Primary><Control>f"]);
+        app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
+        app.set_accels_for_action("app.quit", &["<Primary>q"]);
     });
     let recorder: Rc<RefCell<Option<Rc<Recorder>>>> = Rc::default();
     let get = {
@@ -117,9 +232,42 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         }
         recorder.window.present();
     });
+    app.connect_shutdown(move |_| {
+        if let Some(mut child) = menubar.borrow_mut().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    });
     match open {
         Some(path) => app.run_with_args(&[APP_NAME, path]),
         None => app.run_with_args::<&str>(&[]),
+    }
+}
+
+/// The menu bar item, launched once next to the app. `menubar = "false"` in
+/// config.toml disables it; a missing binary is skipped (a terminal build
+/// without the helpers has none). It gets the socket path and the interface
+/// language from here, so the two processes cannot disagree on either.
+fn spawn_menubar(slot: &Rc<RefCell<Option<std::process::Child>>>) {
+    if !crate::models::menubar_enabled() {
+        return;
+    }
+    let Some(binary) = crate::helper::menubar_path() else {
+        return;
+    };
+    match std::process::Command::new(&binary)
+        .env("MOMR_SOCKET", ipc::socket_path())
+        .env("MOMR_LANG", crate::locales::current().code())
+        // The item quits when this pid ends, so a crash or a kill does not
+        // leave it behind; a clean quit still stops it below.
+        .env("MOMR_PARENT_PID", std::process::id().to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => *slot.borrow_mut() = Some(child),
+        Err(e) => eprintln!("{APP_NAME}: could not start {}: {e}", binary.display()),
     }
 }
 
@@ -188,10 +336,16 @@ struct Recorder {
     animation_since: Cell<Option<std::time::Instant>>,
     paused_secs: Cell<i64>,
     pause_began: Cell<i64>,
+    /// Whether the silent computer-track hint has been shown this launch.
+    silent_hint_shown: Cell<bool>,
+    /// The `caffeinate` child keeping the Mac awake while recording.
+    caffeinate: RefCell<Option<std::process::Child>>,
     pause_button: gtk::Button,
     import_button: gtk::Button,
     model_banner: adw::Banner,
     model_downloading: Cell<bool>,
+    /// Why the computer source is not capturing, shown under the meters.
+    audio_banner: adw::Banner,
     drop_hint: gtk::Label,
     staging: RefCell<Option<PathBuf>>,
     result_dir: RefCell<Option<PathBuf>>,
@@ -205,26 +359,34 @@ struct Recorder {
 
 impl Recorder {
     fn new(app: &adw::Application) -> Rc<Self> {
-        let mic = Source::spawn("@DEFAULT_SOURCE@");
-        let system = Source::spawn("@DEFAULT_MONITOR@");
+        let mic = Source::spawn(Device::Mic);
+        let system = Source::spawn(Device::Computer);
         let shared: SharedStatus = Arc::new(Mutex::new(Status {
             state: "idle",
             ..Default::default()
         }));
         let (commands_tx, commands_rx) = async_channel::unbounded();
-        ipc::serve(shared.clone(), mic.clone(), system.clone(), commands_tx);
+        let (mic_peaks, system_peaks) = (mic.clone(), system.clone());
+        let socket_error = ipc::serve(
+            &ipc::socket_path(),
+            shared.clone(),
+            move || (mic_peaks.recent_peak(3), system_peaks.recent_peak(3)),
+            commands_tx,
+        )
+        .err();
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
-            .title("Meeting Recorder")
+            .title("MOM Recorder")
             .default_width(FULL_SIZE.0)
             .default_height(FULL_SIZE.1)
             .build();
+        window.add_css_class("macos");
         let view = adw::ToolbarView::new();
         let header = adw::HeaderBar::new();
         let compact_button = gtk::Button::builder()
             .icon_name("view-restore-symbolic")
-            .tooltip_text("Minimize (Ctrl+M)")
+            .tooltip_text(t("strip.tooltip"))
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
@@ -248,28 +410,31 @@ impl Recorder {
 
         let group = adw::PreferencesGroup::new();
         let title_row = adw::EntryRow::builder()
-            .title("Meeting name")
+            .title(t("done.rename_meeting"))
             .show_apply_button(true)
             .build();
         let format_labels: Vec<&str> = Format::ALL.iter().map(|f| f.label()).collect();
         let format_row = adw::ComboRow::builder()
-            .title("Audio file")
-            .subtitle("Can be changed during the call")
+            .title(t("ready.format_title"))
+            .subtitle(t("ready.format_subtitle"))
             .model(&gtk::StringList::new(&format_labels))
             .build();
         let saved = settings::load_format();
         format_row.set_selected(Format::ALL.iter().position(|f| *f == saved).unwrap_or(0) as u32);
-        let language_labels: Vec<&str> = LANGUAGES.iter().map(|(_, label)| *label).collect();
+        let language_labels: Vec<&str> = LANGUAGE_CODES
+            .iter()
+            .map(|code| language_label(code))
+            .collect();
         let language_row = adw::ComboRow::builder()
-            .title("Language")
-            .subtitle("Used for the transcript after the call")
+            .title(t("ready.language_title"))
+            .subtitle(t("ready.language_subtitle"))
             .model(&gtk::StringList::new(&language_labels))
             .build();
         let saved = settings::load_language();
         language_row.set_selected(
-            LANGUAGES
+            LANGUAGE_CODES
                 .iter()
-                .position(|(code, _)| *code == saved)
+                .position(|code| *code == saved)
                 .unwrap_or(0) as u32,
         );
         group.add(&title_row);
@@ -287,10 +452,13 @@ impl Recorder {
             .orientation(gtk::Orientation::Vertical)
             .spacing(18)
             .build();
-        meters_box.append(&meter_block("You (microphone)", &meters[0]));
-        meters_box.append(&meter_block("Computer audio", &meters[1]));
+        meters_box.append(&meter_block(t("ready.mic"), &meters[0]));
+        meters_box.append(&meter_block(t("ready.computer"), &meters[1]));
 
         content.append(&meters_box);
+
+        let audio_banner = adw::Banner::builder().revealed(false).build();
+        content.append(&audio_banner);
 
         let status_row = gtk::Box::builder()
             .spacing(10)
@@ -317,7 +485,7 @@ impl Recorder {
 
         let button = gtk::Button::builder().css_classes(["pill"]).build();
         let pause_button = gtk::Button::builder()
-            .label("Pause")
+            .label(t("ready.pause"))
             .css_classes(["pill"])
             .visible(false)
             .build();
@@ -329,7 +497,7 @@ impl Recorder {
         buttons.append(&button);
         content.append(&buttons);
         let import_button = gtk::Button::builder()
-            .label("Import an audio file, or drop one here")
+            .label(t("ready.import_hint"))
             .halign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
@@ -357,7 +525,7 @@ impl Recorder {
             .valign(gtk::Align::Center)
             .build();
         let done_heading = gtk::Label::builder()
-            .label("Meeting saved")
+            .label(t("done.meeting_saved"))
             .xalign(0.0)
             .css_classes(["title-3"])
             .build();
@@ -374,7 +542,7 @@ impl Recorder {
 
         let done_group = adw::PreferencesGroup::new();
         let done_title_row = adw::EntryRow::builder()
-            .title("Meeting name")
+            .title(t("done.rename_meeting"))
             .show_apply_button(true)
             .build();
         done_group.add(&done_title_row);
@@ -383,7 +551,7 @@ impl Recorder {
         // Chapters: a list to jump through, with the agent's button in the header.
         let chapters_spinner = adw::Spinner::builder().visible(false).build();
         let chapters_button = gtk::Button::builder()
-            .label("Generate")
+            .label(t("chapters.generate"))
             .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
@@ -391,7 +559,7 @@ impl Recorder {
         chapters_suffix.append(&chapters_spinner);
         chapters_suffix.append(&chapters_button);
         let chapters_group = adw::PreferencesGroup::builder()
-            .title("Chapters")
+            .title(t("done.chapters"))
             .header_suffix(&chapters_suffix)
             .vexpand(true)
             .build();
@@ -402,7 +570,7 @@ impl Recorder {
             .build();
         chapters_list.set_placeholder(Some(
             &gtk::Label::builder()
-                .label("No chapters yet")
+                .label(t("done.chapters_none"))
                 .css_classes(["dim-label"])
                 .margin_top(14)
                 .margin_bottom(14)
@@ -417,19 +585,21 @@ impl Recorder {
         left.append(&chapters_group);
 
         let copy_button = gtk::Button::builder()
-            .label("Copy transcript")
+            .label(t("done.copy"))
             .css_classes(["pill", "suggested-action"])
             .build();
         left.append(&copy_button);
 
         let actions = gtk::Box::builder().spacing(8).homogeneous(true).build();
         let open_button = gtk::Button::builder()
-            .label("Open folder")
+            .label(t("done.reveal"))
             .css_classes(["pill"])
+            .action_name("win.reveal")
             .build();
         let new_button = gtk::Button::builder()
-            .label("New recording")
+            .label(t("done.new"))
             .css_classes(["pill"])
+            .action_name("win.new-recording")
             .build();
         actions.append(&open_button);
         actions.append(&new_button);
@@ -437,14 +607,14 @@ impl Recorder {
 
         let again_group = adw::PreferencesGroup::new();
         let again_language_row = adw::ComboRow::builder()
-            .title("Language")
-            .subtitle("Transcribe again")
+            .title(t("done.language_again"))
+            .subtitle(t("done.transcribe_again"))
             .model(&gtk::StringList::new(&language_labels))
             .selected(language_row.selected())
             .build();
         let again_button = gtk::Button::builder()
             .icon_name("view-refresh-symbolic")
-            .tooltip_text("Transcribe again")
+            .tooltip_text(t("done.transcribe_again"))
             .valign(gtk::Align::Center)
             .css_classes(["flat", "circular"])
             .build();
@@ -529,7 +699,7 @@ impl Recorder {
             .build();
         let expand_button = gtk::Button::builder()
             .icon_name("view-fullscreen-symbolic")
-            .tooltip_text("Expand (Ctrl+M)")
+            .tooltip_text(t("strip.tooltip"))
             .action_name("win.compact")
             .valign(gtk::Align::Center)
             .css_classes(["flat", "circular"])
@@ -540,7 +710,7 @@ impl Recorder {
         // The whole strip drags the window around, like a title bar.
         let compact = gtk::WindowHandle::builder()
             .child(&compact_strip)
-            .tooltip_text("Drag to move, Ctrl+M to expand")
+            .tooltip_text(t("strip.drag_hint"))
             .build();
 
         // Not homogeneous, so the window can shrink to the compact page.
@@ -555,7 +725,7 @@ impl Recorder {
         layout.add_named(&done, Some("done"));
         layout.add_named(&compact, Some("compact"));
         let drop_hint = gtk::Label::builder()
-            .label("Drop to import")
+            .label(t("ready.hint"))
             .css_classes(["drop-hint", "title-2"])
             .visible(false)
             .can_target(false)
@@ -624,10 +794,13 @@ impl Recorder {
             animation_since: Cell::new(None),
             paused_secs: Cell::new(0),
             pause_began: Cell::new(0),
+            silent_hint_shown: Cell::new(false),
+            caffeinate: RefCell::default(),
             pause_button,
             import_button,
             model_banner,
             model_downloading: Cell::new(false),
+            audio_banner,
             drop_hint,
             staging: RefCell::default(),
             result_dir: RefCell::default(),
@@ -636,7 +809,8 @@ impl Recorder {
             loading: Cell::new(false),
             manifest: RefCell::default(),
         });
-        recorder.connect_signals(&open_button, &new_button, &quit_action);
+        recorder.connect_signals(&quit_action);
+        recorder.install_actions();
         let weak = Rc::downgrade(&recorder);
         glib::spawn_future_local(async move {
             while let Ok(command) = commands_rx.recv().await {
@@ -657,15 +831,13 @@ impl Recorder {
             }
         });
         recorder.render();
+        if let Some(e) = socket_error {
+            recorder.toast(&tf("help.socket_failed", &[&e]));
+        }
         recorder
     }
 
-    fn connect_signals(
-        self: &Rc<Self>,
-        open_button: &gtk::Button,
-        new_button: &gtk::Button,
-        quit_action: &gio::SimpleAction,
-    ) {
+    fn connect_signals(self: &Rc<Self>, quit_action: &gio::SimpleAction) {
         let weak = Rc::downgrade(self);
         self.button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
@@ -677,11 +849,11 @@ impl Recorder {
         });
 
         // Import: a file dropped anywhere on the window, or picked from a dialog.
-        // File managers offer a file list (Nautilus), some a single file.
+        // Finder offers a file list; other sources a single file.
         let drop = gtk::DropTarget::new(glib::Type::INVALID, gtk::gdk::DragAction::COPY);
         drop.set_types(&[gtk::gdk::FileList::static_type(), gio::File::static_type()]);
-        // GTK's own check turns the drag down when the compositor offers the
-        // source's preferred action (move) rather than copy, so decide on
+        // GTK's own check turns the drag down when the source prefers to
+        // move rather than copy, so decide on
         // the content alone. The file is only read; it is always a copy.
         drop.connect_accept(|_, offer| {
             let formats = offer.formats();
@@ -728,27 +900,6 @@ impl Recorder {
         self.window.add_controller(drop);
 
         let weak = Rc::downgrade(self);
-        self.import_button.connect_clicked(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            let filter = gtk::FileFilter::new();
-            filter.set_name(Some("Audio and video"));
-            filter.add_mime_type("audio/*");
-            filter.add_mime_type("video/*");
-            let filters = gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            let dialog = gtk::FileDialog::builder()
-                .title("Import an audio file")
-                .filters(&filters)
-                .build();
-            let this = r.clone();
-            dialog.open(Some(&r.window), gio::Cancellable::NONE, move |result| {
-                if let Some(path) = result.ok().and_then(|f| f.path()) {
-                    this.confirm_import(path);
-                }
-            });
-        });
-
-        let weak = Rc::downgrade(self);
         self.model_banner.connect_button_clicked(move |_| {
             if let Some(r) = weak.upgrade() {
                 r.download_model();
@@ -757,20 +908,13 @@ impl Recorder {
         self.update_model_banner();
 
         let weak = Rc::downgrade(self);
-        self.pause_button.connect_clicked(move |_| {
-            if let Some(r) = weak.upgrade() {
-                r.toggle_pause();
-            }
-        });
-
-        let weak = Rc::downgrade(self);
         self.compact_action.connect_activate(move |_, _| {
             if let Some(r) = weak.upgrade() {
                 r.set_compact(!r.compact.get());
             }
         });
 
-        // Ctrl+Q goes through the same check as the close button.
+        // ⌘Q goes through the same check as the close button.
         let weak = Rc::downgrade(self);
         quit_action.connect_activate(move |_, _| {
             if let Some(r) = weak.upgrade() {
@@ -783,7 +927,7 @@ impl Recorder {
             if let Some(r) = weak.upgrade()
                 && !r.loading.get()
             {
-                settings::save_format(r.selected_format());
+                Self::saved(&weak, settings::save_format(r.selected_format()));
             }
         });
 
@@ -792,7 +936,7 @@ impl Recorder {
         self.language_row.connect_selected_notify(move |row| {
             if let Some(r) = weak.upgrade() {
                 if !r.loading.get() {
-                    settings::save_language(r.selected_language());
+                    Self::saved(&weak, settings::save_language(r.selected_language()));
                 }
                 if r.again_language_row.selected() != row.selected() {
                     r.again_language_row.set_selected(row.selected());
@@ -825,6 +969,13 @@ impl Recorder {
         });
 
         let weak = Rc::downgrade(self);
+        self.player.connect_error(move |reason| {
+            if let Some(r) = weak.upgrade() {
+                r.toast(&tf("player.failed", &[reason]));
+            }
+        });
+
+        let weak = Rc::downgrade(self);
         self.player.connect_position(move |ms| {
             if let Some(r) = weak.upgrade() {
                 r.highlight(ms);
@@ -845,13 +996,6 @@ impl Recorder {
         self.chapters_button.connect_clicked(move |_| {
             if let Some(r) = weak.upgrade() {
                 r.generate_chapters();
-            }
-        });
-
-        let weak = Rc::downgrade(self);
-        new_button.connect_clicked(move |_| {
-            if let Some(r) = weak.upgrade() {
-                r.ready();
             }
         });
 
@@ -914,49 +1058,9 @@ impl Recorder {
         self.title_row.add_controller(focus);
 
         let weak = Rc::downgrade(self);
-        open_button.connect_clicked(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            if let Some(dir) = r.result_dir.borrow().as_ref() {
-                let uri = gio::File::for_path(dir).uri();
-                let _ = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>);
-            }
-        });
-
-        let weak = Rc::downgrade(self);
-        self.copy_button.connect_clicked(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            let Some(dir) = r.result_dir.borrow().clone() else {
-                return;
-            };
-            match std::fs::read_to_string(dir.join("transcript.md")) {
-                Ok(text) => {
-                    r.window.clipboard().set_text(&text);
-                    r.toast("Copied to clipboard");
-                }
-                Err(_) => r.toast("No transcript found"),
-            }
-        });
-
-        let weak = Rc::downgrade(self);
         self.again_button.connect_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
-            let Some(dir) = r.result_dir.borrow().clone() else {
-                return;
-            };
-            let tracks = match r.manifest.borrow().as_ref() {
-                Some(m) if m.imported.is_some() => {
-                    Tracks::Single(source_track(&dir), m.speaker_count)
-                }
-                _ => Tracks::Kept(dir),
-            };
-            let this = r.clone();
-            glib::spawn_future_local(async move {
-                let result = this
-                    .run_transcription(tracks, this.selected_language())
-                    .await;
-                this.hold_animation(&result).await;
-                this.finished(true, result);
-            });
+            r.transcribe_again(r.selected_language());
         });
 
         let weak = Rc::downgrade(self);
@@ -1011,6 +1115,606 @@ impl Recorder {
         self.toasts.add_toast(adw::Toast::new(message));
     }
 
+    /// Every user-facing operation as a `GAction`, so buttons and menu items
+    /// share enabled state instead of each tracking it. Called once, after
+    /// the recorder exists.
+    fn install_actions(self: &Rc<Self>) {
+        let act = |name: &str| {
+            let action = gio::SimpleAction::new(name, None);
+            self.window.add_action(&action);
+            action
+        };
+        Self::on(&act("new-recording"), self, |r| {
+            if matches!(r.state.get(), State::Idle | State::Done) {
+                r.ready();
+            }
+        });
+        Self::on(&act("open-meeting"), self, |r| r.open_meeting_dialog());
+        Self::on(&act("import"), self, |r| r.ask_import_file());
+        Self::on(&act("reveal"), self, |r| r.reveal_in_finder());
+        Self::on(&act("start"), self, |r| {
+            if r.state.get() == State::Idle {
+                r.start();
+            }
+        });
+        Self::on(&act("pause"), self, |r| r.toggle_pause());
+        Self::on(&act("stop"), self, |r| r.stop());
+        Self::on(&act("copy-transcript"), self, |r| r.copy_transcript());
+        Self::on(&act("fullscreen"), self, |r| r.toggle_fullscreen());
+        let again = gio::SimpleAction::new("transcribe-again", Some(glib::VariantTy::STRING));
+        let weak = Rc::downgrade(self);
+        again.connect_activate(move |_, param| {
+            let Some(r) = weak.upgrade() else { return };
+            let language = param.and_then(|p| p.get::<String>()).unwrap_or_default();
+            r.transcribe_again(&language);
+        });
+        self.window.add_action(&again);
+        // Single-purpose buttons trigger the same actions as the menu.
+        self.pause_button.set_action_name(Some("win.pause"));
+        self.import_button.set_action_name(Some("win.import"));
+        self.copy_button
+            .set_action_name(Some("win.copy-transcript"));
+
+        let app = self.window.application().expect("window has an app");
+        let about = gio::SimpleAction::new("about", None);
+        app.add_action(&about);
+        Self::on(&about, self, |r| r.show_about());
+        let help = gio::SimpleAction::new("help", None);
+        app.add_action(&help);
+        Self::on(&help, self, |r| r.show_help());
+        let preferences = gio::SimpleAction::new("preferences", None);
+        app.add_action(&preferences);
+        Self::on(&preferences, self, |r| r.show_preferences());
+    }
+
+    fn on(action: &gio::SimpleAction, this: &Rc<Self>, run: impl Fn(Rc<Self>) + 'static) {
+        let weak = Rc::downgrade(this);
+        action.connect_activate(move |_, _| {
+            if let Some(r) = weak.upgrade() {
+                run(r);
+            }
+        });
+    }
+
+    /// One `set_enabled` per state transition; the menu greys out with it.
+    fn update_actions(&self) {
+        let state = self.state.get();
+        let enable = |name: &str, on: bool| {
+            if let Some(action) = self.window.lookup_action(name)
+                && let Ok(action) = action.downcast::<gio::SimpleAction>()
+            {
+                action.set_enabled(on);
+            }
+        };
+        let idle_done = matches!(state, State::Idle | State::Done);
+        let recording = state == State::Recording;
+        enable("new-recording", idle_done);
+        enable("open-meeting", true);
+        enable("import", idle_done);
+        enable("reveal", state == State::Done);
+        enable("start", state == State::Idle);
+        enable("pause", recording);
+        enable("stop", recording);
+        enable("compact", recording);
+        enable("copy-transcript", state == State::Done);
+        enable("transcribe-again", state == State::Done);
+        enable("fullscreen", true);
+    }
+
+    /// The import file panel (NSOpenPanel through GTK's quartz chooser).
+    fn ask_import_file(self: &Rc<Self>) {
+        if !matches!(self.state.get(), State::Idle | State::Done) {
+            return;
+        }
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some(t("import.filter")));
+        filter.add_mime_type("audio/*");
+        filter.add_mime_type("video/*");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title(t("import.title"))
+            .filters(&filters)
+            .build();
+        let this = self.clone();
+        dialog.open(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if let Some(path) = result.ok().and_then(|f| f.path()) {
+                this.confirm_import(path);
+            }
+        });
+    }
+
+    /// The open panel: a `.meeting-recorder` file from a meeting folder.
+    fn open_meeting_dialog(self: &Rc<Self>) {
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some(t("open.filter")));
+        filter.add_suffix("meeting-recorder");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title(t("open.title"))
+            .filters(&filters)
+            .build();
+        let this = self.clone();
+        dialog.open(Some(&self.window), gio::Cancellable::NONE, move |result| {
+            if let Some(path) = result.ok().and_then(|f| f.path()) {
+                this.open_meeting(&path);
+            }
+        });
+    }
+
+    /// Selects the meeting's manifest in Finder, the way "Reveal" means here.
+    fn reveal_in_finder(&self) {
+        let Some(dir) = self.result_dir.borrow().clone() else {
+            return;
+        };
+        let target = crate::meeting::find(&dir).unwrap_or(dir);
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    fn copy_transcript(&self) {
+        let Some(dir) = self.result_dir.borrow().clone() else {
+            return;
+        };
+        match std::fs::read_to_string(dir.join("transcript.md")) {
+            Ok(text) => {
+                self.window.clipboard().set_text(&text);
+                self.toast(t("help.copied_clipboard"));
+            }
+            Err(_) => self.toast(t("done.no_transcript")),
+        }
+    }
+
+    /// Transcribes the done meeting again in `language` (a code from
+    /// `LANGUAGE_CODES`, falling back to the selected one).
+    fn transcribe_again(self: &Rc<Self>, language: &str) {
+        if self.state.get() != State::Done {
+            return;
+        }
+        let language: &'static str = crate::transcribe::LANGUAGE_CODES
+            .iter()
+            .find(|code| **code == language)
+            .copied()
+            .unwrap_or_else(|| self.selected_language());
+        let Some(dir) = self.result_dir.borrow().clone() else {
+            return;
+        };
+        let tracks = match self.manifest.borrow().as_ref() {
+            Some(m) if m.imported.is_some() => Tracks::Single(source_track(&dir), m.speaker_count),
+            _ => Tracks::Kept(dir),
+        };
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let result = this.run_transcription(tracks, language).await;
+            this.hold_animation(&result).await;
+            this.finished(true, result);
+        });
+    }
+
+    /// Asks the window, not a copy of its state: the green button, ⌃⌘F and
+    /// Esc change it too.
+    fn toggle_fullscreen(&self) {
+        if !self.window.is_fullscreen() {
+            self.window.fullscreen();
+        } else {
+            self.window.unfullscreen();
+        }
+    }
+
+    fn show_about(&self) {
+        let dialog = adw::AboutDialog::builder()
+            .application_name("MOM Recorder")
+            .application_icon("io.github.riobahtiar.MOMRecorder")
+            .version(env!("CARGO_PKG_VERSION"))
+            .developer_name("Rio Bahtiar")
+            .copyright("© 2026 Rio Bahtiar")
+            .comments(t("about.comments"))
+            .website("https://github.com/riobahtiar/mo-meeting-recorder")
+            .issue_url("https://github.com/riobahtiar/mo-meeting-recorder/issues")
+            .license_type(gtk::License::MitX11)
+            .build();
+        dialog.add_acknowledgement_section(
+            Some(t("about.transcription_credit")),
+            &[
+                "whisper.cpp through whisper-rs",
+                "Nemotron 3 Diarization (ONNX community export)",
+                t("about.based_on"),
+            ],
+        );
+        dialog.present(Some(&self.window));
+    }
+
+    fn show_help(&self) {
+        let uri = "https://github.com/riobahtiar/mo-meeting-recorder";
+        let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+    }
+    /// What leaves the Mac per transcription provider, for the Settings row.
+    fn provider_privacy(provider: Provider) -> &'static str {
+        match provider {
+            Provider::Local => t("prefs.provider_local_note"),
+            Provider::Cloud(Cloud::ElevenLabs) => t("prefs.provider_eleven_note"),
+            Provider::Cloud(Cloud::Google) => t("prefs.provider_google_note"),
+            Provider::Cloud(Cloud::OpenRouter) => t("prefs.provider_openrouter_note"),
+        }
+    }
+
+    /// Tells the user a setting did not stick, for the rows below: a toast
+    /// with the reason, since the row itself already shows the new value.
+    fn saved(weak: &std::rc::Weak<Self>, result: std::io::Result<()>) {
+        if let (Err(e), Some(r)) = (result, weak.upgrade()) {
+            r.toast(&crate::locales::tf("prefs.save_failed", &[&e.to_string()]));
+        }
+    }
+
+    /// App settings (⌘,): the interface language, transcription (model,
+    /// language, provider and API keys), the chapters agent, recording
+    /// (format, your name, the meetings folder), the audio status and the
+    /// menu bar item. Most values apply at once; the interface language and
+    /// the menu bar item on the next launch, as their rows say. The ready page
+    /// re-reads the model banner and the language on close.
+    fn show_preferences(self: &Rc<Self>) {
+        let dialog = adw::PreferencesDialog::builder()
+            .title(t("prefs.title"))
+            .build();
+        let page = adw::PreferencesPage::builder()
+            .title(t("prefs.title"))
+            .build();
+        dialog.add(&page);
+        let general = adw::PreferencesGroup::builder().build();
+        let ui_language = adw::ComboRow::builder()
+            .title(t("prefs.ui_language"))
+            .subtitle(t("prefs.ui_language_hint"))
+            .model(&gtk::StringList::new(&["English", "Bahasa Indonesia"]))
+            .selected(match crate::locales::current() {
+                Lang::English => 0,
+                Lang::Indonesian => 1,
+            })
+            .build();
+        let weak = Rc::downgrade(self);
+        ui_language.connect_selected_notify(move |row| {
+            let lang = if row.selected() == 1 {
+                Lang::Indonesian
+            } else {
+                Lang::English
+            };
+            Self::saved(&weak, crate::settings::save_ui_language(lang));
+        });
+        general.add(&ui_language);
+        page.add(&general);
+        let transcription = adw::PreferencesGroup::builder()
+            .title(t("prefs.transcription"))
+            .build();
+        let model_names: Vec<&str> = crate::models::MODELS.iter().map(|m| m.name).collect();
+        let model_row = adw::ComboRow::builder()
+            .title(t("prefs.model"))
+            .model(&gtk::StringList::new(&model_names))
+            .build();
+        let current_model = crate::models::configured();
+        model_row.set_selected(
+            crate::models::MODELS
+                .iter()
+                .position(|m| m.name == current_model)
+                .unwrap_or(0) as u32,
+        );
+        let model_subtitle = |name: &str| {
+            let model = crate::models::MODELS.iter().find(|m| m.name == name);
+            let downloaded = model.is_some_and(|m| {
+                crate::transcribe::models_dir()
+                    .join(format!("ggml-{}.bin", m.name))
+                    .is_file()
+            });
+            match (downloaded, model) {
+                (true, _) => t("prefs.model_present").to_owned(),
+                (_, Some(m)) if m.size_mb >= 1000 => t("prefs.model_size_gb")
+                    .replace("{size}", &format!("{:.1}", f64::from(m.size_mb) / 1000.0)),
+                (_, Some(m)) => t("prefs.model_size_mb").replace("{size}", &m.size_mb.to_string()),
+                (_, None) => String::new(),
+            }
+        };
+        model_row.set_subtitle(&model_subtitle(&current_model));
+        let weak = Rc::downgrade(self);
+        model_row.connect_selected_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            let name = model_names[row.selected() as usize];
+            Self::saved(
+                &Rc::downgrade(&r),
+                crate::models::save_config_value("model", name),
+            );
+            row.set_subtitle(&model_subtitle(name));
+            r.update_model_banner();
+        });
+        transcription.add(&model_row);
+        let language_labels: Vec<&str> = LANGUAGE_CODES
+            .iter()
+            .map(|code| language_label(code))
+            .collect();
+        let prefs_language = adw::ComboRow::builder()
+            .title(t("prefs.language"))
+            .model(&gtk::StringList::new(&language_labels))
+            .build();
+        let saved_language = settings::load_language();
+        prefs_language.set_selected(
+            LANGUAGE_CODES
+                .iter()
+                .position(|code| *code == saved_language)
+                .unwrap_or(0) as u32,
+        );
+        let weak = Rc::downgrade(self);
+        prefs_language.connect_selected_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            let code = LANGUAGE_CODES[row.selected() as usize];
+            Self::saved(&Rc::downgrade(&r), settings::save_language(code));
+            // The ready page owns the default: keep its dropdown in step.
+            r.loading.set(true);
+            r.language_row.set_selected(row.selected());
+            r.again_language_row.set_selected(row.selected());
+            r.loading.set(false);
+        });
+        transcription.add(&prefs_language);
+        let provider_names: Vec<&str> = Provider::ALL.iter().map(|p| p.label()).collect();
+        let provider_row = adw::ComboRow::builder()
+            .title(t("prefs.provider"))
+            .model(&gtk::StringList::new(&provider_names))
+            .build();
+        // An id in config.toml that names no provider shows as local here and
+        // says so, rather than looking like a choice that was made.
+        let (current_provider, provider_problem) = match crate::provider::configured() {
+            Ok(provider) => (provider, None),
+            Err(e) => (Provider::Local, Some(e)),
+        };
+        provider_row.set_selected(
+            Provider::ALL
+                .iter()
+                .position(|p| *p == current_provider)
+                .unwrap_or(0) as u32,
+        );
+        provider_row.set_subtitle(
+            provider_problem
+                .as_deref()
+                .unwrap_or(Self::provider_privacy(current_provider)),
+        );
+        let weak = Rc::downgrade(self);
+        provider_row.connect_selected_notify(move |row| {
+            let provider = Provider::ALL[row.selected() as usize];
+            Self::saved(&weak, crate::provider::save_configured(provider));
+            row.set_subtitle(Self::provider_privacy(provider));
+        });
+        transcription.add(&provider_row);
+        for (cloud, title, hint) in [
+            (
+                Cloud::ElevenLabs,
+                t("prefs.eleven_key"),
+                t("prefs.key_hint_eleven"),
+            ),
+            (
+                Cloud::Google,
+                t("prefs.google_key"),
+                t("prefs.key_hint_google"),
+            ),
+            (
+                Cloud::OpenRouter,
+                t("prefs.openrouter_key"),
+                t("prefs.key_hint_openrouter"),
+            ),
+        ] {
+            let state = match crate::provider::key_status(cloud) {
+                Ok(()) => t("prefs.key_saved").to_owned(),
+                Err(crate::provider::KeyError::Missing(_)) => hint.to_owned(),
+                Err(e) => e.to_string(),
+            };
+            let key_row = adw::PasswordEntryRow::builder()
+                .title(format!("{title} — {state}"))
+                .tooltip_text(hint)
+                .show_apply_button(true)
+                .build();
+            let weak = Rc::downgrade(self);
+            key_row.connect_apply(move |row| {
+                let key = row.text().to_string();
+                row.set_text("");
+                match crate::provider::save_api_key(cloud, &key) {
+                    Ok(()) => {
+                        row.set_title(&format!("{title} — {}", t("prefs.key_saved")));
+                        if let Some(r) = weak.upgrade() {
+                            r.toast(t("prefs.key_saved_toast"));
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(r) = weak.upgrade() {
+                            r.toast(&e);
+                        }
+                    }
+                }
+            });
+            transcription.add(&key_row);
+        }
+        page.add(&transcription);
+        let chapters = adw::PreferencesGroup::builder()
+            .title(t("prefs.chapters"))
+            .description(t("prefs.chapters_about"))
+            .build();
+        let agents = crate::agent::installed_agents();
+        let mut agent_names = vec![t("prefs.agent_none")];
+        agent_names.extend(agents.iter().map(|a| a.name));
+        let agent_row = adw::ComboRow::builder()
+            .title(t("prefs.agent"))
+            .model(&gtk::StringList::new(&agent_names))
+            .build();
+        let current_agent = crate::agent::configured_id().unwrap_or_default();
+        agent_row.set_selected(
+            agents
+                .iter()
+                .position(|a| a.id == current_agent)
+                .map(|i| i + 1)
+                .unwrap_or(0) as u32,
+        );
+        let weak = Rc::downgrade(self);
+        agent_row.connect_selected_notify(move |row| {
+            let selected = row.selected() as usize;
+            let id = match selected {
+                0 => "",
+                n => agents[n - 1].id,
+            };
+            Self::saved(&weak, crate::agent::save_configured_id(id));
+        });
+        chapters.add(&agent_row);
+        page.add(&chapters);
+        let recording = adw::PreferencesGroup::builder()
+            .title(t("prefs.recording"))
+            .build();
+        let format_labels: Vec<&str> = Format::ALL.iter().map(|f| f.label()).collect();
+        let format_row = adw::ComboRow::builder()
+            .title(t("prefs.format"))
+            .model(&gtk::StringList::new(&format_labels))
+            .build();
+        format_row.set_selected(
+            Format::ALL
+                .iter()
+                .position(|f| *f == settings::load_format())
+                .unwrap_or(0) as u32,
+        );
+        let weak = Rc::downgrade(self);
+        format_row.connect_selected_notify(move |row| {
+            Self::saved(
+                &weak,
+                settings::save_format(Format::ALL[row.selected() as usize]),
+            );
+        });
+        recording.add(&format_row);
+        let name_row = adw::EntryRow::builder()
+            .title(t("prefs.name"))
+            .text(settings::load_your_name())
+            .build();
+        let weak = Rc::downgrade(self);
+        name_row.connect_apply(move |row| {
+            Self::saved(&weak, settings::save_your_name(&row.text()));
+        });
+        recording.add(&name_row);
+        let meetings_path = settings::meetings_dir();
+        let meetings_row = adw::ActionRow::builder()
+            .title(t("prefs.meetings"))
+            .subtitle(meetings_path.display().to_string())
+            .build();
+        let choose = gtk::Button::builder()
+            .label(t("prefs.meetings_choose"))
+            .valign(gtk::Align::Center)
+            .build();
+        meetings_row.add_suffix(&choose);
+        let this = self.clone();
+        let row = meetings_row.clone();
+        choose.connect_clicked(move |_| {
+            let folders = gtk::FileDialog::builder()
+                .title(t("prefs.meetings"))
+                .build();
+            let (row, window, this) = (row.clone(), this.window.clone(), this.clone());
+            folders.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
+                if let Some(path) = result.ok().and_then(|f| f.path()) {
+                    match settings::save_meetings_dir(&path) {
+                        Ok(()) => row.set_subtitle(&path.display().to_string()),
+                        Err(e) => {
+                            this.toast(&crate::locales::tf("prefs.save_failed", &[&e.to_string()]))
+                        }
+                    }
+                }
+            });
+        });
+        recording.add(&meetings_row);
+        page.add(&recording);
+        let audio = adw::PreferencesGroup::builder()
+            .title(t("prefs.audio"))
+            .build();
+        let audio_status = match crate::helper::path() {
+            Some(helper) => crate::helper::list_info(&helper),
+            None => Err(t("banner.audio_helper_missing").to_owned()),
+        };
+        let mic_row = adw::ActionRow::builder().title(t("prefs.mic")).build();
+        let mic_subtitle = match &audio_status {
+            Ok(devices) if devices.inputs > 0 => {
+                crate::locales::tf("prefs.mic_inputs", &[&devices.inputs.to_string()])
+            }
+            Ok(_) => t("prefs.mic_none").to_owned(),
+            Err(e) => crate::locales::tf("prefs.devices_unknown", &[e]),
+        };
+        mic_row.set_subtitle(&mic_subtitle);
+        audio.add(&mic_row);
+        let computer_row = adw::ActionRow::builder().title(t("prefs.computer")).build();
+        match &audio_status {
+            Ok(devices) if devices.tap && devices.tap_denied => {
+                computer_row.set_subtitle(t("prefs.computer_tap_denied"));
+                let open = gtk::Button::builder()
+                    .label(t("prefs.open_privacy"))
+                    .valign(gtk::Align::Center)
+                    .build();
+                open.connect_clicked(|_| {
+                    let _ = gio::AppInfo::launch_default_for_uri(
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture",
+                        None::<&gio::AppLaunchContext>,
+                    );
+                });
+                computer_row.add_suffix(&open);
+            }
+            Ok(devices) if devices.tap => {
+                computer_row.set_subtitle(t("prefs.computer_tap"));
+            }
+            Ok(crate::helper::AudioDevices {
+                blackhole: Some(device),
+                ..
+            }) => {
+                computer_row
+                    .set_subtitle(&crate::locales::tf("prefs.computer_blackhole", &[device]));
+            }
+            _ => {
+                computer_row.set_subtitle(t("prefs.computer_unavailable"));
+                let install = gtk::Button::builder()
+                    .label(t("prefs.blackhole_how"))
+                    .valign(gtk::Align::Center)
+                    .build();
+                install.connect_clicked(|_| {
+                    let _ = gio::AppInfo::launch_default_for_uri(
+                        "https://github.com/ExistentialAudio/BlackHole",
+                        None::<&gio::AppLaunchContext>,
+                    );
+                });
+                computer_row.add_suffix(&install);
+            }
+        }
+        audio.add(&computer_row);
+        page.add(&audio);
+
+        let menubar_group = adw::PreferencesGroup::builder()
+            .title(t("prefs.menubar"))
+            .build();
+        let menubar_row = adw::SwitchRow::builder()
+            .title(t("prefs.menubar_show"))
+            .subtitle(t("prefs.menubar_restart"))
+            .active(crate::models::menubar_enabled())
+            .build();
+        let weak = Rc::downgrade(self);
+        menubar_row.connect_active_notify(move |row| {
+            Self::saved(&weak, crate::models::save_menubar_enabled(row.is_active()));
+        });
+        menubar_group.add(&menubar_row);
+        page.add(&menubar_group);
+        let weak = Rc::downgrade(self);
+        dialog.connect_closed(move |_| {
+            let Some(r) = weak.upgrade() else { return };
+            r.update_model_banner();
+            let saved = settings::load_language();
+            if let Some(index) = LANGUAGE_CODES.iter().position(|code| *code == saved) {
+                r.loading.set(true);
+                r.language_row.set_selected(index as u32);
+                r.again_language_row.set_selected(index as u32);
+                r.loading.set(false);
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
     fn selected_format(&self) -> Format {
         Format::ALL
             .get(self.format_row.selected() as usize)
@@ -1019,16 +1723,16 @@ impl Recorder {
     }
 
     fn selected_language(&self) -> &'static str {
-        LANGUAGES
+        LANGUAGE_CODES
             .get(self.language_row.selected() as usize)
-            .map(|(code, _)| *code)
+            .copied()
             .unwrap_or("auto")
     }
 
     fn title(&self) -> String {
         let typed = self.title_row.text().trim().to_owned();
         if typed.is_empty() {
-            "Meeting".to_owned()
+            t("done.fallback_title").to_owned()
         } else {
             typed
         }
@@ -1063,7 +1767,6 @@ impl Recorder {
         self.live.set(recording);
         self.dot.set_visible(recording);
         self.compact_button.set_visible(recording);
-        self.compact_action.set_enabled(recording);
         self.language_row
             .set_sensitive(!matches!(state, State::Stopping | State::Transcribing));
         self.button.set_sensitive(matches!(
@@ -1075,16 +1778,19 @@ impl Recorder {
         self.button.remove_css_class("destructive-action");
         self.pause_button.set_visible(recording);
         self.import_button.set_visible(state == State::Idle);
-        self.pause_button
-            .set_label(if self.paused.get() { "Resume" } else { "Pause" });
+        self.pause_button.set_label(if self.paused.get() {
+            t("ready.resume")
+        } else {
+            t("ready.pause")
+        });
         if recording {
-            self.button.set_label("Stop recording");
+            self.button.set_label(t("ready.stop"));
             self.button.add_css_class("destructive-action");
         } else {
             self.button.set_label(match state {
-                State::Stopping => "Saving…",
-                State::Transcribing => "Transcribing…",
-                _ => "Start recording",
+                State::Stopping => t("ready.button_saving"),
+                State::Transcribing => t("ready.button_transcribing"),
+                _ => t("ready.start"),
             });
             self.button.add_css_class("suggested-action");
         }
@@ -1095,24 +1801,27 @@ impl Recorder {
         });
         self.again_button.set_sensitive(tracks_kept);
         self.again_button.set_tooltip_text(Some(if tracks_kept {
-            "Transcribe the meeting again with the selected language"
+            t("done.transcribe_again_hint")
         } else {
-            "The separate tracks of this meeting are gone, so it cannot be transcribed again"
+            t("done.transcribe_again_gone")
         }));
 
         let text = match state {
-            State::Idle => "Ready. Press Start recording when the meeting begins.".to_owned(),
-            State::Recording if self.paused.get() => {
-                "Paused. Nothing is recorded until you resume.".to_owned()
-            }
-            State::Recording => {
-                "Recording. Name, audio file and language can still be changed.".to_owned()
-            }
-            State::Stopping => "Saving the audio…".to_owned(),
-            State::Transcribing => "Transcribing the meeting on this computer…".to_owned(),
+            State::Idle => t("ready.status_idle").to_owned(),
+            State::Recording if self.paused.get() => t("ready.status_paused").to_owned(),
+            State::Recording => t("ready.status_recording").to_owned(),
+            State::Stopping => t("ready.status_stopping").to_owned(),
+            // Where the audio goes is a privacy question: say it.
+            State::Transcribing => match crate::provider::configured() {
+                Ok(Provider::Cloud(cloud)) => {
+                    tf("ready.status_transcribing_cloud", &[cloud.name()])
+                }
+                _ => t("ready.status_transcribing").to_owned(),
+            },
             State::Done => String::new(),
         };
         self.status_label.set_label(&text);
+        self.update_actions();
     }
 
     /// Shows the page for the current state, edge to edge while transcribing.
@@ -1153,9 +1862,6 @@ impl Recorder {
         self.window.set_size_request(minimum.0, minimum.1);
         self.window.set_default_size(size.0, size.1);
         self.window.queue_resize();
-        glib::timeout_add_local_once(Duration::from_millis(50), move || {
-            hyprland_resize(size);
-        });
     }
 
     fn tick(&self) {
@@ -1173,6 +1879,22 @@ impl Recorder {
             self.compact_timer.set_label(&clock);
             self.dot.set_opacity(opacity);
             self.compact_dot.set_opacity(opacity);
+        }
+        // Either source may fail or fall back (a refused permission, no
+        // device, a tap refused and BlackHole used instead, a full disk);
+        // say so under the meters until it captures again.
+        let notes: Vec<String> = [self.mic.note(), self.system.note()]
+            .into_iter()
+            .flatten()
+            .collect();
+        match (!notes.is_empty()).then(|| notes.join(" ")) {
+            Some(note) => {
+                if self.audio_banner.title() != note {
+                    self.audio_banner.set_title(&note);
+                }
+                self.audio_banner.set_revealed(true);
+            }
+            None => self.audio_banner.set_revealed(false),
         }
     }
 
@@ -1200,11 +1922,6 @@ impl Recorder {
         };
         self.window.set_default_size(size.0, size.1);
         self.window.queue_resize();
-        // A compositor may ignore a client asking to change the size of a
-        // window that is already on screen; on Hyprland, ask it directly.
-        glib::timeout_add_local_once(Duration::from_millis(50), move || {
-            hyprland_resize(size);
-        });
     }
 
     /// Recorded time so far, without the pauses.
@@ -1251,31 +1968,36 @@ impl Recorder {
             self.state.get(),
             State::Recording | State::Stopping | State::Transcribing
         ) {
-            self.toast("Finish the current recording first");
+            self.toast(t("help.finish_first"));
             return;
         }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let dialog = adw::AlertDialog::new(Some("Import audio"), Some(&name));
+        let dialog = adw::AlertDialog::new(Some(t("import.dialog_title")), Some(&name));
         let group = adw::PreferencesGroup::new();
-        let language_labels: Vec<&str> = LANGUAGES.iter().map(|(_, label)| *label).collect();
+        let language_labels: Vec<&str> = LANGUAGE_CODES
+            .iter()
+            .map(|code| language_label(code))
+            .collect();
         let language = adw::ComboRow::builder()
-            .title("Language")
+            .title(t("done.language_again"))
             .model(&gtk::StringList::new(&language_labels))
             .selected(self.language_row.selected())
             .build();
+        let mut speaker_choices = vec![t("import.auto_speakers")];
+        speaker_choices.extend(SPEAKER_NUMBERS);
         let speakers = adw::ComboRow::builder()
-            .title("Speakers")
-            .subtitle("Recognized by their voices")
-            .model(&gtk::StringList::new(&SPEAKER_CHOICES))
+            .title(t("done.speakers"))
+            .subtitle(t("import.subtitle_speakers"))
+            .model(&gtk::StringList::new(&speaker_choices))
             .build();
         group.add(&language);
         group.add(&speakers);
         dialog.set_extra_child(Some(&group));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("import", "Import");
+        dialog.add_response("cancel", t("import.cancel"));
+        dialog.add_response("import", t("import.confirm"));
         dialog.set_response_appearance("import", adw::ResponseAppearance::Suggested);
         dialog.set_default_response(Some("import"));
         dialog.set_close_response("cancel");
@@ -1284,9 +2006,9 @@ impl Recorder {
             if response != "import" {
                 return;
             }
-            let code = LANGUAGES
+            let code = LANGUAGE_CODES
                 .get(language.selected() as usize)
-                .map(|(code, _)| *code)
+                .copied()
                 .unwrap_or("auto");
             let count = match speakers.selected() {
                 0 => None,
@@ -1308,7 +2030,7 @@ impl Recorder {
         let title = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Imported audio".to_owned());
+            .unwrap_or_else(|| t("done.imported_audio").to_owned());
         // The file's own date says when the meeting was, better than now.
         let started_at = std::fs::metadata(&path)
             .and_then(|m| m.modified())
@@ -1336,24 +2058,23 @@ impl Recorder {
             imported: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             speaker_count: speakers,
             model: None,
+            provider: None,
             chapters: Vec::new(),
             chapters_by: None,
         });
         self.animation_since.set(Some(std::time::Instant::now()));
         self.animation.reset();
-        self.animation.set_stage("Importing audio");
+        self.animation.set_stage(t("import.importing"));
         self.animation.set_running(true);
         self.set_state(State::Stopping);
 
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (source, target) = (path.clone(), out.clone());
-            let staging = glib::user_cache_dir()
-                .join(APP_NAME)
-                .join(format!("import-{}", ipc::now()));
+            let staging = crate::paths::cache().join(format!("import-{}", ipc::now()));
             let converted = gio::spawn_blocking(move || import_audio(&source, &target, &staging))
                 .await
-                .unwrap_or_else(|_| Err("the import stopped unexpectedly".into()));
+                .unwrap_or_else(|_| Err(t("help.stopped_unexpectedly").into()));
             let result = match converted {
                 Ok(duration) => {
                     if let Some(m) = this.manifest.borrow_mut().as_mut() {
@@ -1377,8 +2098,6 @@ impl Recorder {
             .into_iter()
             .find(|dir| Some(dir) != current.as_ref())
         else {
-            // One question at a time: the bar widget waits for a start without a recovery.
-            self.offer_bar_widget();
             return;
         };
         let note = read_recording_note(&staging);
@@ -1389,14 +2108,16 @@ impl Recorder {
             .unwrap_or_default();
         let length = format_elapsed(raw_duration(&staging));
         let dialog = adw::AlertDialog::new(
-            Some("Unfinished recording found"),
-            Some(&format!(
-                "A recording from {when} ({length}) was not stopped properly, probably because the app quit. Save it as a meeting?"
-            )),
+            Some(t("done.recovery_title")),
+            Some(
+                &t("done.recovery_body")
+                    .replacen("{}", &when, 1)
+                    .replacen("{}", &length, 1),
+            ),
         );
-        dialog.add_response("discard", "Discard");
-        dialog.add_response("later", "Later");
-        dialog.add_response("save", "Save");
+        dialog.add_response("discard", t("done.recovery_discard"));
+        dialog.add_response("later", t("done.recovery_later"));
+        dialog.add_response("save", t("done.recovery_save"));
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
         dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
         dialog.set_default_response(Some("save"));
@@ -1412,57 +2133,14 @@ impl Recorder {
         dialog.present(Some(&self.window));
     }
 
-    /// Asks once whether the widget may go in the Omarchy bar.
-    fn offer_bar_widget(self: &Rc<Self>) {
-        if !crate::bar_widget::should_offer() {
-            return;
-        }
-        let dialog = adw::AlertDialog::new(
-            Some("Add Meeting Recorder to your bar?"),
-            Some(
-                "The bar then shows a live waveform while you record, and nothing the rest of the time. Clicking it opens the app.",
-            ),
-        );
-        dialog.add_response("no", "No Thanks");
-        dialog.add_response("add", "Add to Bar");
-        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("add"));
-        dialog.set_close_response("no");
-        let this = self.clone();
-        dialog.connect_response(None, move |_, response| {
-            if response != "add" {
-                settings::set_bar_widget_offered();
-                return;
-            }
-            let (tx, rx) = async_channel::bounded(1);
-            std::thread::spawn(move || {
-                let _ = tx.send_blocking(crate::bar_widget::add());
-            });
-            let this = this.clone();
-            glib::spawn_future_local(async move {
-                match rx.recv().await {
-                    Ok(Ok(())) => {
-                        settings::set_bar_widget_offered();
-                        this.toast("Added to the bar");
-                    }
-                    Ok(Err(message)) => {
-                        this.toast(&format!("Could not add it to the bar: {message}"))
-                    }
-                    Err(_) => {}
-                }
-            });
-        });
-        dialog.present(Some(&self.window));
-    }
-
     /// Picks an unfinished recording up where it stopped and finishes it like Stop does.
     fn recover(self: &Rc<Self>, staging: PathBuf, note: Option<RecordingNote>) {
         if self.state.get() != State::Idle {
-            self.toast("Finish the current recording first");
+            self.toast(t("help.finish_first"));
             return;
         }
         let note = note.unwrap_or_else(|| RecordingNote {
-            title: "Recovered recording".to_owned(),
+            title: t("done.recovered_title").to_owned(),
             started_at: ipc::now() - raw_duration(&staging),
             format: settings::load_format(),
             language: settings::load_language().to_owned(),
@@ -1471,9 +2149,9 @@ impl Recorder {
         if let Some(i) = Format::ALL.iter().position(|f| *f == note.format) {
             self.format_row.set_selected(i as u32);
         }
-        if let Some(i) = LANGUAGES
+        if let Some(i) = LANGUAGE_CODES
             .iter()
-            .position(|(code, _)| *code == note.language)
+            .position(|code| **code == note.language)
         {
             self.language_row.set_selected(i as u32);
         }
@@ -1499,10 +2177,13 @@ impl Recorder {
                 } else {
                     format!("{size_mb} MB")
                 };
-                self.model_banner.set_title(&format!(
-                    "The speech model ({name}, {size}) is needed to transcribe"
-                ));
-                self.model_banner.set_button_label(Some("Download"));
+                self.model_banner.set_title(
+                    &t("ready.model_needed")
+                        .replacen("{}", &name, 1)
+                        .replacen("{}", &size, 1),
+                );
+                self.model_banner
+                    .set_button_label(Some(t("ready.model_download")));
                 self.model_banner.set_revealed(true);
             }
             None => self.model_banner.set_revealed(false),
@@ -1515,7 +2196,7 @@ impl Recorder {
             return;
         }
         self.model_banner.set_button_label(None);
-        self.model_banner.set_title("Downloading the speech model…");
+        self.model_banner.set_title(t("ready.model_downloading"));
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
         let (done_tx, done_rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
@@ -1527,10 +2208,14 @@ impl Recorder {
         glib::spawn_future_local(async move {
             while let Ok(event) = events_rx.recv().await {
                 match event {
-                    Event::Progress(progress) => this.model_banner.set_title(&format!(
-                        "Downloading the speech model… {:.0}%",
-                        progress * 100.0
-                    )),
+                    Event::Progress(progress) => {
+                        this.model_banner
+                            .set_title(&t("ready.model_progress").replacen(
+                                "{:.0}",
+                                &format!("{:.0}", progress * 100.0),
+                                1,
+                            ))
+                    }
                     Event::Finished => break,
                     _ => {}
                 }
@@ -1538,11 +2223,13 @@ impl Recorder {
             let result = done_rx
                 .recv()
                 .await
-                .unwrap_or_else(|_| Err("the download stopped".into()));
+                .unwrap_or_else(|_| Err(t("help.download_stopped").into()));
             this.model_downloading.set(false);
             match result {
-                Ok(_) => this.toast("Speech model ready"),
-                Err(message) => this.toast(&format!("Could not download the model: {message}")),
+                Ok(_) => this.toast(t("help.model_ready")),
+                Err(message) => {
+                    this.toast(&t("help.model_download_failed").replace("{}", &message))
+                }
             }
             this.update_model_banner();
         });
@@ -1564,26 +2251,24 @@ impl Recorder {
         // A name typed before starting is kept; otherwise one from the time.
         if self.title_row.text().trim().is_empty() {
             let title = glib::DateTime::now_local()
-                .and_then(|now| now.format("Meeting %H:%M"))
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| "Meeting".to_owned());
+                .and_then(|now| now.format("%H:%M"))
+                .map(|time| format!("{} {time}", t("done.fallback_title")))
+                .unwrap_or_else(|_| t("done.fallback_title").to_owned());
             self.title_row.set_text(&title);
         }
         self.paused.set(false);
         self.paused_secs.set(0);
         self.pause_began.set(0);
         let started_at = ipc::now();
-        let staging = glib::user_cache_dir()
-            .join(APP_NAME)
-            .join(started_at.to_string());
+        let staging = crate::paths::cache().join(started_at.to_string());
         if let Err(e) = std::fs::create_dir_all(&staging)
             .and_then(|_| self.mic.start_recording(&staging.join("mic.raw")))
             .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
         {
-            self.mic.stop_recording();
-            self.system.stop_recording();
+            let _ = self.mic.stop_recording();
+            let _ = self.system.stop_recording();
             self.status_label
-                .set_label(&format!("Could not start recording: {e}"));
+                .set_label(&t("help.could_not_start").replace("{}", &e.to_string()));
             return;
         }
         write_recording_note(
@@ -1600,6 +2285,19 @@ impl Recorder {
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
         self.set_state(State::Recording);
+        // Keep the Mac from idle-sleeping while recording. `-w` ties the
+        // assertion to this process, so it dies with the app even on a crash.
+        match std::process::Command::new("caffeinate")
+            .args(["-i", "-w", &std::process::id().to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => *self.caffeinate.borrow_mut() = Some(child),
+            // Recording still works; only idle sleep is no longer held off.
+            Err(e) => eprintln!("{APP_NAME}: caffeinate: {e}"),
+        }
     }
 
     fn stop(self: &Rc<Self>) {
@@ -1613,15 +2311,31 @@ impl Recorder {
         }
         self.freeze_meters(false);
         self.animation_since.set(Some(std::time::Instant::now()));
-        self.mic.stop_recording();
-        self.system.stop_recording();
+        // A write that failed mid-recording (a full disk) lost audio; say so
+        // now, since the meeting is saved from what did reach the disk.
+        let length = self.elapsed();
+        let lost = [self.mic.stop_recording(), self.system.stop_recording()];
+        if let Some(e) = lost.iter().flatten().next() {
+            self.toast(&tf("banner.audio_write_failed", &[e]));
+        } else if length >= SILENT_HINT_SECS
+            && !self.system.heard_anything()
+            && !self.silent_hint_shown.replace(true)
+        {
+            // A refused tap records digital silence, which no check can tell
+            // from a Mac that played nothing; ask, once per launch.
+            self.toast(t("banner.computer_silent"));
+        }
+        if let Some(mut caffeinate) = self.caffeinate.borrow_mut().take() {
+            let _ = caffeinate.kill();
+            let _ = caffeinate.wait();
+        }
         let Some(staging) = self.staging.borrow().clone() else {
             return;
         };
         self.set_compact(false);
         // Straight to the animation: the waves would suggest it is still recording.
         self.animation.reset();
-        self.animation.set_stage("Saving audio");
+        self.animation.set_stage(t("help.stages_saving"));
         self.animation.set_running(true);
         self.set_state(State::Stopping);
 
@@ -1651,11 +2365,12 @@ impl Recorder {
                 language: language.to_owned(),
                 speakers: vec![
                     settings::load_your_name(),
-                    meeting::DEFAULT_REMOTE.to_owned(),
+                    meeting::default_remote().to_owned(),
                 ],
                 imported: None,
                 speaker_count: None,
                 model: None,
+                provider: None,
                 chapters: Vec::new(),
                 chapters_by: None,
             };
@@ -1682,7 +2397,7 @@ impl Recorder {
         language: &'static str,
     ) -> Result<(), String> {
         let Some(out) = self.result_dir.borrow().clone() else {
-            return Err("no meeting folder".into());
+            return Err(t("help.no_meeting_folder").into());
         };
         self.set_compact(false);
         if self.animation_since.get().is_none() {
@@ -1690,10 +2405,13 @@ impl Recorder {
         }
         self.set_state(State::Transcribing);
         self.animation.reset();
-        self.animation.set_stage("Loading audio");
+        self.animation
+            .set_stage(crate::locales::t("stage.loading_audio"));
         self.animation.set_progress(0.0);
         self.animation.set_running(true);
 
+        // Read once per run: the thread and the manifest must agree on it.
+        let provider = crate::provider::configured()?;
         let abort = Abort::default();
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
@@ -1701,7 +2419,9 @@ impl Recorder {
         std::thread::spawn(move || {
             let result = match tracks {
                 Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
-                    transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
+                    transcribe::transcribe_single(
+                        &track, language, speakers, provider, &events_tx, &abort,
+                    )
                 }),
                 Tracks::Raw(dir) | Tracks::Kept(dir) => {
                     let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
@@ -1711,7 +2431,9 @@ impl Recorder {
                     };
                     transcribe::load_track(&mic_path).and_then(|mic| {
                         let computer = transcribe::load_track(&computer_path)?;
-                        transcribe::transcribe(&mic, &computer, language, &events_tx, &abort)
+                        transcribe::transcribe(
+                            &mic, &computer, language, provider, &events_tx, &abort,
+                        )
                     })
                 }
             };
@@ -1749,7 +2471,7 @@ impl Recorder {
         let result = done_rx
             .recv()
             .await
-            .unwrap_or_else(|_| Err("transcription stopped unexpectedly".into()));
+            .unwrap_or_else(|_| Err(t("help.transcription_stopped").into()));
         *self.abort.borrow_mut() = None;
 
         let transcript = result?;
@@ -1769,7 +2491,7 @@ impl Recorder {
                 names.resize_with(found.len(), String::new);
                 for (i, name) in names.iter_mut().enumerate() {
                     if name.is_empty() {
-                        *name = format!("Speaker {}", i + 1);
+                        *name = crate::meeting::speaker_n(i + 1);
                     }
                 }
                 manifest.speakers = names;
@@ -1778,7 +2500,7 @@ impl Recorder {
                 // Remote 2, ...: one name each, after your own.
                 let remotes = speakers_in(&markdown)
                     .iter()
-                    .filter_map(|s| s.strip_prefix("Remote ")?.parse::<usize>().ok())
+                    .filter_map(|s| meeting::parse_remote_n(s))
                     .max()
                     .unwrap_or(0);
                 if remotes > 1 {
@@ -1788,13 +2510,13 @@ impl Recorder {
                     }
                     while names.len() < remotes + 1 {
                         let n = names.len();
-                        names.push(format!("Remote {n}"));
+                        names.push(crate::meeting::remote_n(n));
                     }
                     names.truncate(remotes + 1);
                     manifest.speakers = names;
                 } else if manifest.speakers.len() > 2 {
                     manifest.speakers.truncate(2);
-                    manifest.speakers[1] = meeting::DEFAULT_REMOTE.to_owned();
+                    manifest.speakers[1] = meeting::default_remote().to_owned();
                 }
             }
             // The transcription labels speakers You/Remote or Speaker N; use
@@ -1807,7 +2529,9 @@ impl Recorder {
                 .collect();
             markdown = meeting::relabel_all(&markdown, &renames);
             manifest.language = language.to_owned();
-            manifest.model = Some(crate::models::configured());
+            // The model only means something for a local transcript.
+            manifest.model = (provider == Provider::Local).then(crate::models::configured);
+            manifest.provider = Some(provider.id().to_owned());
             manifest.title = self.title();
             // Chapters of a previous transcript would point at lines that are gone.
             manifest.chapters.clear();
@@ -1815,7 +2539,7 @@ impl Recorder {
             let _ = meeting::write(&out, manifest);
         }
         std::fs::write(out.join("transcript.md"), markdown)
-            .map_err(|e| format!("could not write the transcript: {e}"))
+            .map_err(|e| crate::locales::t("help.write_failed").replace("{}", &e.to_string()))
     }
 
     /// Keeps the animation on screen for at least ten seconds, also after a
@@ -1828,7 +2552,7 @@ impl Recorder {
             let cancelled = matches!(result, Err(message) if message == CANCELLED);
             if shown < MINIMUM && !cancelled && self.window.is_visible() {
                 self.animation.set_progress(1.0);
-                self.animation.set_stage("Done");
+                self.animation.set_stage(t("help.stages_done"));
                 glib::timeout_future(MINIMUM - shown).await;
             }
         }
@@ -1842,11 +2566,9 @@ impl Recorder {
         self.apply_title();
 
         let problem = match (&transcript, audio_ok) {
-            (Err(message), _) if message == CANCELLED => {
-                Some("Transcription cancelled.".to_owned())
-            }
-            (Err(message), _) => Some(format!("Transcription failed: {message}.")),
-            (Ok(()), false) => Some("Could not save the audio.".to_owned()),
+            (Err(message), _) if message == CANCELLED => Some(t("help.cancelled").to_owned()),
+            (Err(message), _) => Some(t("help.failed").replace("{}", message)),
+            (Ok(()), false) => Some(t("help.no_audio").to_owned()),
             _ => None,
         };
         let text = self
@@ -1859,6 +2581,7 @@ impl Recorder {
         }
         self.show_transcript(text.as_deref(), problem.as_deref());
         self.transcript_scroll.vadjustment().set_value(0.0);
+        let ok = problem.is_none();
         if let Some(problem) = problem {
             eprintln!("{APP_NAME}: {problem}");
         } else {
@@ -1869,24 +2592,31 @@ impl Recorder {
                 self.generate_chapters();
             }
         }
+        // Finished while the window was elsewhere: say so. Only fires from
+        // the .app (plan 08); from a terminal it is a no-op.
+        if ok && !self.window.is_active() {
+            let note = gio::Notification::new(t("notify.transcribed"));
+            note.set_body(Some(&self.title()));
+            if let Some(app) = self.window.application() {
+                app.send_notification(Some("transcribed"), &note);
+            }
+        }
         if self.quit_when_done.get()
             && let Some(app) = self.window.application()
         {
             app.quit();
         }
     }
-
-    /// Shows a saved meeting on the done page, with the settings it was made with.
     fn open_meeting(self: &Rc<Self>, path: &std::path::Path) {
         if matches!(
             self.state.get(),
             State::Recording | State::Stopping | State::Transcribing
         ) {
-            self.toast("Finish the current recording first");
+            self.toast(t("help.finish_first"));
             return;
         }
         let Some((dir, manifest)) = meeting::open(path) else {
-            self.toast("This is not a meeting the recorder can open");
+            self.toast(t("import.not_openable"));
             return;
         };
         // Folders from before manifests existed get one now.
@@ -1898,9 +2628,9 @@ impl Recorder {
         if let Some(i) = Format::ALL.iter().position(|f| *f == manifest.format) {
             self.format_row.set_selected(i as u32);
         }
-        if let Some(i) = LANGUAGES
+        if let Some(i) = LANGUAGE_CODES
             .iter()
-            .position(|(code, _)| *code == manifest.language)
+            .position(|code| **code == manifest.language)
         {
             self.language_row.set_selected(i as u32);
         }
@@ -1913,9 +2643,7 @@ impl Recorder {
         *self.result_dir.borrow_mut() = Some(dir.clone());
         self.set_state(State::Done);
         let text = std::fs::read_to_string(dir.join("transcript.md")).ok();
-        let problem = text
-            .is_none()
-            .then_some("This meeting has no transcript yet.");
+        let problem = text.is_none().then_some(t("help.no_transcript_yet"));
         self.player.load(&dir);
         self.show_transcript(text.as_deref(), problem);
         self.transcript_scroll.vadjustment().set_value(0.0);
@@ -1928,9 +2656,9 @@ impl Recorder {
     fn show_transcript(self: &Rc<Self>, markdown: Option<&str>, problem: Option<&str>) {
         let ok = problem.is_none() && markdown.is_some();
         self.done_heading.set_label(if ok {
-            "Transcript ready"
+            t("done.transcript_ready")
         } else {
-            "Meeting saved"
+            t("done.meeting_saved")
         });
         self.done_icon.set_icon_name(Some(if ok {
             "object-select-symbolic"
@@ -2081,17 +2809,20 @@ impl Recorder {
         self.chapters_spinner.set_visible(self.generating.get());
         self.chapters_button
             .set_sensitive(!self.generating.get() && self.can_have_chapters());
-        self.chapters_button
-            .set_label(if has_chapters { "Redo" } else { "Generate" });
+        self.chapters_button.set_label(if has_chapters {
+            t("chapters.redo")
+        } else {
+            t("chapters.generate")
+        });
         let description = match &agent {
             Some(agent) if self.generating.get() => {
-                format!("Writing chapters with {}…", agent.name)
+                t("done.chapters_writing").replace("{}", agent.name())
             }
-            Some(agent) if has_chapters => format!("Made with {}", agent.name),
+            Some(agent) if has_chapters => t("chapters.made_with").replace("{}", agent.name()),
             Some(agent) if self.can_have_chapters() => {
-                format!("Let {} divide the meeting into chapters", agent.name)
+                t("chapters.let_divide").replace("{}", agent.name())
             }
-            Some(_) => "For meetings of three minutes or more".to_owned(),
+            Some(_) => t("done.chapters_hint").to_owned(),
             None => String::new(),
         };
         self.chapters_group
@@ -2126,7 +2857,7 @@ impl Recorder {
                 chapters::generate(&asked, &lines)
             })
             .await
-            .unwrap_or_else(|_| Err("the agent stopped unexpectedly".into()));
+            .unwrap_or_else(|_| Err(t("help.agent_stopped").into()));
             this.generating.set(false);
             // The folder may have been renamed meanwhile (same timestamp
             // prefix); a different meeting is left alone.
@@ -2144,8 +2875,9 @@ impl Recorder {
                 Err(message) => {
                     eprintln!("{APP_NAME}: chapters: {message}");
                     this.update_chapters_header(!this.chapter_starts.borrow().is_empty());
-                    this.chapters_group
-                        .set_description(Some(&format!("{} could not make chapters", agent.name)));
+                    this.chapters_group.set_description(Some(
+                        &t("chapters.could_not").replace("{}", agent.name()),
+                    ));
                 }
             }
         });
@@ -2154,7 +2886,7 @@ impl Recorder {
     fn store_chapters(self: &Rc<Self>, dir: &std::path::Path, list: &[Chapter], agent: &Agent) {
         if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
             manifest.chapters = list.to_vec();
-            manifest.chapters_by = Some(agent.id.clone());
+            manifest.chapters_by = Some(agent.id().to_owned());
             let _ = meeting::write(dir, manifest);
         }
         let transcript = dir.join("transcript.md");
@@ -2163,7 +2895,7 @@ impl Recorder {
         }
         let text = std::fs::read_to_string(&transcript).ok();
         self.show_transcript(text.as_deref(), None);
-        self.toast(&format!("{} chapters added", list.len()));
+        self.toast(&t("done.chapters_added").replace("{}", &list.len().to_string()));
     }
 
     /// One paragraph of the transcript: time, speaker and text in columns, with
@@ -2206,9 +2938,9 @@ impl Recorder {
                 .css_classes(["flat", "circular"])
                 .build()
         };
-        let edit = action("document-edit-symbolic", "Edit this line");
-        let swap = action("object-flip-horizontal-symbolic", "Next speaker");
-        let delete = action("user-trash-symbolic", "Delete this line");
+        let edit = action("document-edit-symbolic", t("row.edit"));
+        let swap = action("object-flip-horizontal-symbolic", t("row.next_speaker"));
+        let delete = action("user-trash-symbolic", t("row.delete"));
         let actions = gtk::Box::builder()
             .spacing(2)
             .valign(gtk::Align::Start)
@@ -2225,7 +2957,7 @@ impl Recorder {
         content.append(&actions);
         let row = gtk::ListBoxRow::builder()
             .child(&content)
-            .tooltip_text(format!("Play from {}", paragraph.time))
+            .tooltip_text(t("row.play_from").replace("{}", &paragraph.time))
             .build();
         row.set_cursor_from_name(Some("pointer"));
 
@@ -2396,7 +3128,7 @@ impl Recorder {
         }
         let after = tidy.join("\n") + "\n";
         if std::fs::write(&path, &after).is_err() {
-            self.toast("Could not save the transcript");
+            self.toast(t("help.could_not_save_transcript"));
             return None;
         }
         self.redraw_transcript(&after);
@@ -2430,7 +3162,7 @@ impl Recorder {
             })
             .is_some()
         {
-            self.toast("Saved");
+            self.toast(t("help.saved"));
         }
     }
 
@@ -2447,8 +3179,8 @@ impl Recorder {
             return;
         };
         let toast = adw::Toast::builder()
-            .title("Line deleted")
-            .button_label("Undo")
+            .title(t("help.line_deleted"))
+            .button_label(t("misc.undo"))
             .build();
         let weak = Rc::downgrade(self);
         toast.connect_button_clicked(move |_| {
@@ -2550,12 +3282,12 @@ impl Recorder {
         let mut rows = Vec::new();
         for (i, name) in manifest.speakers.iter().enumerate() {
             let title = match (manifest.imported.is_some(), i) {
-                (false, 0) => "Speaker on the microphone".to_owned(),
+                (false, 0) => t("speaker.row_mic").to_owned(),
                 (false, _) if manifest.speakers.len() > 2 => {
-                    format!("Speaker {i} on the computer audio")
+                    t("speaker.row_computer_n").replace("{}", &i.to_string())
                 }
-                (false, _) => "Speaker on the computer audio".to_owned(),
-                (true, _) => format!("Speaker {}", i + 1),
+                (false, _) => t("speaker.row_computer").to_owned(),
+                (true, _) => tf("speaker.row_import", &[&(i + 1).to_string()]),
             };
             let row = adw::EntryRow::builder()
                 .title(title)
@@ -2604,10 +3336,9 @@ impl Recorder {
             .map(|(i, row)| {
                 let text = row.text().trim().replace(['*', '[', ']', ':', '\n'], "");
                 if text.is_empty() {
-                    labels
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Speaker {}", i + 1))
+                    labels.get(i).cloned().unwrap_or_else(|| {
+                        t("speaker.empty_fallback").replace("{}", &(i + 1).to_string())
+                    })
                 } else {
                     text
                 }
@@ -2620,7 +3351,7 @@ impl Recorder {
         unique.sort();
         unique.dedup();
         if unique.len() != names.len() {
-            self.toast("Every speaker needs a different name");
+            self.toast(t("help.every_speaker"));
             self.show_speakers();
             return;
         }
@@ -2640,12 +3371,15 @@ impl Recorder {
             m.speakers = names.clone();
             let _ = meeting::write(&dir, m);
         }
-        if you_changed && let Some(you) = names.first() {
-            settings::save_your_name(you);
+        if you_changed
+            && let Some(you) = names.first()
+            && let Err(e) = settings::save_your_name(you)
+        {
+            self.toast(&tf("prefs.save_failed", &[&e.to_string()]));
         }
         let text = std::fs::read_to_string(&transcript).ok();
         self.redraw_transcript(text.as_deref().unwrap_or(""));
-        self.toast("Saved");
+        self.toast(t("help.saved"));
     }
 
     /// Renames the meeting folder after the name and rewrites the transcript heading.
@@ -2663,11 +3397,11 @@ impl Recorder {
         let renamed = !folder_is_for(&current, &target);
         if renamed {
             if target.exists() {
-                self.toast("A meeting folder with that name already exists");
+                self.toast(t("help.folder_exists"));
                 return;
             }
             if let Err(e) = std::fs::rename(&current, &target) {
-                self.toast(&format!("Could not rename the folder: {e}"));
+                self.toast(&t("help.rename_failed").replace("{}", &e.to_string()));
                 return;
             }
             *self.result_dir.borrow_mut() = Some(target.clone());
@@ -2693,7 +3427,7 @@ impl Recorder {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
             let _ = std::fs::write(&transcript, format!("# {title}\n{body}"));
         }
-        self.toast("Saved");
+        self.toast(t("help.saved"));
     }
 
     fn close_when_done(&self) {
@@ -2703,13 +3437,11 @@ impl Recorder {
 
     fn confirm_close_recording(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
-            Some("Still recording"),
-            Some(
-                "Closing stops the meeting. The audio is saved and transcribed first, then the app quits.",
-            ),
+            Some(t("done.close_recording_title")),
+            Some(t("done.close_recording_body")),
         );
-        dialog.add_response("keep", "Keep recording");
-        dialog.add_response("stop", "Stop and close");
+        dialog.add_response("keep", t("done.close_recording_keep"));
+        dialog.add_response("stop", t("done.close_recording_stop"));
         dialog.set_response_appearance("stop", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("keep"));
         dialog.set_close_response("keep");
@@ -2725,12 +3457,12 @@ impl Recorder {
 
     fn confirm_close_transcribing(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
-            Some("Still transcribing"),
-            Some("The audio is already saved. The transcript is not finished yet."),
+            Some(t("done.close_transcribing_title")),
+            Some(t("done.close_transcribing_body")),
         );
-        dialog.add_response("keep", "Keep open");
-        dialog.add_response("later", "Close when done");
-        dialog.add_response("cancel", "Cancel transcription");
+        dialog.add_response("keep", t("done.close_transcribing_keep"));
+        dialog.add_response("later", t("done.close_transcribing_later"));
+        dialog.add_response("cancel", t("close.cancel_transcription"));
         dialog.set_response_appearance("cancel", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("keep"));
         dialog.set_close_response("keep");
@@ -2771,9 +3503,8 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    glib::home_dir()
-        .join("Documents/Meetings")
-        .join(format!("{stamp} {}", safe_name(title)))
+    let root = settings::meetings_dir();
+    root.join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -2798,7 +3529,7 @@ fn chapter_row(title: &str, start_ms: i64) -> gtk::ListBoxRow {
         .build();
     let row = gtk::ListBoxRow::builder()
         .child(&label)
-        .tooltip_text(format!("Play from {}", chapters::clock(start_ms)))
+        .tooltip_text(t("chapter.play_from").replace("{}", &chapters::clock(start_ms)))
         .css_classes(["chapter"])
         .build();
     row.set_cursor_from_name(Some("pointer"));
@@ -2871,90 +3602,6 @@ impl Paragraphs {
     }
 }
 
-/// Resizes this app's window through Hyprland, keeping it where it is.
-/// Does nothing outside Hyprland.
-fn hyprland_resize((width, height): (i32, i32)) {
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
-        return;
-    }
-    let pid = std::process::id();
-    std::thread::spawn(move || {
-        // Right after start the window may not be mapped yet; wait for it a little.
-        let mut window = None;
-        for _ in 0..30 {
-            window = own_window(pid);
-            if window.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        let Some(window) = window else { return };
-        let Some(address) = window["address"].as_str().map(str::to_owned) else {
-            return;
-        };
-        hyprctl_dispatch(&format!(
-            "hl.dsp.window.resize({{ x = {width}, y = {height}, window = \"address:{address}\" }})"
-        ));
-        // Hyprland grows a floating window around its centre; a strip that was
-        // dragged into a corner would then stick out. Bring it back on screen.
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        if let Some((x, y)) = own_window(pid).and_then(|w| on_screen(&w)) {
-            hyprctl_dispatch(&format!(
-                "hl.dsp.window.move({{ x = {x}, y = {y}, window = \"address:{address}\" }})"
-            ));
-        }
-    });
-}
-
-fn hyprctl_json(what: &str) -> Option<serde_json::Value> {
-    let out = std::process::Command::new("hyprctl")
-        .args([what, "-j"])
-        .output()
-        .ok()?;
-    serde_json::from_slice(&out.stdout).ok()
-}
-
-fn hyprctl_dispatch(call: &str) {
-    let _ = std::process::Command::new("hyprctl")
-        .arg("dispatch")
-        .arg(call)
-        .output();
-}
-
-/// This process's floating window, as `hyprctl clients -j` describes it.
-fn own_window(pid: u32) -> Option<serde_json::Value> {
-    hyprctl_json("clients")?
-        .as_array()?
-        .iter()
-        .find(|c| c["pid"].as_u64() == Some(u64::from(pid)) && c["floating"] == true)
-        .cloned()
-}
-
-/// Where the window has to go to be fully visible on its monitor, outside the
-/// bar and with a small margin; None when it already is.
-fn on_screen(window: &serde_json::Value) -> Option<(i64, i64)> {
-    const MARGIN: i64 = 12;
-    let (x, y) = (window["at"][0].as_i64()?, window["at"][1].as_i64()?);
-    let (w, h) = (window["size"][0].as_i64()?, window["size"][1].as_i64()?);
-    let monitors = hyprctl_json("monitors")?;
-    let monitor = monitors
-        .as_array()?
-        .iter()
-        .find(|m| m["id"].as_i64() == window["monitor"].as_i64())?;
-    let scale = monitor["scale"].as_f64().unwrap_or(1.0).max(0.1);
-    let reserved = |i: usize| monitor["reserved"][i].as_i64().unwrap_or(0);
-    let left = monitor["x"].as_i64()? + reserved(0) + MARGIN;
-    let top = monitor["y"].as_i64()? + reserved(1) + MARGIN;
-    let right =
-        monitor["x"].as_i64()? + (monitor["width"].as_f64()? / scale) as i64 - reserved(2) - MARGIN;
-    let bottom = monitor["y"].as_i64()? + (monitor["height"].as_f64()? / scale) as i64
-        - reserved(3)
-        - MARGIN;
-    let nx = x.min(right - w).max(left);
-    let ny = y.min(bottom - h).max(top);
-    (nx != x || ny != y).then_some((nx, ny))
-}
-
 /// Repaints a widget and everything in it, for custom drawing after a theme switch.
 fn redraw(widget: &impl IsA<gtk::Widget>) {
     widget.queue_draw();
@@ -2988,7 +3635,7 @@ fn import_audio(
     let bytes = std::fs::metadata(&raw).map(|m| m.len()).unwrap_or(0);
     if !decoded || bytes == 0 {
         let _ = std::fs::remove_dir_all(staging);
-        return Err("this file has no audio ffmpeg can read".into());
+        return Err(t("import.no_audio").into());
     }
     let _ = std::fs::write(&silence, []);
     let listened = export_audio(&raw, &silence, out, Format::Mono);
@@ -3004,7 +3651,7 @@ fn import_audio(
         .unwrap_or(false);
     let _ = std::fs::remove_dir_all(staging);
     if !listened || !kept {
-        return Err("could not convert the audio".into());
+        return Err(t("import.no_convert").into());
     }
     Ok((bytes / (48_000 * 2 * 2)) as i64)
 }
@@ -3051,7 +3698,7 @@ fn read_recording_note(staging: &std::path::Path) -> Option<RecordingNote> {
 
 /// Recording staging folders left behind, with some audio in them.
 fn unfinished_recordings() -> Vec<PathBuf> {
-    let root = glib::user_cache_dir().join(APP_NAME);
+    let root = crate::paths::cache();
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -3223,7 +3870,7 @@ fn meter(
                     gtk::cairo::FontWeight::Normal,
                 );
                 cr.set_font_size(12.0);
-                let text = "Not recording";
+                let text = t("canvas.not_recording");
                 let w = cr.text_extents(text).map(|e| e.x_advance()).unwrap_or(0.0);
                 // In the top part, clear of the line at its thickest.
                 cr.move_to((width - w) / 2.0, 15.0);
@@ -3265,7 +3912,7 @@ fn meter(
             );
             cr.set_font_size(13.0);
             cr.move_to(cx - 20.0, cy + 5.0);
-            let _ = cr.show_text("PAUSED");
+            let _ = cr.show_text(t("canvas.paused"));
         }
     });
     area
@@ -3290,4 +3937,70 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
             .build(),
     );
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `win.*` action the window registers in `install_actions`.
+    const WIN_ACTIONS: &[&str] = &[
+        "win.new-recording",
+        "win.open-meeting",
+        "win.import",
+        "win.reveal",
+        "win.start",
+        "win.pause",
+        "win.stop",
+        "win.compact",
+        "win.copy-transcript",
+        "win.fullscreen",
+        "win.transcribe-again",
+    ];
+
+    fn actions_in(model: &gio::MenuModel, out: &mut Vec<String>) {
+        for i in 0..model.n_items() {
+            if let Some(action) = model
+                .item_attribute_value(i, "action", None)
+                .and_then(|v| v.get::<String>())
+            {
+                // A `win.transcribe-again::"en"` target still names its action.
+                let base = action.split("::").next().unwrap_or(&action).to_owned();
+                out.push(base);
+            }
+            let links = model.iterate_item_links(i);
+            while let Some((_, linked)) = links.next() {
+                actions_in(&linked, out);
+            }
+        }
+    }
+
+    #[test]
+    fn menu_items_name_registered_actions() {
+        let bar = menu_model();
+        let mut actions = Vec::new();
+        actions_in(bar.upcast_ref::<gio::MenuModel>(), &mut actions);
+        assert!(!actions.is_empty());
+        for action in &actions {
+            let known = action.starts_with("win.")
+                || action.starts_with("app.")
+                || action.starts_with("window.")
+                || action.starts_with("text.")
+                || action.starts_with("clipboard.")
+                || action.starts_with("selection.");
+            assert!(known, "menu names unknown action {action}");
+            if action.starts_with("win.") {
+                assert!(
+                    WIN_ACTIONS.contains(&action.as_str()),
+                    "menu names unregistered {action}"
+                );
+            }
+        }
+        for expected in WIN_ACTIONS {
+            assert!(
+                actions.iter().any(|a| a == expected),
+                "menu misses {expected}"
+            );
+        }
+    }
 }

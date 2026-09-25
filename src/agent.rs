@@ -1,10 +1,10 @@
-//! Runs a prompt through the coding agent Omarchy is set up with
-//! (`omarchy-default-agent`), headless and without tools.
+//! Runs a prompt through the coding agent named by `agent = "…"` in
+//! config.toml, headless and without tools.
 //!
-//! This is a port of the runner in the text-transform plugin
-//! (github.com/jankeesvw/omarchy-text-transform, `bin/text-transform`: agent
-//! detection, `build_command`, `read_answer`, `tidy`). The per-agent flags are
-//! the part that goes stale when an agent ships a new feature, so keep the two
+//! The runner is a port of the agent runner in the upstream author's
+//! text-transform plugin (`bin/text-transform`: agent detection,
+//! `build_command`, `read_answer`, `tidy`). The per-agent flags are the part
+//! that goes stale when an agent ships a new feature, so keep the two
 //! in sync.
 //!
 //! The text handed to the agent is untrusted: a transcript is whatever was said
@@ -31,6 +31,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -50,8 +51,10 @@ pub const MAX_ANSWER_BYTES: usize = 128 * 1024;
 /// bounds what a runaway agent can put on disk before anything reads it back.
 /// It has to fit the agent's own session file, which holds the whole prompt.
 const FILE_LIMIT_KB: u64 = 2048;
-/// Linux refuses a single argv string over 128 KiB (MAX_ARG_STRLEN); agents
-/// that only take the prompt as an argument cannot go past it.
+/// The cap on a prompt passed as an argument, for agents that take it no
+/// other way. macOS has no per-string limit, only ARG_MAX (1 MiB) for the
+/// arguments and environment together, and a user's environment can be
+/// large; 120 KiB leaves it plenty and still holds a long meeting's summary.
 const MAX_ARG_BYTES: usize = 120 * 1024;
 
 /// The agent opencode runs as, passed through OPENCODE_CONFIG_CONTENT, a
@@ -85,19 +88,40 @@ const CODEX_NO_TOOLS: &[&str] = &[
     "tools.apps=false",
 ];
 
-/// The default agent, when one is set and can be driven safely.
+/// The default agent, when one is set and can be driven safely: supported,
+/// installed and with no blocker. The fields are private so `status_with`
+/// is the only way to get one, and `run` never receives an agent that
+/// skipped those checks.
 #[derive(Clone, Debug)]
 pub struct Agent {
-    /// The id `omarchy-default-agent` prints, e.g. "claude".
-    pub id: String,
+    /// The id from `agent = "…"` in config.toml, e.g. "claude".
+    id: String,
     /// For the UI, e.g. "Claude Code".
+    name: &'static str,
+}
+
+impl Agent {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// An agent to offer in Settings: known and on PATH, not yet checked for
+/// blockers, so it cannot be run; picking it only saves its id.
+#[derive(Clone, Copy, Debug)]
+pub struct Choice {
+    pub id: &'static str,
     pub name: &'static str,
 }
 
 /// Why there is no usable agent, for a message in the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unavailable {
-    /// No default agent picked (`omarchy default agent <name>`).
+    /// No agent named in config.toml.
     Unset,
     /// Picked but not on PATH.
     Missing(String),
@@ -109,12 +133,10 @@ impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Unavailable::Unset => {
-                write!(
-                    f,
-                    "No default agent. Pick one with: omarchy default agent <name>"
-                )
+                let path = crate::models::config_file().display().to_string();
+                f.write_str(&crate::locales::tf("agent.unset", &[&path]))
             }
-            Unavailable::Missing(id) => write!(f, "{id} is not installed"),
+            Unavailable::Missing(id) => f.write_str(&crate::locales::tf("agent.missing", &[id])),
             Unavailable::Refused(reason) => f.write_str(reason),
         }
     }
@@ -127,20 +149,26 @@ pub fn default_agent() -> Option<Agent> {
 
 /// The default agent, or why it cannot be used.
 pub fn status() -> Result<Agent, Unavailable> {
-    let id = Command::new("omarchy-default-agent")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .split_whitespace()
-                .collect::<String>()
-        })
-        .unwrap_or_default();
+    status_with(configured_id, |id| which(id).is_some())
+}
+
+/// The agent id in config.toml, None when unset.
+pub fn configured_id() -> Option<String> {
+    crate::models::config_value("agent")
+}
+
+/// Saves the agent id; an empty id means no agent.
+pub fn save_configured_id(id: &str) -> std::io::Result<()> {
+    crate::models::save_config_value("agent", id)
+}
+
+/// The default agent from an id source and an install check passed as
+/// closures, so tests can cover selection without a config file or PATH.
+fn status_with(
+    configured_id: impl FnOnce() -> Option<String>,
+    installed: impl FnOnce(&str) -> bool,
+) -> Result<Agent, Unavailable> {
+    let id = configured_id().unwrap_or_default();
     if id.is_empty() {
         return Err(Unavailable::Unset);
     }
@@ -148,7 +176,7 @@ pub fn status() -> Result<Agent, Unavailable> {
     if !supported(&id) {
         return Err(Unavailable::Refused(refusal(&id)));
     }
-    if which(&id).is_none() {
+    if !installed(&id) {
         return Err(Unavailable::Missing(id));
     }
     if let Some(blocker) = blocker(&id) {
@@ -178,21 +206,35 @@ fn label(id: &str) -> &'static str {
     }
 }
 
-/// Must stay in step with `build`: an agent here and missing there runs
-/// nothing, an agent there and missing here would run with its tools.
+/// Every agent the flag table knows, in Preferences order. `supported` and
+/// `build` stay in step through this list: an agent here and missing there
+/// runs nothing, an agent there and missing here would run with its tools.
+const AGENT_IDS: &[&str] = &[
+    "claude", "codex", "opencode", "pi", "omp", "ori", "grok", "copilot", "goose",
+];
+
+/// The table agents found on `PATH`, for the Settings dropdown.
+pub fn installed_agents() -> Vec<Choice> {
+    AGENT_IDS
+        .iter()
+        .filter(|id| which(id).is_some())
+        .map(|id| Choice {
+            id,
+            name: label(id),
+        })
+        .collect()
+}
+
 fn supported(id: &str) -> bool {
-    matches!(
-        id,
-        "claude" | "codex" | "opencode" | "pi" | "omp" | "ori" | "grok" | "copilot" | "goose"
-    )
+    AGENT_IDS.contains(&id)
 }
 
 /// A decision rather than a gap, so it says why.
 fn refusal(id: &str) -> String {
     match id {
-        "agy" => "Antigravity only offers a blanket sandbox, not a way to remove its tools, so the recorder will not send your transcript to it".into(),
-        "crush" => "Crush has no flag to run without tools, so the recorder will not send your transcript to it".into(),
-        other => format!("The recorder does not know how to run {} without tools", label_or_id(other)),
+        "agy" => crate::locales::t("agent.refused_agy").into(),
+        "crush" => crate::locales::t("agent.refused_crush").into(),
+        other => crate::locales::t("agent.refused_unknown").replace("{}", &label_or_id(other)),
     }
 }
 
@@ -206,12 +248,10 @@ fn label_or_id(id: &str) -> String {
 /// What stands between a supported, installed agent and a run.
 fn blocker(id: &str) -> Option<String> {
     match id {
-        "ori" if ori_harness().is_none() => {
-            Some("Ori needs Claude Code or Pi installed to work on a transcript".into())
+        "ori" if ori_harness().is_none() => Some(crate::locales::t("agent.ori_needs").into()),
+        "opencode" if !opencode_tools_off() => {
+            Some(crate::locales::t("agent.opencode_denied").into())
         }
-        "opencode" if !opencode_tools_off() => Some(
-            "OpenCode did not come back with every tool denied, so the recorder will not send your transcript to it".into(),
-        ),
         _ => None,
     }
 }
@@ -322,7 +362,7 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
         "pi" => built.args = s(&pi),
         "omp" => built.args = s(&["-p", "--no-tools", "--mode", "json"]),
         "ori" => {
-            let harness = ori_harness().ok_or("Ori needs Claude Code or Pi installed")?;
+            let harness = ori_harness().ok_or(crate::locales::t("agent.ori_harness"))?;
             built.args = vec![harness.into()];
             built
                 .args
@@ -340,10 +380,7 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
                 .unwrap_or_else(|| home().join(".grok"));
             let native = source.join("bin/grok");
             if !is_executable(&native) {
-                return Err(
-                    "Grok has not been set up yet. Run grok once in a terminal, then try again."
-                        .into(),
-                );
+                return Err(crate::locales::t("agent.grok_setup").into());
             }
             let native = std::fs::canonicalize(&native).map_err(|e| e.to_string())?;
             let grok_home = dir.join("grok-home");
@@ -418,12 +455,13 @@ pub fn run(agent: &Agent, prompt: &str, text: &str) -> Result<String, String> {
     }
     let full = full_prompt(prompt, text);
     if full.len() > MAX_REQUEST_BYTES {
-        return Err("The transcript is too long to send to the agent".into());
+        return Err(crate::locales::t("agent.too_long").into());
     }
     // Every run gets its own empty directory: agents pick up project context
     // from the working directory, and it caps what a tool call could reach if
     // one slipped past the flags.
-    let dir = workdir().map_err(|e| format!("Could not make a working directory: {e}"))?;
+    let dir = workdir()
+        .map_err(|e| crate::locales::t("agent.no_workdir").replace("{}", &e.to_string()))?;
     let result = run_in(agent, &full, &dir);
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -431,32 +469,61 @@ pub fn run(agent: &Agent, prompt: &str, text: &str) -> Result<String, String> {
 
 fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
     let built = build(&agent.id, prompt, dir)?;
+    run_built(agent, &built, prompt, dir, TIMEOUT)
+}
+
+/// The `sh` wrapper around the agent: `sh -c <script> sh <file-limit-kb>
+/// <program> <args…>`, with `gtimeout -k 5 <timeout>` inside when it is on
+/// `PATH`. Takes the flag as a parameter so tests can cover both shapes.
+fn sh_command(built: &Built, timeout: Duration, gtimeout: bool) -> Command {
+    let script = if gtimeout {
+        format!(
+            r#"ulimit -f "$1" && shift && exec gtimeout -k 5 {} "$@" "#,
+            timeout.as_secs()
+        )
+    } else {
+        r#"ulimit -f "$1" && shift && exec "$@" "#.to_owned()
+    };
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .arg(built.file_limit_kb.to_string())
+        .arg(&built.program)
+        .args(&built.args);
+    // SAFETY: setsid is async-signal-safe and touches only the child's own
+    // state. It is the direct equivalent of the `setsid` binary: a new
+    // session, so its own process group (pid == pgid, which `kill_group`
+    // relies on) and no controlling terminal.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command
+}
+
+fn run_built(
+    agent: &Agent,
+    built: &Built,
+    prompt: &str,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
     let (out_path, err_path) = (dir.join("stdout.txt"), dir.join("stderr.txt"));
     let stdout = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
     let stderr = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
 
     // `ulimit -f` has to be set in the process that becomes the agent, so it
     // goes through a shell that execs it. The agent's stdout and stderr go to
-    // files, which is what the limit bounds.
-    //
-    // `setsid` gives it a session of its own: its own process group, so a
-    // timeout kills everything it started, and no controlling terminal. With
-    // only a new process group, an agent that touches the terminal it
-    // inherited is stopped by the kernel (SIGTTIN) and hangs until the timeout.
-    // The child is not a group leader, so setsid execs in place and keeps its
-    // pid, which is then also the group id.
-    let mut command = Command::new("setsid");
+    // files, which is what the limit bounds. `sh_command` puts it in its own
+    // session through `pre_exec(setsid)`, and wraps it in `gtimeout` when that
+    // is on PATH, so the agent is bounded even when this process dies before
+    // the loop below can kill it; the loop is the backstop.
+    let mut command = sh_command(built, timeout, which("gtimeout").is_some());
     command
-        .arg("sh")
-        .arg("-c")
-        // GNU timeout inside as well, so the agent is bounded even when this
-        // process dies before it can kill it; the loop below is the backstop.
-        .arg(r#"ulimit -f "$1" && secs=$2 && shift 2 && exec timeout -k 5 "$secs" "$@""#)
-        .arg("sh")
-        .arg(built.file_limit_kb.to_string())
-        .arg(TIMEOUT.as_secs().to_string())
-        .arg(&built.program)
-        .args(&built.args)
         .envs(built.env.iter().map(|(k, v)| (k, v)))
         .current_dir(dir)
         .stdin(if built.stdin {
@@ -468,7 +535,7 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
         .stderr(stderr);
     let mut child = command
         .spawn()
-        .map_err(|e| format!("Could not start {}: {e}", agent.name))?;
+        .map_err(|e| crate::locales::tf("agent.no_start", &[agent.name, &e.to_string()]))?;
 
     // The prompt goes in from a thread: a long transcript is more than a pipe
     // holds, and the agent may start answering before it has read it all.
@@ -483,7 +550,7 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() > TIMEOUT + KILL_GRACE * 2 => break None,
+            Ok(None) if started.elapsed() > timeout + KILL_GRACE * 2 => break None,
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(e.to_string()),
         }
@@ -496,10 +563,9 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
         }
         kill_group(child.id(), "KILL");
         let _ = child.wait();
-        return Err(format!(
-            "{} did not answer within {} seconds",
-            agent.name,
-            TIMEOUT.as_secs()
+        return Err(crate::locales::tf(
+            "agent.no_answer",
+            &[agent.name, &timeout.as_secs().to_string()],
         ));
     };
     if let Some(writer) = writer {
@@ -515,31 +581,26 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
 
     // A failing agent says why, and not always on stderr: some print their
     // refusal to stdout, where it would otherwise pass for the answer.
-    // 124 is timeout's own exit status, 137 a KILL after its grace period.
+    // 124 is gtimeout's own exit status, 137 a KILL after its grace period.
     if matches!(status.code(), Some(124 | 137)) {
-        return Err(format!(
-            "{} did not answer within {} seconds",
-            agent.name,
-            TIMEOUT.as_secs()
+        return Err(crate::locales::tf(
+            "agent.no_answer",
+            &[agent.name, &timeout.as_secs().to_string()],
         ));
     }
     if !status.success() {
         let detail = first_line(&stderr).or_else(|| first_line(&stdout));
         return Err(detail.unwrap_or_else(|| {
-            format!(
-                "{} exited with status {}",
-                agent.name,
-                status.code().map_or("?".into(), |c| c.to_string())
-            )
+            let code = status.code().map_or("?".into(), |c| c.to_string());
+            crate::locales::tf("agent.exited", &[agent.name, &code])
         }));
     }
 
     let answer = tidy(&read_answer(&agent.id, &stdout, dir));
     let answer = truncate(&answer, MAX_ANSWER_BYTES);
     if answer.trim().is_empty() {
-        return Err(
-            first_line(&stderr).unwrap_or_else(|| format!("{} returned nothing", agent.name))
-        );
+        return Err(first_line(&stderr)
+            .unwrap_or_else(|| crate::locales::tf("agent.nothing", &[agent.name])));
     }
     Ok(answer.to_owned())
 }
@@ -663,31 +724,24 @@ fn truncate(text: &str, max: usize) -> &str {
 /// these files are written by the agent, not by us.
 fn read_bounded(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     use std::os::unix::fs::OpenOptionsExt;
-    const O_NOFOLLOW: i32 = 0o400000;
-    const O_NONBLOCK: i32 = 0o4000;
+    // The values differ per platform, which is why they come from `libc`.
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let mut bytes = Vec::new();
     file.take(max).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
-/// A private, empty directory for one run.
+/// A private, empty directory for one run, under the per-user `$TMPDIR`.
 fn workdir() -> std::io::Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(std::env::temp_dir);
+    let base = std::env::temp_dir();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = base.join(format!(
-        "omarchy-meeting-recorder-agent-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = base.join(format!("momr-agent-{}-{nanos}", std::process::id()));
     std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
     Ok(dir)
 }
@@ -726,7 +780,7 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// `omarchy-meeting-recorder ask "<prompt>"` with the text on stdin, or
+/// `momr ask "<prompt>"` with the text on stdin, or
 /// `ask --agent` to show which agent would be used.
 pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
     use gtk::glib::ExitCode;
@@ -749,7 +803,7 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
                 .read_to_string(&mut text)
                 .is_err()
             {
-                eprintln!("could not read the text from stdin");
+                eprintln!("{}", crate::locales::t("ask.no_stdin"));
                 return ExitCode::FAILURE;
             }
             match run(&agent, prompt, &text) {
@@ -765,8 +819,8 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
         }
         None => {
             eprintln!(
-                "Usage: {} ask \"<prompt>\" < text | ask --agent",
-                crate::APP_NAME
+                "{}",
+                crate::locales::t("ask.usage").replace("{}", crate::APP_NAME)
             );
             ExitCode::from(2)
         }
@@ -908,5 +962,99 @@ not json"#;
         );
         assert_eq!(first_line("\n  \nboom\nmore").as_deref(), Some("boom"));
         assert_eq!(first_line("   "), None);
+    }
+
+    #[test]
+    fn empty_and_missing_config_give_unset() {
+        let missing = |_: &str| false;
+        assert!(matches!(
+            status_with(|| None, missing),
+            Err(Unavailable::Unset)
+        ));
+        assert!(matches!(
+            status_with(|| Some(String::new()), missing),
+            Err(Unavailable::Unset)
+        ));
+    }
+
+    #[test]
+    fn refused_missing_and_usable_agents_pass_through() {
+        let missing = |_: &str| false;
+        assert!(matches!(
+            status_with(|| Some("crush".into()), missing),
+            Err(Unavailable::Refused(_))
+        ));
+        assert_eq!(
+            status_with(|| Some("claude".into()), missing).map(|agent| agent.id),
+            Err(Unavailable::Missing("claude".into()))
+        );
+        let installed = |_: &str| true;
+        assert_eq!(
+            status_with(|| Some("claude".into()), installed).map(|agent| agent.id),
+            Ok("claude".to_owned())
+        );
+    }
+
+    fn command_argv(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn fake_built() -> Built {
+        Built {
+            program: "agent".into(),
+            args: vec!["-p".into()],
+            env: Vec::new(),
+            stdin: true,
+            file_limit_kb: FILE_LIMIT_KB,
+        }
+    }
+
+    #[test]
+    fn wrapper_argv_without_gtimeout() {
+        let argv = command_argv(&sh_command(&fake_built(), Duration::from_secs(300), false));
+        assert_eq!(argv[0], "-c");
+        assert!(argv[1].contains("ulimit -f"));
+        assert!(!argv[1].contains("gtimeout"));
+        assert_eq!(&argv[2..6], ["sh", "2048", "agent", "-p"]);
+    }
+
+    #[test]
+    fn wrapper_argv_with_gtimeout_inserts_the_inner_bound() {
+        let argv = command_argv(&sh_command(&fake_built(), Duration::from_secs(300), true));
+        assert!(argv[1].contains("gtimeout -k 5 300"));
+        assert_eq!(&argv[2..6], ["sh", "2048", "agent", "-p"]);
+    }
+
+    #[test]
+    fn hung_agent_is_killed_with_its_group() {
+        let dir = workdir().expect("workdir");
+        let agent = Agent {
+            id: "pi".into(),
+            name: "Pi",
+        };
+        // A sleep length no other process on the machine will have, so
+        // pgrep below only finds this test's child.
+        let marker = format!("sleep {}", 900_000 + std::process::id());
+        let built = Built {
+            program: "sh".into(),
+            args: vec!["-c".into(), marker.clone().into()],
+            env: Vec::new(),
+            stdin: false,
+            file_limit_kb: FILE_LIMIT_KB,
+        };
+        let started = Instant::now();
+        let error = run_built(&agent, &built, "", &dir, Duration::from_secs(2)).unwrap_err();
+        assert!(!error.is_empty(), "empty timeout error");
+        assert!(started.elapsed() < Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lingering = Command::new("pgrep")
+            .args(["-f", &format!("^{marker}$")])
+            .output()
+            .map(|out| !out.stdout.is_empty())
+            .unwrap_or(false);
+        assert!(!lingering, "the agent's process group survived");
     }
 }

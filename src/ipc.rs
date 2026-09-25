@@ -1,10 +1,11 @@
-//! Live state for the bar widget.
+//! Live state for a menu bar item or any other client.
 //!
-//! The app listens on a Unix socket in $XDG_RUNTIME_DIR and writes one JSON
+//! The app listens on a Unix socket, `~/Library/Caches/momr/momr.sock` (or
+//! `$TMPDIR/momr.sock` when that path is too long for a socket), and writes one JSON
 //! line per tick to every connected client: 20 times a second while recording,
-//! once a second otherwise. `omarchy-meeting-recorder watch` connects to it and
+//! once a second otherwise. `momr watch` connects to it and
 //! copies those lines to stdout, printing `{"state":"off"}` while the app is not
-//! running, so the widget only has to read NDJSON from a process.
+//! running, so a menu bar item only has to read NDJSON from a process.
 //!
 //! A line looks like:
 //! {"state":"recording","elapsed":754,"title":"Weekly","mic":0.62,"computer":0.31,"progress":0.0}
@@ -13,15 +14,13 @@
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gtk::glib;
-
 use crate::APP_NAME;
-use crate::audio::{Source, to_meter};
+use crate::audio::to_meter;
 
 const MAX_LINE: usize = 4096;
 
@@ -39,8 +38,22 @@ pub struct Status {
 
 pub type SharedStatus = Arc<Mutex<Status>>;
 
-fn socket_path() -> PathBuf {
-    glib::user_runtime_dir().join(format!("{APP_NAME}.sock"))
+/// Where the app listens. `momr-menubar` gets it as `MOMR_SOCKET`, so the
+/// two can never disagree about the rule below.
+pub fn socket_path() -> PathBuf {
+    socket_path_in(&crate::paths::cache())
+}
+
+/// `momr.sock` under `base`, or directly under the temp dir when that would
+/// overflow macOS's 104-byte `sun_path` limit (long user names). `$TMPDIR` is
+/// a private per-user directory, so the fallback keeps its privacy.
+fn socket_path_in(base: &Path) -> PathBuf {
+    let path = base.join(format!("{APP_NAME}.sock"));
+    if path.as_os_str().len() > 100 {
+        std::env::temp_dir().join(format!("{APP_NAME}.sock"))
+    } else {
+        path
+    }
 }
 
 pub fn now() -> i64 {
@@ -53,37 +66,38 @@ pub fn now() -> i64 {
 /// Commands a client may send, one per line.
 pub const COMMANDS: [&str; 4] = ["start", "stop", "compact", "pause"];
 
-/// Starts the socket server. Called once, from the primary instance. Clients
-/// get the state lines; a line a client writes that names one of `COMMANDS` is
-/// passed on to `commands`.
+/// Starts the socket server at `path`. Called once, from the primary
+/// instance. Clients get the state lines; a line a client writes that names
+/// one of `COMMANDS` is passed on to `commands`. `peaks` gives the latest
+/// (mic, computer) peaks. An error means no menu bar item or `momr stop`
+/// can reach this app, which the caller tells the user.
 pub fn serve(
+    path: &Path,
     status: SharedStatus,
-    mic: Source,
-    system: Source,
+    peaks: impl Fn() -> (f32, f32) + Send + 'static,
     commands: async_channel::Sender<&'static str>,
-) {
-    let path = socket_path();
-    // A socket file left behind by a crash refuses new binds; nobody answers on it.
-    if UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path);
+) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        // First run: ~/Library/Caches/momr does not exist yet.
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let Ok(listener) = UnixListener::bind(&path) else {
-        eprintln!("{APP_NAME}: could not listen on {}", path.display());
-        return;
-    };
+    // A socket file left behind by a crash refuses new binds; nobody answers on it.
+    if UnixStream::connect(path).is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
 
     let accepted = clients.clone();
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            // A write timeout rather than non-blocking mode: the flag would be
-            // shared with the reading clone below.
-            if stream
-                .set_write_timeout(Some(Duration::from_millis(20)))
-                .is_err()
-            {
-                continue;
-            }
+            // Best effort: macOS refuses SO_SNDTIMEO once the peer has
+            // already gone, which fire-and-forget clients (`momr start`)
+            // always have. Dropping the connection then would lose the
+            // command, so a client without a timeout still gets its state
+            // lines, and one that stops reading is dropped on the next
+            // failed write instead.
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(20)));
             if let Ok(reader) = stream.try_clone() {
                 let commands = commands.clone();
                 thread::spawn(move || read_commands(reader, &commands));
@@ -103,12 +117,13 @@ pub fn serve(
                 now()
             };
             let busy = recording || snapshot.state == "transcribing";
+            let (mic, computer) = peaks();
             let line = serde_json::json!({
                 "state": snapshot.state,
                 "elapsed": if taking { (until - snapshot.started_at - snapshot.paused_secs).max(0) } else { 0 },
                 "title": snapshot.title,
-                "mic": round(to_meter(mic.recent_peak(3))),
-                "computer": round(to_meter(system.recent_peak(3))),
+                "mic": round(to_meter(mic)),
+                "computer": round(to_meter(computer)),
                 "progress": round(snapshot.progress),
             })
             .to_string()
@@ -130,6 +145,7 @@ pub fn serve(
             }));
         }
     });
+    Ok(())
 }
 
 fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static str>) {
@@ -148,7 +164,7 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static s
     }
 }
 
-/// `omarchy-meeting-recorder stop`: ask the running app to stop recording.
+/// `momr stop`: ask the running app to stop recording.
 pub fn send(command: &str) -> bool {
     match UnixStream::connect(socket_path()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
@@ -160,7 +176,7 @@ fn round(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-/// `omarchy-meeting-recorder watch`: relay the app's state lines to stdout.
+/// `momr watch`: relay the app's state lines to stdout.
 pub fn watch() {
     let mut stdout = std::io::stdout();
     loop {
@@ -178,7 +194,7 @@ pub fn watch() {
                             .and_then(|_| stdout.flush())
                             .is_err()
                         {
-                            return; // the widget went away
+                            return; // the client went away
                         }
                     }
                 }
@@ -191,5 +207,53 @@ pub fn watch() {
             return;
         }
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_base_keeps_the_socket_next_to_the_cache() {
+        let base = Path::new("/Users/someone/Library/Caches/momr");
+        assert_eq!(socket_path_in(base), base.join(format!("{APP_NAME}.sock")));
+    }
+
+    /// `momr start` connects, writes one line and hangs up at once; the
+    /// command must still arrive, and the state lines must flow to a reader.
+    #[test]
+    fn fire_and_forget_commands_arrive() {
+        let dir = std::env::temp_dir().join(format!("momr-ipc-{}", std::process::id()));
+        let path = dir.join("t.sock");
+        let (tx, rx) = async_channel::unbounded();
+        let status: SharedStatus = Arc::new(Mutex::new(Status {
+            state: "idle",
+            ..Default::default()
+        }));
+        serve(&path, status, || (0.5, 0.0), tx).expect("listens");
+        let mut client = UnixStream::connect(&path).expect("connects");
+        client.write_all(b"stop\nnot-a-command\n").unwrap();
+        drop(client);
+        let command = rx.recv_blocking().expect("the command reaches the app");
+        assert_eq!(command, "stop");
+        let reader = UnixStream::connect(&path).unwrap();
+        let mut line = String::new();
+        BufReader::new(reader).read_line(&mut line).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["state"], "idle");
+        assert!(value["mic"].as_f64().unwrap() > 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_base_falls_back_to_the_temp_dir() {
+        let base = Path::new("/Users/").join("a".repeat(200));
+        let path = socket_path_in(&base);
+        assert!(path.as_os_str().len() <= 100, "{}", path.display());
+        assert_eq!(
+            path.file_name().unwrap(),
+            format!("{APP_NAME}.sock").as_str()
+        );
     }
 }

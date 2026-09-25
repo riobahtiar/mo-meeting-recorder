@@ -1,5 +1,5 @@
-//! Remembered preferences: the audio format, the transcription language,
-//! the name you go by in transcripts and whether the bar widget was offered.
+//! Remembered preferences: the audio format, the transcription language and
+//! the name you go by in transcripts.
 
 use std::path::PathBuf;
 
@@ -74,13 +74,4 @@ pub fn load_your_name() -> String {
 
 pub fn save_your_name(name: &str) {
     save("your_name", name);
-}
-
-/// Whether the app already asked to put its widget in the bar.
-pub fn bar_widget_offered() -> bool {
-    load()["bar_widget_offered"].as_str() == Some("yes")
-}
-
-pub fn set_bar_widget_offered() {
-    save("bar_widget_offered", "yes");
 }

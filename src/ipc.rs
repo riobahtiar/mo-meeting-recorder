@@ -1,10 +1,10 @@
-//! Live state for the bar widget.
+//! Live state for a menu bar item or any other client.
 //!
 //! The app listens on a Unix socket in $XDG_RUNTIME_DIR and writes one JSON
 //! line per tick to every connected client: 20 times a second while recording,
 //! once a second otherwise. `momr watch` connects to it and
 //! copies those lines to stdout, printing `{"state":"off"}` while the app is not
-//! running, so the widget only has to read NDJSON from a process.
+//! running, so a menu bar item only has to read NDJSON from a process.
 //!
 //! A line looks like:
 //! {"state":"recording","elapsed":754,"title":"Weekly","mic":0.62,"computer":0.31,"progress":0.0}
@@ -178,7 +178,7 @@ pub fn watch() {
                             .and_then(|_| stdout.flush())
                             .is_err()
                         {
-                            return; // the widget went away
+                            return; // the client went away
                         }
                     }
                 }

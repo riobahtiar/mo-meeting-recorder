@@ -1,11 +1,10 @@
 //! MOM Recorder: records a meeting in two tracks (mic and computer
 //! audio), transcribes it with whisper.cpp after the call, and streams live
-//! levels to a bar widget.
+//! levels to a menu bar item or any other client.
 
 mod agent;
 mod animation;
 mod audio;
-mod bar_widget;
 mod chapters;
 mod diarize;
 mod export;
@@ -54,9 +53,9 @@ fn main() -> glib::ExitCode {
             println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
             println!("  start         start recording in the open window (for a keybinding)");
             println!("  stop          stop the running recording (for a keybinding)");
-            println!("  compact       switch the recording window between full and compact");
-            println!("  pause         pause or resume the running recording");
-            println!("  watch         stream the recorder state as NDJSON, for the bar widget");
+            println!(
+                "  watch         stream the recorder state as NDJSON, for a menu bar item or any other client"
+            );
             println!("  transcribe    transcribe two tracks and print the transcript as Markdown");
             println!(
                 "  ask           run a prompt over stdin through the default agent, without tools"

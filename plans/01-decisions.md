@@ -141,3 +141,11 @@ Each entry: the context, the decision, what was rejected and why, and what follo
 **Context.** Homebrew dylibs are built per architecture; a universal app would need both trees merged with `lipo` for every library.
 **Decision.** Build arm64 on `macos-14` and x86_64 on `macos-13` runners and publish two DMGs.
 **Status.** Accepted.
+
+## D20 Follow Apple's Liquid Glass design language within the GTK shell
+
+**Context.** Apple introduced Liquid Glass as the platform material ([overview](https://developer.apple.com/documentation/technologyoverviews/liquid-glass), [adoption guide](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)), and the [Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines) now describe glass materials, rounder concentric controls, layered icons and edge-to-edge content as the platform look. D12 said "no attempt at translucency or Liquid Glass".
+**Decision.** The macOS chrome (plan 07) follows the Liquid Glass-era HIG: a translucent header bar and sidebar treatment, concentric corner radii, the system palette in light and dark with Reduce Transparency respected, and a layered app icon composed in Icon Composer (plan 07 step 10 already allows `.icon`). Standard AppKit and SwiftUI components adopt the material automatically when built with the latest SDK; GTK widgets do not, so the GTK shell approximates with CSS alpha layering and never fakes refraction or blur it cannot render.
+**Rejected.** Pixel-perfect Liquid Glass inside GTK: the real material (`NSGlassEffectView`, glass button styles, scroll-edge effects) is AppKit and SwiftUI only. Chasing it in Cairo and CSS would produce an imitation that breaks under Reduce Transparency.
+**Consequences.** Plan 07 carries explicit Liquid Glass acceptance notes (translucency that degrades gracefully, icon layers); whether the approximation satisfies is judged by its side-by-side verify, and falling short routes to the plan 12 native shell, whose criteria gain a Liquid Glass line.
+**Status.** Accepted.

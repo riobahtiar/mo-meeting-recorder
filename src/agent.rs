@@ -663,11 +663,10 @@ fn truncate(text: &str, max: usize) -> &str {
 /// these files are written by the agent, not by us.
 fn read_bounded(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     use std::os::unix::fs::OpenOptionsExt;
-    const O_NOFOLLOW: i32 = 0o400000;
-    const O_NONBLOCK: i32 = 0o4000;
+    // The values differ per platform, which is why they come from `libc`.
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let mut bytes = Vec::new();
     file.take(max).read_to_end(&mut bytes)?;

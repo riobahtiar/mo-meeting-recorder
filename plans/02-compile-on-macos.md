@@ -6,14 +6,14 @@
 
 ## Done when
 
-- [ ] `cargo build --release` succeeds on an Apple silicon Mac with the Homebrew libraries.
-- [ ] `cargo test` is green.
-- [ ] `cargo clippy --all-targets -- -D warnings` is clean.
-- [ ] `cargo build --release --features metal` succeeds.
-- [ ] `target/release/momr transcribe-file <file> --model tiny` prints a transcript.
-- [ ] `src/bar_widget.rs` is gone, `ui.rs` no longer offers a bar widget, `settings.rs` has no `bar_widget_offered`.
-- [ ] `grep -rn -i omarchy src/` lists only `theme.rs` (plan 07), `agent.rs` `status()` (plan 05), `player.rs` (plan 04) and `animation.rs`'s palette comment (plan 07).
-- [ ] The root `README.md` status table row for this plan says what was observed.
+- [x] `cargo build --release` succeeds on an Apple silicon Mac with the Homebrew libraries.
+- [x] `cargo test` is green.
+- [x] `cargo clippy --all-targets -- -D warnings` is clean.
+- [x] `cargo build --release --features metal` succeeds.
+- [x] `target/release/momr transcribe-file <file> --model tiny` prints a transcript.
+- [x] `src/bar_widget.rs` is gone, `ui.rs` no longer offers a bar widget, `settings.rs` has no `bar_widget_offered`.
+- [x] `grep -rn -i omarchy src/` lists only `theme.rs` (plan 07), `agent.rs` (plan 05) and `animation.rs`'s palette comment (plan 07). (`player.rs` is already clean: step 2 removed its Omarchy mention.)
+- [x] The root `README.md` status table row for this plan says what was observed.
 
 ## Prerequisites
 
@@ -149,13 +149,19 @@ It should open on the ready page with flat meters (no capture yet). If the windo
 
 ## Status
 
-- [ ] Step 1 toolchain
-- [ ] Step 2 `die_with_parent` stub
-- [ ] Step 3 `libc` constants
-- [ ] Step 4 bar widget removed
-- [ ] Step 5 features
-- [ ] Step 6 build clean
-- [ ] Step 7 tests and lints
-- [ ] Step 8 transcription smoke test
-- [ ] Step 9 Metal timing recorded
-- [ ] Step 10 window opens
+- [x] Step 1 toolchain
+- [x] Step 2 `die_with_parent` stub
+- [x] Step 3 `libc` constants
+- [x] Step 4 bar widget removed
+- [x] Step 5 features
+- [x] Step 6 build clean
+- [x] Step 7 tests and lints
+- [x] Step 8 transcription smoke test
+- [x] Step 9 Metal timing recorded
+- [x] Step 10 window opens
+
+Timings (Apple silicon, 4 s `say` fixture, tiny model): CPU `Done in 19.2s`
+including the first-run 75 MB model download (transcribe itself under a
+second); Metal `Done in 9.0s` with the model cached (8.4 s load, transcribe
+under a second). The tiny model is too small to separate CPU from GPU; load
+time dominates both.

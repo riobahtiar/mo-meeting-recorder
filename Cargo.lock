@@ -809,6 +809,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "momr"
+version = "1.1.1"
+dependencies = [
+ "async-channel",
+ "gtk4",
+ "libadwaita",
+ "libc",
+ "ort",
+ "realfft",
+ "serde_json",
+ "ureq",
+ "whisper-rs",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -875,21 +890,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "momr"
-version = "1.1.1"
-dependencies = [
- "async-channel",
- "gtk4",
- "libadwaita",
- "libc",
- "ort",
- "realfft",
- "serde_json",
- "ureq",
- "whisper-rs",
 ]
 
 [[package]]
@@ -1605,7 +1605,6 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
 dependencies = [
- "libc",
  "whisper-rs-sys",
 ]
 

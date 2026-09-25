@@ -16,6 +16,6 @@ whisper-rs = "0.16"
 
 [features]
 default = []
-# GPU transcription through whisper.cpp's Vulkan backend. Needs the Vulkan
-# headers (`vulkan-headers` on Arch) and glslc (`shaderc`) to build.
-vulkan = ["whisper-rs/vulkan"]
+# GPU transcription through whisper.cpp's Metal backend, for Apple silicon and
+# recent Intel Macs. Needs nothing beyond the Xcode command line tools.
+metal = ["whisper-rs/metal"]

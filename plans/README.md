@@ -19,7 +19,7 @@ Checkbox states: `[ ]` not started, `[~]` in progress, `[x]` done.
 |---|---|---|---|---|
 | [00 Overview](00-overview.md) | Goal, scope, architecture, porting map, risks | | | reference |
 | [01 Decisions](01-decisions.md) | Decision log | | | reference |
-| [02 Compile on macOS](02-compile-on-macos.md) | `cargo build` and `cargo test` pass; Omarchy leftovers that only a compiler can check are gone | | 1 Works | `[ ]` |
+| [02 Compile on macOS](02-compile-on-macos.md) | `cargo build` and `cargo test` pass; Omarchy leftovers that only a compiler can check are gone | | 1 Works | `[x]` |
 | [03 Audio capture](03-audio-capture.md) | Both meters move; recording writes both tracks | 02 | 1 Works | `[ ]` |
 | [04 Playback, window, shortcuts](04-playback-window-shortcuts.md) | Play and seek; children die with the app; compact strip; ⌘ shortcuts | 02 | 1 Works | `[ ]` |
 | [05 Agent and config](05-agent-and-config.md) | Chapters through an agent named in config, same no-tools boundary | 02 | 1 Works | `[ ]` |

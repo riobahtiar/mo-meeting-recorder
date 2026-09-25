@@ -1,14 +1,12 @@
 //! The player on the done page: a two-lane waveform of the meeting (you above
 //! the line, the other side below it) with a playhead, click or drag to seek.
 //!
-//! Playback is `ffmpeg` decoding into `pacat`, not GStreamer: a stock Omarchy
-//! has no GStreamer audio sink, while `pacat` comes with the same package as
-//! the `parec` the recorder already records with. Pausing stops the pipeline
+//! Playback is `ffmpeg` decoding into an audio sink, because the app already
+//! depends on ffmpeg for recording and converting. Pausing stops the pipeline
 //! and playing starts it again at the position; a meeting saved as separate
 //! files is mixed on the fly.
 
 use std::cell::{Cell, RefCell};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
@@ -102,16 +100,13 @@ impl Drop for Playback {
     }
 }
 
-/// Makes the child get SIGTERM when the app goes away, even after a crash, so
-/// the meeting never keeps playing on its own.
+/// Makes the child stop when the app goes away, even after a crash, so the
+/// meeting never keeps playing on its own.
+///
+/// macOS has no parent-death signal. Plan 04 wraps every child in
+/// `momr-audio run`, which kills it when this process goes away.
 fn die_with_parent(command: &mut Command) -> &mut Command {
-    // SAFETY: prctl is async-signal-safe and touches only the child's own state.
-    unsafe {
-        command.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        })
-    }
+    command
 }
 
 /// Length of an audio file in microseconds, from ffprobe.

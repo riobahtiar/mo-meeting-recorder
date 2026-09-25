@@ -1377,8 +1377,6 @@ impl Recorder {
             .into_iter()
             .find(|dir| Some(dir) != current.as_ref())
         else {
-            // One question at a time: the bar widget waits for a start without a recovery.
-            self.offer_bar_widget();
             return;
         };
         let note = read_recording_note(&staging);
@@ -1408,49 +1406,6 @@ impl Recorder {
             }
             "save" => this.recover(staging.clone(), note.clone()),
             _ => {}
-        });
-        dialog.present(Some(&self.window));
-    }
-
-    /// Asks once whether the widget may go in the Omarchy bar.
-    fn offer_bar_widget(self: &Rc<Self>) {
-        if !crate::bar_widget::should_offer() {
-            return;
-        }
-        let dialog = adw::AlertDialog::new(
-            Some("Add Meeting Recorder to your bar?"),
-            Some(
-                "The bar then shows a live waveform while you record, and nothing the rest of the time. Clicking it opens the app.",
-            ),
-        );
-        dialog.add_response("no", "No Thanks");
-        dialog.add_response("add", "Add to Bar");
-        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("add"));
-        dialog.set_close_response("no");
-        let this = self.clone();
-        dialog.connect_response(None, move |_, response| {
-            if response != "add" {
-                settings::set_bar_widget_offered();
-                return;
-            }
-            let (tx, rx) = async_channel::bounded(1);
-            std::thread::spawn(move || {
-                let _ = tx.send_blocking(crate::bar_widget::add());
-            });
-            let this = this.clone();
-            glib::spawn_future_local(async move {
-                match rx.recv().await {
-                    Ok(Ok(())) => {
-                        settings::set_bar_widget_offered();
-                        this.toast("Added to the bar");
-                    }
-                    Ok(Err(message)) => {
-                        this.toast(&format!("Could not add it to the bar: {message}"))
-                    }
-                    Err(_) => {}
-                }
-            });
         });
         dialog.present(Some(&self.window));
     }

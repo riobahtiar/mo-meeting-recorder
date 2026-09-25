@@ -84,10 +84,11 @@ One row per seam. "Remove" means the Linux code is deleted when the macOS replac
 
 ## Phases
 
-1. **Works** (plans 02 to 06): a developer builds it and records a meeting from a terminal.
+1. **Works** (plans 02 to 06; 02 and 06 are in `archives/`): a developer builds it and records a meeting from a terminal.
 2. **Feels native** (07, 09): a Mac user does not notice it is GTK from the chrome, menus, shortcuts, fonts or colours.
 3. **Ships** (08, 10, 11): DMG and Homebrew, CI, identity confirmed.
-4. **Optional** (12): a SwiftUI shell on the Rust core, only if phase 2 falls short by the criteria in that plan.
+4. **Optional** (12, 16): a SwiftUI shell on the Rust core, only if phase 2 falls short by the criteria in that plan; a core crate and a cross-platform shell when Windows or Linux is scheduled.
+5. **Providers** (13) and **Features** (14, 15): cloud transcription, the Indonesian interface, and what the first display session asked for.
 
 ## Risks
 

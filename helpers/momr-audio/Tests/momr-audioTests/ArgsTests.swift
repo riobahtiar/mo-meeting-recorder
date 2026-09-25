@@ -6,15 +6,29 @@ import XCTest
 
 final class ArgsTests: XCTestCase {
     func testCaptureDefaults() {
-        XCTAssertEqual(parseCommand(["mic"]), .mic(rate: 48000, channels: 2))
-        XCTAssertEqual(parseCommand(["system"]), .system(rate: 48000, channels: 2))
+        XCTAssertEqual(parseCommand(["mic"]), .mic(rate: 48000, channels: 2, device: nil))
+        XCTAssertEqual(
+            parseCommand(["system"]), .system(rate: 48000, channels: 2, bundles: []))
         XCTAssertEqual(parseCommand(["list"]), .list)
     }
 
     func testCaptureFlags() {
         XCTAssertEqual(
             parseCommand(["mic", "--rate", "44100", "--channels", "1"]),
-            .mic(rate: 44100, channels: 1))
+            .mic(rate: 44100, channels: 1, device: nil))
+    }
+
+    func testSourceSelection() {
+        XCTAssertEqual(
+            parseCommand(["mic", "--device", "BuiltInMicrophoneDevice"]),
+            .mic(rate: 48000, channels: 2, device: "BuiltInMicrophoneDevice"))
+        XCTAssertEqual(
+            parseCommand(["system", "--bundle", "us.zoom.xos", "--bundle", "com.apple.Safari"]),
+            .system(rate: 48000, channels: 2, bundles: ["us.zoom.xos", "com.apple.Safari"]))
+        XCTAssertNil(parseCommand(["mic", "--device"]))
+        XCTAssertNil(parseCommand(["mic", "--device", "a", "--device", "b"]))
+        XCTAssertNil(parseCommand(["system", "--bundle"]))
+        XCTAssertNil(parseCommand(["system", "--bundle", ""]))
     }
 
     func testRunSubcommand() {

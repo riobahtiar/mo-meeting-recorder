@@ -35,6 +35,24 @@ pub fn menubar_path() -> Option<PathBuf> {
     is_executable(&candidate).then_some(candidate)
 }
 
+/// One input device from `list`, by the UID `momr-audio mic --device` takes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InputDevice {
+    pub name: String,
+    pub uid: String,
+}
+
+/// One process Core Audio knows as an audio client, from `list`, by the
+/// bundle identifier `momr-audio system --bundle` takes. `playing` means it
+/// has an output stream running now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioProcess {
+    pub pid: i64,
+    pub bundle: String,
+    pub name: String,
+    pub playing: bool,
+}
+
 /// What `momr-audio list` reports.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AudioDevices {
@@ -46,8 +64,11 @@ pub struct AudioDevices {
     pub tap_denied: bool,
     /// The BlackHole loopback device, when one is installed.
     pub blackhole: Option<String>,
-    pub inputs: usize,
+    pub inputs: Vec<InputDevice>,
     pub outputs: usize,
+    /// Running apps with audio, for the per-app computer source; an older
+    /// helper lists none.
+    pub processes: Vec<AudioProcess>,
 }
 
 /// The full `momr-audio list` picture, or why the helper could not give it:
@@ -80,12 +101,41 @@ pub fn blackhole_name(helper: &Path) -> Option<String> {
 fn parse_list(text: &str) -> Result<AudioDevices, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let count = |key: &str| value[key].as_array().map_or(0, Vec::len);
+    let text = |v: &serde_json::Value, key: &str| v[key].as_str().unwrap_or("").to_owned();
+    let inputs = value["inputs"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|d| InputDevice {
+                    name: text(d, "name"),
+                    uid: text(d, "uid"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let processes = value["processes"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|p| AudioProcess {
+                    pid: p["pid"].as_i64().unwrap_or(0),
+                    bundle: text(p, "bundle"),
+                    name: text(p, "name"),
+                    playing: p["playing"].as_bool().unwrap_or(false),
+                })
+                // A process without a bundle id cannot be chosen again
+                // after it restarts, so it is not offered.
+                .filter(|p| !p.bundle.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(AudioDevices {
         tap: value["tap"].as_bool().unwrap_or(false),
         tap_denied: value["tap_permission"].as_str() == Some("denied"),
         blackhole: value["blackhole"].as_str().map(str::to_owned),
-        inputs: count("inputs"),
+        inputs,
         outputs: count("outputs"),
+        processes,
     })
 }
 
@@ -109,7 +159,7 @@ mod tests {
     #[test]
     fn list_parses_tap_blackhole_and_counts() {
         let devices = parse_list(
-            r#"{"blackhole":"BlackHole 2ch","inputs":[{"name":"Mic"}],"outputs":[],"tap":true}"#,
+            r#"{"blackhole":"BlackHole 2ch","inputs":[{"name":"Mic","uid":"AppleHDA:1"}],"outputs":[],"tap":true}"#,
         )
         .unwrap();
         assert_eq!(
@@ -118,10 +168,33 @@ mod tests {
                 tap: true,
                 tap_denied: false,
                 blackhole: Some("BlackHole 2ch".into()),
-                inputs: 1,
+                inputs: vec![InputDevice {
+                    name: "Mic".into(),
+                    uid: "AppleHDA:1".into()
+                }],
                 outputs: 0,
+                processes: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn list_offers_processes_with_a_bundle_id_only() {
+        let devices = parse_list(
+            r#"{"tap":true,"processes":[{"pid":41,"bundle":"us.zoom.xos","name":"zoom.us","playing":true},{"pid":42,"bundle":"","name":"coreaudiod"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            devices.processes,
+            vec![AudioProcess {
+                pid: 41,
+                bundle: "us.zoom.xos".into(),
+                name: "zoom.us".into(),
+                playing: true,
+            }]
+        );
+        // An older helper without the key lists none.
+        assert!(parse_list(r#"{"tap":true}"#).unwrap().processes.is_empty());
     }
 
     #[test]

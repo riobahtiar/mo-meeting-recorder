@@ -1,7 +1,9 @@
 //! Remembered preferences in settings.json: the audio format, the
 //! transcription language, the name you go by in transcripts, a relocated
-//! meetings folder and the interface language. (Which engines run lives in
-//! config.toml, see `models::config_value`, because users edit that by hand.)
+//! meetings folder, the interface language, the appearance, the window size,
+//! the timer's default length and the chosen audio sources. (Which engines
+//! run lives in config.toml, see `models::config_value`, because users edit
+//! that by hand.)
 
 use std::path::PathBuf;
 
@@ -24,6 +26,12 @@ fn load() -> serde_json::Value {
 /// is left alone rather than replaced by one holding only this key; one that
 /// is not JSON (hand-edited, say) is replaced, since nothing in it can be used.
 fn save(key: &str, value: &str) -> std::io::Result<()> {
+    save_value(key, serde_json::Value::String(value.to_owned()))
+}
+
+/// `save` for any JSON value; `Null` removes the key, so an unset choice
+/// reads as absent rather than as a literal null.
+fn save_value(key: &str, value: serde_json::Value) -> std::io::Result<()> {
     let path = path();
     let mut settings = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
@@ -33,7 +41,13 @@ fn save(key: &str, value: &str) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(e),
     };
-    settings[key] = serde_json::Value::String(value.to_owned());
+    if value.is_null() {
+        if let Some(object) = settings.as_object_mut() {
+            object.remove(key);
+        }
+    } else {
+        settings[key] = value;
+    }
     write_atomic(&path, settings.to_string().as_bytes())
 }
 
@@ -118,4 +132,103 @@ pub fn load_ui_language() -> Option<crate::locales::Lang> {
 
 pub fn save_ui_language(lang: crate::locales::Lang) -> std::io::Result<()> {
     save("ui_language", lang.code())
+}
+
+pub use crate::theme::Appearance;
+
+pub fn load_appearance() -> Appearance {
+    load()["appearance"]
+        .as_str()
+        .map(Appearance::from_key)
+        .unwrap_or(Appearance::System)
+}
+
+pub fn save_appearance(appearance: Appearance) -> std::io::Result<()> {
+    save("appearance", appearance.key())
+}
+
+/// The window size it was last closed with, when one was saved and it is
+/// something a window can be.
+pub fn load_window_size() -> Option<(i32, i32)> {
+    let settings = load();
+    let width = settings["window_width"].as_i64()?;
+    let height = settings["window_height"].as_i64()?;
+    ((200..=20_000).contains(&width) && (100..=20_000).contains(&height))
+        .then_some((width as i32, height as i32))
+}
+
+pub fn save_window_size(width: i32, height: i32) -> std::io::Result<()> {
+    save_value("window_width", serde_json::json!(width))?;
+    save_value("window_height", serde_json::json!(height))
+}
+
+/// The "stop after" length the timer dialog opens with, in minutes.
+pub fn load_timer_minutes() -> u32 {
+    load()["timer_minutes"]
+        .as_u64()
+        .filter(|m| (1..=24 * 60).contains(m))
+        .map_or(60, |m| m as u32)
+}
+
+pub fn save_timer_minutes(minutes: u32) -> std::io::Result<()> {
+    save_value("timer_minutes", serde_json::json!(minutes))
+}
+
+/// The microphone to record, by Core Audio device UID; None follows the
+/// system default.
+pub fn load_mic_device() -> Option<String> {
+    load()["mic_device"]
+        .as_str()
+        .map(str::trim)
+        .filter(|uid| !uid.is_empty())
+        .map(str::to_owned)
+}
+
+pub fn save_mic_device(uid: Option<&str>) -> std::io::Result<()> {
+    save_value(
+        "mic_device",
+        uid.map_or(serde_json::Value::Null, |uid| {
+            serde_json::Value::String(uid.to_owned())
+        }),
+    )
+}
+
+/// The apps whose audio is recorded, by bundle identifier; empty means
+/// every app.
+pub fn load_computer_sources() -> Vec<String> {
+    load()["computer_sources"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_computer_sources(bundles: &[String]) -> std::io::Result<()> {
+    save_value(
+        "computer_sources",
+        if bundles.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(bundles)
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appearance_keys_round_trip() {
+        for appearance in Appearance::ALL {
+            assert_eq!(Appearance::from_key(appearance.key()), appearance);
+        }
+        assert_eq!(Appearance::from_key("purple"), Appearance::System);
+    }
 }

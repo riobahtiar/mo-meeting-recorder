@@ -1,6 +1,9 @@
-// Default-microphone capture through AVAudioEngine. Restarts on
-// AVAudioEngineConfigurationChange so a headset plugged in mid-call is
-// followed without restarting the process.
+// Microphone capture through AVAudioEngine: the default input, or with
+// `--device` the device with that UID, set on the input unit before the
+// engine starts. Restarts on AVAudioEngineConfigurationChange so a headset
+// plugged in mid-call is followed without restarting the process. A chosen
+// device that is not connected falls back to the default with a line on
+// stderr, so a recording still happens.
 //
 // Exit codes (the table is in main.swift): 4 when the Microphone privacy
 // setting refuses us, 5 when there is no input device or the engine will not
@@ -8,9 +11,24 @@
 // convert.
 
 import AVFoundation
+import AudioToolbox
 import Darwin
 
-func runMic(rate: Double, channels: AVAudioChannelCount) -> Int32 {
+/// Points the engine's input unit at the device with `uid`. False when the
+/// device is not connected or the unit refuses it; the caller then records
+/// the default input instead.
+private func select(device uid: String, on input: AVAudioInputNode) -> Bool {
+    guard let id = deviceID(forUID: uid), let unit = input.audioUnit else {
+        return false
+    }
+    var device = id
+    let status = AudioUnitSetProperty(
+        unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+        &device, UInt32(MemoryLayout<AudioDeviceID>.size))
+    return status == noErr
+}
+
+func runMic(rate: Double, channels: AVAudioChannelCount, device: String?) -> Int32 {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized:
         break
@@ -42,6 +60,11 @@ func runMic(rate: Double, channels: AVAudioChannelCount) -> Int32 {
 
     let engine = AVAudioEngine()
     let input = engine.inputNode
+    if let device, !select(device: device, on: input) {
+        fputs(
+            "momr-audio: the microphone with UID \(device) is not available; recording the default input\n",
+            stderr)
+    }
     guard input.inputFormat(forBus: 0).channelCount > 0 else {
         fputs("momr-audio: no input device\n", stderr)
         return 5

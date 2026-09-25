@@ -1089,6 +1089,202 @@ strings![
         "Perekaman Audio Sistem ditolak untuk aplikasi ini"
     ),
     ("prefs.open_privacy", "Open Settings", "Buka Pengaturan"),
+    // Plan 14: the settings button, the pages, the appearance switch, the
+    // key expanders, the folded sidebar.
+    ("prefs.button", "Settings (⌘,)", "Pengaturan (⌘,)"),
+    ("prefs.page_general", "General", "Umum"),
+    ("prefs.interface", "Interface", "Antarmuka"),
+    ("prefs.appearance", "Appearance", "Tampilan"),
+    ("prefs.appearance_system", "System", "Sistem"),
+    ("prefs.appearance_light", "Light", "Terang"),
+    ("prefs.appearance_dark", "Dark", "Gelap"),
+    ("prefs.keys", "API keys", "Kunci API"),
+    (
+        "prefs.keys_about",
+        "Only the chosen cloud provider needs its key. Keys stay in the macOS Keychain.",
+        "Hanya penyedia cloud yang dipilih yang butuh kuncinya. Kunci disimpan di Keychain macOS."
+    ),
+    ("prefs.key_none", "No key yet", "Belum ada kunci"),
+    ("prefs.key_paste", "Paste the key", "Tempel kuncinya"),
+    ("prefs.key_where", "Where to get it", "Cara mendapatkannya"),
+    (
+        "done.sidebar",
+        "Show the meeting panel",
+        "Tampilkan panel rapat"
+    ),
+    // Plan 15: the timer.
+    ("menu.timer", "Timer…", "Pengatur Waktu…"),
+    ("timer.title", "Timer", "Pengatur waktu"),
+    ("timer.row", "Timer", "Pengatur waktu"),
+    ("timer.off", "Off", "Mati"),
+    ("timer.set", "Set", "Atur"),
+    ("timer.stop_after", "Stop after", "Hentikan setelah"),
+    ("timer.start_at", "Start at", "Mulai pada"),
+    ("timer.stop_at", "Stop at", "Hentikan pada"),
+    ("timer.hours_row", "Hours", "Jam"),
+    ("timer.minutes_row", "Minutes", "Menit"),
+    (
+        "timer.times_hint",
+        "A time that has already passed today means tomorrow.",
+        "Waktu yang sudah lewat hari ini berarti besok."
+    ),
+    (
+        "timer.needs_length",
+        "Set a length of at least one minute",
+        "Atur durasi minimal satu menit"
+    ),
+    ("timer.starts_at", "Starts {}", "Mulai {}"),
+    ("timer.stops_after", "Stops after {}", "Berhenti setelah {}"),
+    ("timer.stops_at", "Stops {}", "Berhenti {}"),
+    ("timer.hours", "{} h", "{} jam"),
+    ("timer.minutes", "{} min", "{} mnt"),
+    (
+        "timer.status_scheduled",
+        "Recording starts on its own at {}.",
+        "Perekaman mulai sendiri pada {}."
+    ),
+    (
+        "timer.status_countdown",
+        "Recording. Stops in {}.",
+        "Merekam. Berhenti dalam {}."
+    ),
+    (
+        "timer.one_minute",
+        "One minute left on the timer",
+        "Satu menit lagi sebelum pengatur waktu berhenti"
+    ),
+    (
+        "prefs.timer_about",
+        "What the Timer dialog opens with.",
+        "Nilai awal dialog pengatur waktu."
+    ),
+    (
+        "prefs.timer_default",
+        "Stop after (minutes)",
+        "Hentikan setelah (menit)"
+    ),
+    // Plan 15: audio sources.
+    ("prefs.mic_default", "System default", "Default sistem"),
+    (
+        "prefs.mic_hint",
+        "Which input is recorded; a change applies at once",
+        "Input mana yang direkam; perubahan berlaku seketika"
+    ),
+    ("prefs.computer_scope", "Record", "Rekam"),
+    (
+        "prefs.computer_scope_hint",
+        "Every app, or only the ones switched on below",
+        "Semua aplikasi, atau hanya yang diaktifkan di bawah"
+    ),
+    ("prefs.computer_all", "All apps", "Semua aplikasi"),
+    (
+        "prefs.computer_chosen",
+        "Only chosen apps",
+        "Hanya aplikasi pilihan"
+    ),
+    ("prefs.computer_status", "Status", "Status"),
+    ("prefs.apps", "Apps to record", "Aplikasi yang direkam"),
+    (
+        "prefs.apps_about",
+        "Apps with audio right now, and the chosen ones that are not running. A chosen app is heard as soon as it starts.",
+        "Aplikasi yang sedang bersuara, dan yang dipilih tapi tidak berjalan. Aplikasi pilihan terdengar begitu dijalankan."
+    ),
+    (
+        "prefs.apps_none",
+        "No app is playing audio now",
+        "Tidak ada aplikasi yang bersuara sekarang"
+    ),
+    ("prefs.app_playing", "playing now", "sedang bersuara"),
+    ("prefs.app_not_running", "Not running", "Tidak berjalan"),
+    // Plan 15: storage.
+    ("prefs.storage", "Storage", "Penyimpanan"),
+    (
+        "storage.about",
+        "Meetings in the meetings folder and API keys in the Keychain are never touched here.",
+        "Rapat di folder rapat dan kunci API di Keychain tidak pernah disentuh di sini."
+    ),
+    ("storage.cache", "Cache", "Cache"),
+    ("storage.models", "Speech models", "Model wicara"),
+    ("storage.settings", "Settings", "Pengaturan"),
+    (
+        "storage.settings_hint",
+        "settings.json and config.toml back to their defaults",
+        "settings.json dan config.toml kembali ke default"
+    ),
+    (
+        "storage.unfinished",
+        "{} unfinished recordings",
+        "{} rekaman belum selesai"
+    ),
+    ("storage.clear", "Clear…", "Bersihkan…"),
+    ("storage.delete", "Delete…", "Hapus…"),
+    ("storage.reset", "Reset…", "Setel ulang…"),
+    ("storage.cleared", "{} freed", "{} dibebaskan"),
+    (
+        "storage.failed",
+        "Could not clear it: {}",
+        "Tidak bisa dibersihkan: {}"
+    ),
+    (
+        "storage.cache_title",
+        "Clear the cache?",
+        "Bersihkan cache?"
+    ),
+    (
+        "storage.cache_body",
+        "Staging files and import scratch go; meetings and settings stay.",
+        "Berkas staging dan sisa impor dihapus; rapat dan pengaturan tetap."
+    ),
+    (
+        "storage.cache_unfinished",
+        "This includes {} unfinished recordings that could still be saved as meetings.",
+        "Termasuk {} rekaman belum selesai yang masih bisa disimpan sebagai rapat."
+    ),
+    (
+        "storage.models_title",
+        "Delete the speech models?",
+        "Hapus model wicara?"
+    ),
+    (
+        "storage.models_body",
+        "The next transcription downloads the model again. Meetings and transcripts stay.",
+        "Transkripsi berikutnya mengunduh modelnya lagi. Rapat dan transkrip tetap."
+    ),
+    (
+        "storage.settings_title",
+        "Reset the settings?",
+        "Setel ulang pengaturan?"
+    ),
+    (
+        "storage.settings_body",
+        "Every setting returns to its default, including the model, the provider and the agent. API keys stay in the Keychain; meetings stay.",
+        "Semua pengaturan kembali ke default, termasuk model, penyedia, dan agen. Kunci API tetap di Keychain; rapat tetap."
+    ),
+    (
+        "storage.settings_reset",
+        "Settings reset",
+        "Pengaturan disetel ulang"
+    ),
+    (
+        "storage.everything",
+        "Reset MOM Recorder…",
+        "Setel ulang MOM Recorder…"
+    ),
+    (
+        "storage.everything_about",
+        "Cache, speech models and settings in one go.",
+        "Cache, model wicara, dan pengaturan sekaligus."
+    ),
+    (
+        "storage.everything_title",
+        "Reset MOM Recorder?",
+        "Setel ulang MOM Recorder?"
+    ),
+    (
+        "storage.everything_body",
+        "Clears the cache, deletes the downloaded speech models and resets every setting. Meetings and API keys stay.",
+        "Membersihkan cache, menghapus model wicara yang diunduh, dan menyetel ulang semua pengaturan. Rapat dan kunci API tetap."
+    ),
 ];
 
 #[cfg(test)]
@@ -1123,6 +1319,7 @@ mod tests {
             include_str!("audio.rs"),
             include_str!("main.rs"),
             include_str!("provider.rs"),
+            include_str!("timer.rs"),
             include_str!("transcribe.rs"),
             include_str!("ui.rs"),
         ];

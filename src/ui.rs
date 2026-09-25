@@ -1,9 +1,12 @@
 //! The recorder window. It has one page per phase: recording (which can shrink
-//! to a compact strip with only the waves and the clock), transcribing (the
-//! animation, edge to edge) and done (the transcript and what to do with it).
-//! Around it: the native menu bar and the actions behind it, the Settings
-//! dialog, the About window, and the menu bar item launched next to the app.
-//! Every other module is a leaf this one calls.
+//! to a compact strip: the clock in the title bar over one two-lane wave),
+//! transcribing (the animation, edge to edge) and done (the transcript and
+//! what to do with it, in a split view whose sidebar folds away in a narrow
+//! window). The window keeps the size the user gave it, remembered between
+//! launches; pages adapt to it, and only the strip changes it. Around it:
+//! the native menu bar and the actions behind it, the Settings dialog in
+//! pages, the Timer dialog, the About window, and the menu bar item launched
+//! next to the app. Every other module is a leaf this one calls.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -25,14 +28,19 @@ use crate::locales::{Lang, t, tf};
 use crate::meeting::{self, Manifest};
 use crate::player::Player;
 use crate::provider::{Cloud, Provider};
+use crate::timer;
 use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGE_CODES, language_label};
 use crate::{APP_ID, APP_NAME, settings};
 
 const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
 const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
-const FULL_SIZE: (i32, i32) = (480, 700);
-const COMPACT_SIZE: (i32, i32) = (300, 84);
-const DONE_SIZE: (i32, i32) = (1100, 760);
+/// The first launch's window; later ones open at the remembered size.
+const DEFAULT_SIZE: (i32, i32) = (960, 680);
+/// Small enough for a laptop next to a call, large enough for the done page.
+const MIN_SIZE: (i32, i32) = (560, 520);
+/// The compact strip: the header bar and one wave. Also its size request,
+/// since libadwaita holds every window at 360×200 unless told otherwise.
+const COMPACT_SIZE: (i32, i32) = (380, 96);
 /// A recording at least this long with a computer track of exact zeros gets
 /// the permission hint; a shorter one is likely a test.
 const SILENT_HINT_SECS: i64 = 30;
@@ -115,6 +123,9 @@ fn menu_model() -> gio::Menu {
     recording.append_item(&item(t("menu.start"), "win.start"));
     recording.append_item(&item(t("menu.pause_resume"), "win.pause"));
     recording.append_item(&item(t("menu.stop"), "win.stop"));
+    let timed = Menu::new();
+    timed.append_item(&item(t("menu.timer"), "win.timer"));
+    recording.append_section(None, &timed);
 
     let view = Menu::new();
     view.append_item(&item(t("menu.compact"), "win.compact"));
@@ -167,7 +178,6 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
     let menubar_startup = menubar.clone();
     app.connect_startup(move |app| {
         spawn_menubar(&menubar_startup);
-        load_css();
         if let Some(settings) = gtk::Settings::default() {
             // Window buttons on the left, drawn as traffic lights by macos.css.
             settings.set_gtk_decoration_layout(Some("close,minimize,maximize:"));
@@ -187,6 +197,10 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
                 redraw(&window);
             }
         });
+        crate::theme::apply_appearance(
+            settings::load_appearance(),
+            crate::theme::macos_prefers_dark,
+        );
         install_menubar(app);
         app.set_accels_for_action("win.new-recording", &["<Primary>n"]);
         app.set_accels_for_action("win.open-meeting", &["<Primary>o"]);
@@ -196,6 +210,7 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
         app.set_accels_for_action("win.start", &["<Primary>r"]);
         app.set_accels_for_action("win.pause", &["<Primary><Shift>r"]);
         app.set_accels_for_action("win.stop", &["<Primary>period"]);
+        app.set_accels_for_action("win.timer", &["<Primary>t"]);
         app.set_accels_for_action("win.compact", &["<Primary><Shift>m"]);
         app.set_accels_for_action("win.copy-transcript", &["<Primary><Shift>c"]);
         app.set_accels_for_action("win.fullscreen", &["<Primary><Control>f"]);
@@ -274,16 +289,31 @@ fn spawn_menubar(slot: &Rc<RefCell<Option<std::process::Child>>>) {
 struct Recorder {
     window: adw::ApplicationWindow,
     view: adw::ToolbarView,
+    header: adw::HeaderBar,
     toasts: adw::ToastOverlay,
     layout: gtk::Stack,
     compact_action: gio::SimpleAction,
     compact_button: gtk::Button,
+    gear: gtk::Button,
+    /// Brings the folded sidebar back on the done page.
+    sidebar_toggle: gtk::ToggleButton,
+    split: adw::OverlaySplitView,
+    /// Pause, Stop and Expand in the header bar while compact.
+    strip_buttons: gtk::Box,
+    strip_pause: gtk::Button,
+    /// The clock, as the header bar's title while compact.
+    compact_title: gtk::Box,
     title_row: adw::EntryRow,
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
+    timer_row: adw::ActionRow,
+    timer_plan: RefCell<timer::Plan>,
+    /// Whether the one-minute warning has been shown for this recording.
+    timer_warned: Cell<bool>,
     animation: TranscribeAnimation,
     meters: [gtk::DrawingArea; 2],
-    compact_meters: [gtk::DrawingArea; 2],
+    /// The strip's two-lane wave.
+    compact_wave: gtk::DrawingArea,
     dot: gtk::Label,
     timer: gtk::Label,
     compact_dot: gtk::Label,
@@ -311,8 +341,6 @@ struct Recorder {
     chapters_list: gtk::ListBox,
     /// Start of each row in the chapters list, in ms.
     chapter_starts: RefCell<Vec<i64>>,
-    /// The size the window was last fitted to, per page.
-    fitted: Cell<(i32, i32)>,
     chapters_button: gtk::Button,
     chapters_spinner: adw::Spinner,
     /// Looked up once: the default agent, if any.
@@ -326,6 +354,7 @@ struct Recorder {
 
     state: Cell<State>,
     compact: Cell<bool>,
+    /// The size to restore when the strip expands again.
     full_size: Cell<(i32, i32)>,
     started_at: Cell<i64>,
     paused: Cell<bool>,
@@ -375,13 +404,17 @@ impl Recorder {
         )
         .err();
 
+        // The size the window was closed with last time, so it opens the way
+        // it was left; pages adapt to it instead of resizing it.
+        let (width, height) = settings::load_window_size().unwrap_or(DEFAULT_SIZE);
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("MOM Recorder")
-            .default_width(FULL_SIZE.0)
-            .default_height(FULL_SIZE.1)
+            .default_width(width)
+            .default_height(height)
             .build();
         window.add_css_class("macos");
+        window.set_size_request(MIN_SIZE.0, MIN_SIZE.1);
         let view = adw::ToolbarView::new();
         let header = adw::HeaderBar::new();
         let compact_button = gtk::Button::builder()
@@ -390,6 +423,47 @@ impl Recorder {
             .action_name("win.compact")
             .build();
         header.pack_start(&compact_button);
+        // On the done page in a narrow window the sidebar folds away; this
+        // brings it back over the transcript.
+        let sidebar_toggle = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-symbolic")
+            .tooltip_text(t("done.sidebar"))
+            .visible(false)
+            .build();
+        header.pack_start(&sidebar_toggle);
+        // Settings where Mac users look for it; ⌘, and the app menu stay.
+        let gear = gtk::Button::builder()
+            .icon_name("emblem-system-symbolic")
+            .tooltip_text(t("prefs.button"))
+            .action_name("app.preferences")
+            .build();
+        header.pack_end(&gear);
+        // The strip's controls live in the header bar while compact, so the
+        // strip needs no buttons of its own and the title bar stays the
+        // handle to drag it by.
+        let strip_pause = gtk::Button::builder()
+            .icon_name("media-playback-pause-symbolic")
+            .tooltip_text(t("ready.pause"))
+            .action_name("win.pause")
+            .css_classes(["flat", "circular"])
+            .build();
+        let strip_stop = gtk::Button::builder()
+            .icon_name("media-playback-stop-symbolic")
+            .tooltip_text(t("ready.stop"))
+            .action_name("win.stop")
+            .css_classes(["flat", "circular", "strip-stop"])
+            .build();
+        let strip_expand = gtk::Button::builder()
+            .icon_name("view-fullscreen-symbolic")
+            .tooltip_text(t("strip.tooltip"))
+            .action_name("win.compact")
+            .css_classes(["flat", "circular"])
+            .build();
+        let strip_buttons = gtk::Box::builder().spacing(2).visible(false).build();
+        strip_buttons.append(&strip_pause);
+        strip_buttons.append(&strip_stop);
+        strip_buttons.append(&strip_expand);
+        header.pack_end(&strip_buttons);
         view.add_top_bar(&header);
         // Under the header bar, full width, while the speech model still has
         // to be downloaded.
@@ -399,6 +473,8 @@ impl Recorder {
         view.set_content(Some(&toasts));
         window.set_content(Some(&view));
 
+        // Ready and recording: one column, clamped so a wide window keeps the
+        // meters and the button together in the middle.
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(18)
@@ -437,9 +513,18 @@ impl Recorder {
                 .position(|code| *code == saved)
                 .unwrap_or(0) as u32,
         );
+        // The timer: the plan in words, a click opens the dialog.
+        let timer_row = adw::ActionRow::builder()
+            .title(t("timer.row"))
+            .subtitle(t("timer.off"))
+            .activatable(true)
+            .action_name("win.timer")
+            .build();
+        timer_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         group.add(&title_row);
         group.add(&format_row);
         group.add(&language_row);
+        group.add(&timer_row);
         content.append(&group);
 
         let frozen: [Frozen; 2] = Default::default();
@@ -470,7 +555,7 @@ impl Recorder {
             .build();
         let timer = gtk::Label::builder()
             .label("00:00")
-            .css_classes(["title-1", "numeric"])
+            .css_classes(["clock", "numeric"])
             .build();
         status_row.append(&dot);
         status_row.append(&timer);
@@ -502,15 +587,30 @@ impl Recorder {
             .css_classes(["flat"])
             .build();
         content.append(&import_button);
+        let ready = adw::Clamp::builder()
+            .child(&content)
+            .maximum_size(640)
+            .tightening_threshold(560)
+            .build();
+        let ready_scroll = gtk::ScrolledWindow::builder()
+            .child(&ready)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .build();
 
         // Transcribing: the animation fills the whole window.
         let animation = TranscribeAnimation::new();
 
-        // Done: a wide page. Left the meeting and what to do with it, right the
-        // player and the transcript.
+        // Done: a sidebar with the meeting and what to do with it, the player
+        // and the transcript as the content. In a narrow window the sidebar
+        // folds away and the header bar's toggle brings it back.
         let left = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(16)
+            .margin_top(12)
+            .margin_bottom(24)
+            .margin_start(20)
+            .margin_end(20)
             .build();
         let done_header = gtk::Box::builder().spacing(12).build();
         let done_icon = gtk::Image::builder()
@@ -548,7 +648,8 @@ impl Recorder {
         done_group.add(&done_title_row);
         left.append(&done_group);
 
-        // Chapters: a list to jump through, with the agent's button in the header.
+        // Chapters: a list to jump through, with the agent's button in the
+        // header. The sidebar scrolls as a whole, so the list does not.
         let chapters_spinner = adw::Spinner::builder().visible(false).build();
         let chapters_button = gtk::Button::builder()
             .label(t("chapters.generate"))
@@ -561,7 +662,6 @@ impl Recorder {
         let chapters_group = adw::PreferencesGroup::builder()
             .title(t("done.chapters"))
             .header_suffix(&chapters_suffix)
-            .vexpand(true)
             .build();
         let chapters_list = gtk::ListBox::builder()
             .css_classes(["boxed-list"])
@@ -576,12 +676,7 @@ impl Recorder {
                 .margin_bottom(14)
                 .build(),
         ));
-        let chapters_scroll = gtk::ScrolledWindow::builder()
-            .child(&chapters_list)
-            .vexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .build();
-        chapters_group.add(&chapters_scroll);
+        chapters_group.add(&chapters_list);
         left.append(&chapters_group);
 
         let copy_button = gtk::Button::builder()
@@ -606,9 +701,9 @@ impl Recorder {
         left.append(&actions);
 
         let again_group = adw::PreferencesGroup::new();
+        // No subtitle: the value needs the room, and the button says the rest.
         let again_language_row = adw::ComboRow::builder()
             .title(t("done.language_again"))
-            .subtitle(t("done.transcribe_again"))
             .model(&gtk::StringList::new(&language_labels))
             .selected(language_row.selected())
             .build();
@@ -621,11 +716,19 @@ impl Recorder {
         again_language_row.add_suffix(&again_button);
         again_group.add(&again_language_row);
         left.append(&again_group);
+        let sidebar = gtk::ScrolledWindow::builder()
+            .child(&left)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
 
         let right = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
             .hexpand(true)
+            .margin_top(12)
+            .margin_bottom(24)
+            .margin_start(20)
+            .margin_end(24)
             .build();
         let player = Player::new();
         right.append(player.widget());
@@ -645,73 +748,45 @@ impl Recorder {
         transcript_scroll.set_overflow(gtk::Overflow::Hidden);
         right.append(&transcript_scroll);
 
-        let done = gtk::Box::builder()
-            .spacing(24)
-            .margin_top(12)
-            .margin_bottom(24)
-            .margin_start(24)
-            .margin_end(24)
+        let split = adw::OverlaySplitView::builder()
+            .sidebar(&sidebar)
+            .content(&right)
+            .min_sidebar_width(340.0)
+            .max_sidebar_width(400.0)
+            .sidebar_width_fraction(0.36)
             .build();
-        // A fixed, narrow column on the left; the transcript takes the rest.
-        let left_column = adw::Clamp::builder()
-            .child(&left)
-            .maximum_size(320)
-            .tightening_threshold(320)
-            .width_request(320)
-            .hexpand(false)
+        let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            860.0,
+            adw::LengthUnit::Sp,
+        ));
+        narrow.add_setter(&split, "collapsed", Some(&true.to_value()));
+        window.add_breakpoint(narrow);
+        // Folded, the sidebar starts hidden and the toggle shows it as an
+        // overlay; unfolded, it is simply there.
+        split.connect_collapsed_notify(|split| split.set_show_sidebar(!split.is_collapsed()));
+        split
+            .bind_property("show-sidebar", &sidebar_toggle, "active")
+            .bidirectional()
+            .sync_create()
             .build();
-        done.append(&left_column);
-        done.append(&right);
 
-        // Compact mode: only the two waves and the clock.
-        let compact_meters = [
-            meter(&mic, ("blue", MIC_COLOR), 26, &frozen[0], &live),
-            meter(&system, ("orange", SYSTEM_COLOR), 26, &frozen[1], &live),
-        ];
+        // Compact mode: the clock in the title bar, one two-lane wave under it.
         let compact_dot = gtk::Label::builder()
             .label("●")
             .css_classes(["error"])
             .build();
         let compact_timer = gtk::Label::builder()
             .label("00:00")
-            .css_classes(["numeric", "heading"])
+            .css_classes(["numeric", "strip-clock"])
             .build();
-        let compact_clock = gtk::Box::builder()
+        let compact_title = gtk::Box::builder()
             .spacing(6)
             .valign(gtk::Align::Center)
             .build();
-        compact_clock.append(&compact_dot);
-        compact_clock.append(&compact_timer);
-        let compact_waves = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(4)
-            .hexpand(true)
-            .valign(gtk::Align::Center)
-            .build();
-        compact_waves.append(&compact_meters[0]);
-        compact_waves.append(&compact_meters[1]);
-        let compact_strip = gtk::Box::builder()
-            .spacing(12)
-            .margin_top(10)
-            .margin_bottom(10)
-            .margin_start(14)
-            .margin_end(8)
-            .build();
-        let expand_button = gtk::Button::builder()
-            .icon_name("view-fullscreen-symbolic")
-            .tooltip_text(t("strip.tooltip"))
-            .action_name("win.compact")
-            .valign(gtk::Align::Center)
-            .css_classes(["flat", "circular"])
-            .build();
-        compact_strip.append(&compact_clock);
-        compact_strip.append(&compact_waves);
-        compact_strip.append(&expand_button);
-        // The whole strip drags the window around, like a title bar.
-        let compact = gtk::WindowHandle::builder()
-            .child(&compact_strip)
-            .tooltip_text(t("strip.drag_hint"))
-            .build();
+        compact_title.append(&compact_dot);
+        compact_title.append(&compact_timer);
+        let compact_wave = strip_wave(&mic, &system, &frozen, &live);
 
         // Not homogeneous, so the window can shrink to the compact page.
         let layout = gtk::Stack::builder()
@@ -720,10 +795,10 @@ impl Recorder {
             .transition_type(gtk::StackTransitionType::Crossfade)
             .transition_duration(250)
             .build();
-        layout.add_named(&content, Some("record"));
+        layout.add_named(&ready_scroll, Some("record"));
         layout.add_named(animation.widget(), Some("transcribing"));
-        layout.add_named(&done, Some("done"));
-        layout.add_named(&compact, Some("compact"));
+        layout.add_named(&split, Some("done"));
+        layout.add_named(&compact_wave, Some("compact"));
         let drop_hint = gtk::Label::builder()
             .label(t("ready.hint"))
             .css_classes(["drop-hint", "title-2"])
@@ -733,7 +808,6 @@ impl Recorder {
         let overlay = gtk::Overlay::builder().child(&layout).build();
         overlay.add_overlay(&drop_hint);
         toasts.set_child(Some(&overlay));
-
         let compact_action = gio::SimpleAction::new("compact", None);
         window.add_action(&compact_action);
         let quit_action = gio::SimpleAction::new("quit", None);
@@ -742,16 +816,26 @@ impl Recorder {
         let recorder = Rc::new(Recorder {
             window,
             view,
+            header,
             toasts,
             layout,
             compact_action,
             compact_button,
+            gear,
+            sidebar_toggle,
+            split,
+            strip_buttons,
+            strip_pause,
+            compact_title,
             title_row,
             format_row,
             language_row,
+            timer_row,
+            timer_plan: RefCell::default(),
+            timer_warned: Cell::new(false),
             animation,
             meters,
-            compact_meters,
+            compact_wave,
             dot,
             timer,
             compact_dot,
@@ -775,7 +859,6 @@ impl Recorder {
             chapters_group,
             chapters_list,
             chapter_starts: RefCell::default(),
-            fitted: Cell::new(FULL_SIZE),
             chapters_button,
             chapters_spinner,
             agent: std::cell::OnceCell::new(),
@@ -786,7 +869,7 @@ impl Recorder {
             shared,
             state: Cell::new(State::Idle),
             compact: Cell::new(false),
-            full_size: Cell::new(FULL_SIZE),
+            full_size: Cell::new((width, height)),
             started_at: Cell::new(0),
             paused: Cell::new(false),
             frozen,
@@ -1063,11 +1146,31 @@ impl Recorder {
             r.transcribe_again(r.selected_language());
         });
 
+        // The done page's sidebar toggle appears when the split folds.
+        let weak = Rc::downgrade(self);
+        self.split.connect_collapsed_notify(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.show_page();
+            }
+        });
+
+        // Coming back to the app after a change in System Settings: follow
+        // it, on a GTK that cannot do so itself (see theme.rs).
+        self.window.connect_is_active_notify(|window| {
+            if window.is_active() {
+                crate::theme::apply_appearance(
+                    settings::load_appearance(),
+                    crate::theme::macos_prefers_dark,
+                );
+            }
+        });
+
         let weak = Rc::downgrade(self);
         self.window.connect_close_request(move |_| {
             let Some(r) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
+            r.remember_size();
             match r.state.get() {
                 State::Recording => {
                     r.confirm_close_recording();
@@ -1091,7 +1194,7 @@ impl Recorder {
             Some(r) => {
                 if r.window.is_visible() {
                     if r.compact.get() {
-                        r.compact_meters.iter().for_each(|m| m.queue_draw());
+                        r.compact_wave.queue_draw();
                     } else if r.layout.visible_child_name().as_deref() == Some("record") {
                         r.meters.iter().for_each(|m| m.queue_draw());
                     }
@@ -1139,6 +1242,7 @@ impl Recorder {
         });
         Self::on(&act("pause"), self, |r| r.toggle_pause());
         Self::on(&act("stop"), self, |r| r.stop());
+        Self::on(&act("timer"), self, |r| r.show_timer_dialog());
         Self::on(&act("copy-transcript"), self, |r| r.copy_transcript());
         Self::on(&act("fullscreen"), self, |r| r.toggle_fullscreen());
         let again = gio::SimpleAction::new("transcribe-again", Some(glib::VariantTy::STRING));
@@ -1196,6 +1300,7 @@ impl Recorder {
         enable("pause", recording);
         enable("stop", recording);
         enable("compact", recording);
+        enable("timer", matches!(state, State::Idle | State::Recording));
         enable("copy-transcript", state == State::Done);
         enable("transcribe-again", state == State::Done);
         enable("fullscreen", true);
@@ -1307,6 +1412,141 @@ impl Recorder {
         }
     }
 
+    /// The Timer dialog (⌘T): stop after a length, start at a time, stop at
+    /// a time, each behind its own switch. Set replaces the whole plan.
+    fn show_timer_dialog(self: &Rc<Self>) {
+        let dialog = adw::Dialog::builder()
+            .title(t("timer.title"))
+            .content_width(460)
+            .build();
+        let view = adw::ToolbarView::new();
+        let header = adw::HeaderBar::builder()
+            .show_start_title_buttons(false)
+            .show_end_title_buttons(false)
+            .build();
+        let cancel = gtk::Button::with_label(t("import.cancel"));
+        let set = gtk::Button::builder()
+            .label(t("timer.set"))
+            .css_classes(["suggested-action"])
+            .build();
+        header.pack_start(&cancel);
+        header.pack_end(&set);
+        view.add_top_bar(&header);
+        let page = adw::PreferencesPage::new();
+        view.set_content(Some(&page));
+        dialog.set_child(Some(&view));
+
+        let plan = self.timer_plan.borrow().clone();
+        let now = glib::DateTime::now_local().ok();
+        let local = |at: i64| glib::DateTime::from_unix_local(at).ok();
+        // A switch row with hour and minute spin rows that follow it.
+        let clock_group = |title: &str, on: bool, hour: i32, minute: i32, hour_max: f64| {
+            let group = adw::PreferencesGroup::new();
+            let switch = adw::SwitchRow::builder().title(title).active(on).build();
+            let hours = adw::SpinRow::with_range(0.0, hour_max, 1.0);
+            hours.set_title(t("timer.hours_row"));
+            hours.set_value(f64::from(hour));
+            let minutes = adw::SpinRow::with_range(0.0, 59.0, 1.0);
+            minutes.set_title(t("timer.minutes_row"));
+            minutes.set_value(f64::from(minute));
+            for row in [&hours, &minutes] {
+                switch
+                    .bind_property("active", row, "sensitive")
+                    .sync_create()
+                    .build();
+            }
+            group.add(&switch);
+            group.add(&hours);
+            group.add(&minutes);
+            (group, switch, hours, minutes)
+        };
+
+        let default_length = plan
+            .max_secs
+            .map_or(i64::from(settings::load_timer_minutes()), |s| s / 60);
+        let (length_group, length_on, length_h, length_m) = clock_group(
+            t("timer.stop_after"),
+            plan.max_secs.is_some(),
+            (default_length / 60) as i32,
+            (default_length % 60) as i32,
+            24.0,
+        );
+        page.add(&length_group);
+        let default_time = |at: Option<i64>, hours_ahead: i32| {
+            at.and_then(local)
+                .map(|w| (w.hour(), w.minute()))
+                .or_else(|| now.as_ref().map(|n| ((n.hour() + hours_ahead) % 24, 0)))
+                .unwrap_or((9, 0))
+        };
+        let (start_hour, start_minute) = default_time(plan.start_at, 1);
+        let (start_group, start_on, start_h, start_m) = clock_group(
+            t("timer.start_at"),
+            plan.start_at.is_some(),
+            start_hour,
+            start_minute,
+            23.0,
+        );
+        page.add(&start_group);
+        let (stop_hour, stop_minute) = default_time(plan.stop_at, 2);
+        let (stop_group, stop_on, stop_h, stop_m) = clock_group(
+            t("timer.stop_at"),
+            plan.stop_at.is_some(),
+            stop_hour,
+            stop_minute,
+            23.0,
+        );
+        stop_group.set_description(Some(t("timer.times_hint")));
+        page.add(&stop_group);
+
+        let close = dialog.clone();
+        cancel.connect_clicked(move |_| {
+            close.close();
+        });
+        let this = self.clone();
+        let close = dialog.clone();
+        set.connect_clicked(move |_| {
+            let value = |row: &adw::SpinRow| row.value().round() as i64;
+            let mut plan = timer::Plan::default();
+            if length_on.is_active() {
+                let secs = value(&length_h) * 3600 + value(&length_m) * 60;
+                if secs <= 0 {
+                    this.toast(t("timer.needs_length"));
+                    return;
+                }
+                plan.max_secs = Some(secs);
+                let _ = settings::save_timer_minutes((secs / 60) as u32);
+            }
+            let Ok(now) = glib::DateTime::now_local() else {
+                return;
+            };
+            if start_on.is_active() {
+                plan.start_at =
+                    timer::next_occurrence(value(&start_h) as i32, value(&start_m) as i32, &now);
+            }
+            if stop_on.is_active() {
+                plan.stop_at =
+                    timer::next_occurrence(value(&stop_h) as i32, value(&stop_m) as i32, &now);
+                // A stop before the start means the day after it.
+                if let (Some(start), Some(stop)) = (plan.start_at, plan.stop_at)
+                    && stop <= start
+                {
+                    plan.stop_at = Some(stop + 24 * 3600);
+                }
+            }
+            this.set_timer(plan);
+            close.close();
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    /// Puts a timer plan in force and shows it on the ready page.
+    fn set_timer(&self, plan: timer::Plan) {
+        self.timer_row.set_subtitle(&plan.describe());
+        self.timer_warned.set(false);
+        *self.timer_plan.borrow_mut() = plan;
+        self.status_label.set_label(&self.status_text());
+    }
+
     fn show_about(&self) {
         let dialog = adw::AboutDialog::builder()
             .application_name("MOM Recorder")
@@ -1352,24 +1592,66 @@ impl Recorder {
         }
     }
 
-    /// App settings (⌘,): the interface language, transcription (model,
-    /// language, provider and API keys), the chapters agent, recording
-    /// (format, your name, the meetings folder), the audio status and the
-    /// menu bar item. Most values apply at once; the interface language and
-    /// the menu bar item on the next launch, as their rows say. The ready page
-    /// re-reads the model banner and the language on close.
+    /// App settings (⌘,), as pages: General (interface language, appearance,
+    /// menu bar item), Transcription (model, language, provider, keys),
+    /// Recording (format, your name, meetings folder, timer default), Audio
+    /// (microphone, computer audio and the apps it records) and Storage
+    /// (cache, models, reset). Most values apply at once; the interface
+    /// language and the menu bar item on the next launch, as their rows say.
+    /// The ready page re-reads the model banner and the language on close.
     fn show_preferences(self: &Rc<Self>) {
         let dialog = adw::PreferencesDialog::builder()
             .title(t("prefs.title"))
+            .content_width(760)
+            .content_height(640)
             .build();
-        let page = adw::PreferencesPage::builder()
-            .title(t("prefs.title"))
+        dialog.add(&self.prefs_general());
+        dialog.add(&self.prefs_transcription());
+        dialog.add(&self.prefs_recording());
+        dialog.add(&self.prefs_audio());
+        dialog.add(&self.prefs_storage(&dialog));
+        let weak = Rc::downgrade(self);
+        dialog.connect_closed(move |_| {
+            let Some(r) = weak.upgrade() else { return };
+            r.settings_changed();
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    /// Re-reads what the ready page shows from the settings files, after
+    /// Settings closes or a reset.
+    fn settings_changed(&self) {
+        self.update_model_banner();
+        let saved = settings::load_language();
+        if let Some(index) = LANGUAGE_CODES.iter().position(|code| *code == saved) {
+            self.loading.set(true);
+            self.language_row.set_selected(index as u32);
+            self.again_language_row.set_selected(index as u32);
+            self.loading.set(false);
+        }
+        let format = settings::load_format();
+        if let Some(index) = Format::ALL.iter().position(|f| *f == format) {
+            self.loading.set(true);
+            self.format_row.set_selected(index as u32);
+            self.loading.set(false);
+        }
+    }
+
+    fn prefs_page(title: &str, icon: &str) -> adw::PreferencesPage {
+        adw::PreferencesPage::builder()
+            .title(title)
+            .icon_name(icon)
+            .build()
+    }
+
+    fn prefs_general(self: &Rc<Self>) -> adw::PreferencesPage {
+        let page = Self::prefs_page(t("prefs.page_general"), "preferences-system-symbolic");
+        let interface = adw::PreferencesGroup::builder()
+            .title(t("prefs.interface"))
+            .description(t("prefs.ui_language_hint"))
             .build();
-        dialog.add(&page);
-        let general = adw::PreferencesGroup::builder().build();
         let ui_language = adw::ComboRow::builder()
             .title(t("prefs.ui_language"))
-            .subtitle(t("prefs.ui_language_hint"))
             .model(&gtk::StringList::new(&["English", "Bahasa Indonesia"]))
             .selected(match crate::locales::current() {
                 Lang::English => 0,
@@ -1385,8 +1667,50 @@ impl Recorder {
             };
             Self::saved(&weak, crate::settings::save_ui_language(lang));
         });
-        general.add(&ui_language);
-        page.add(&general);
+        interface.add(&ui_language);
+        let appearance_labels = [
+            t("prefs.appearance_system"),
+            t("prefs.appearance_light"),
+            t("prefs.appearance_dark"),
+        ];
+        let appearance = adw::ComboRow::builder()
+            .title(t("prefs.appearance"))
+            .model(&gtk::StringList::new(&appearance_labels))
+            .selected(
+                settings::Appearance::ALL
+                    .iter()
+                    .position(|a| *a == settings::load_appearance())
+                    .unwrap_or(0) as u32,
+            )
+            .build();
+        let weak = Rc::downgrade(self);
+        appearance.connect_selected_notify(move |row| {
+            let choice = settings::Appearance::ALL[row.selected() as usize];
+            crate::theme::apply_appearance(choice, crate::theme::macos_prefers_dark);
+            Self::saved(&weak, settings::save_appearance(choice));
+        });
+        interface.add(&appearance);
+        page.add(&interface);
+
+        let menubar_group = adw::PreferencesGroup::builder()
+            .title(t("prefs.menubar"))
+            .description(t("prefs.menubar_restart"))
+            .build();
+        let menubar_row = adw::SwitchRow::builder()
+            .title(t("prefs.menubar_show"))
+            .active(crate::models::menubar_enabled())
+            .build();
+        let weak = Rc::downgrade(self);
+        menubar_row.connect_active_notify(move |row| {
+            Self::saved(&weak, crate::models::save_menubar_enabled(row.is_active()));
+        });
+        menubar_group.add(&menubar_row);
+        page.add(&menubar_group);
+        page
+    }
+
+    fn prefs_transcription(self: &Rc<Self>) -> adw::PreferencesPage {
+        let page = Self::prefs_page(t("prefs.transcription"), "audio-input-microphone-symbolic");
         let transcription = adw::PreferencesGroup::builder()
             .title(t("prefs.transcription"))
             .build();
@@ -1486,6 +1810,14 @@ impl Recorder {
             row.set_subtitle(Self::provider_privacy(provider));
         });
         transcription.add(&provider_row);
+        page.add(&transcription);
+
+        // One expander per provider: the status in the subtitle, the key
+        // field and the where-to-get-it hint inside, in full.
+        let keys = adw::PreferencesGroup::builder()
+            .title(t("prefs.keys"))
+            .description(t("prefs.keys_about"))
+            .build();
         for (cloud, title, hint) in [
             (
                 Cloud::ElevenLabs,
@@ -1505,21 +1837,30 @@ impl Recorder {
         ] {
             let state = match crate::provider::key_status(cloud) {
                 Ok(()) => t("prefs.key_saved").to_owned(),
-                Err(crate::provider::KeyError::Missing(_)) => hint.to_owned(),
+                Err(crate::provider::KeyError::Missing(_)) => t("prefs.key_none").to_owned(),
                 Err(e) => e.to_string(),
             };
+            let expander = adw::ExpanderRow::builder()
+                .title(title)
+                .subtitle(&state)
+                .build();
             let key_row = adw::PasswordEntryRow::builder()
-                .title(format!("{title} — {state}"))
-                .tooltip_text(hint)
+                .title(t("prefs.key_paste"))
                 .show_apply_button(true)
                 .build();
+            let hint_row = adw::ActionRow::builder()
+                .title(t("prefs.key_where"))
+                .subtitle(hint)
+                .subtitle_lines(0)
+                .build();
             let weak = Rc::downgrade(self);
+            let status = expander.clone();
             key_row.connect_apply(move |row| {
                 let key = row.text().to_string();
                 row.set_text("");
                 match crate::provider::save_api_key(cloud, &key) {
                     Ok(()) => {
-                        row.set_title(&format!("{title} — {}", t("prefs.key_saved")));
+                        status.set_subtitle(t("prefs.key_saved"));
                         if let Some(r) = weak.upgrade() {
                             r.toast(t("prefs.key_saved_toast"));
                         }
@@ -1531,9 +1872,12 @@ impl Recorder {
                     }
                 }
             });
-            transcription.add(&key_row);
+            expander.add_row(&key_row);
+            expander.add_row(&hint_row);
+            keys.add(&expander);
         }
-        page.add(&transcription);
+        page.add(&keys);
+
         let chapters = adw::PreferencesGroup::builder()
             .title(t("prefs.chapters"))
             .description(t("prefs.chapters_about"))
@@ -1564,6 +1908,11 @@ impl Recorder {
         });
         chapters.add(&agent_row);
         page.add(&chapters);
+        page
+    }
+
+    fn prefs_recording(self: &Rc<Self>) -> adw::PreferencesPage {
+        let page = Self::prefs_page(t("prefs.recording"), "media-record-symbolic");
         let recording = adw::PreferencesGroup::builder()
             .title(t("prefs.recording"))
             .build();
@@ -1589,6 +1938,7 @@ impl Recorder {
         let name_row = adw::EntryRow::builder()
             .title(t("prefs.name"))
             .text(settings::load_your_name())
+            .show_apply_button(true)
             .build();
         let weak = Rc::downgrade(self);
         name_row.connect_apply(move |row| {
@@ -1625,27 +1975,95 @@ impl Recorder {
         });
         recording.add(&meetings_row);
         page.add(&recording);
-        let audio = adw::PreferencesGroup::builder()
-            .title(t("prefs.audio"))
+
+        let timer_group = adw::PreferencesGroup::builder()
+            .title(t("timer.title"))
+            .description(t("prefs.timer_about"))
             .build();
+        let minutes = adw::SpinRow::with_range(1.0, 1440.0, 5.0);
+        minutes.set_title(t("prefs.timer_default"));
+        minutes.set_value(f64::from(settings::load_timer_minutes()));
+        let weak = Rc::downgrade(self);
+        minutes.connect_value_notify(move |row| {
+            Self::saved(
+                &weak,
+                settings::save_timer_minutes(row.value().round() as u32),
+            );
+        });
+        timer_group.add(&minutes);
+        page.add(&timer_group);
+        page
+    }
+
+    fn prefs_audio(self: &Rc<Self>) -> adw::PreferencesPage {
+        let page = Self::prefs_page(t("prefs.audio"), "audio-speakers-symbolic");
         let audio_status = match crate::helper::path() {
             Some(helper) => crate::helper::list_info(&helper),
             None => Err(t("banner.audio_helper_missing").to_owned()),
         };
-        let mic_row = adw::ActionRow::builder().title(t("prefs.mic")).build();
-        let mic_subtitle = match &audio_status {
-            Ok(devices) if devices.inputs > 0 => {
-                crate::locales::tf("prefs.mic_inputs", &[&devices.inputs.to_string()])
-            }
-            Ok(_) => t("prefs.mic_none").to_owned(),
+
+        // The microphone: the system default, or one input by name.
+        let mic_group = adw::PreferencesGroup::builder()
+            .title(t("prefs.mic"))
+            .build();
+        let inputs = audio_status
+            .as_ref()
+            .map(|d| d.inputs.clone())
+            .unwrap_or_default();
+        let mut mic_names = vec![t("prefs.mic_default").to_owned()];
+        mic_names.extend(inputs.iter().map(|d| d.name.clone()));
+        let mic_name_refs: Vec<&str> = mic_names.iter().map(String::as_str).collect();
+        let mic_row = adw::ComboRow::builder()
+            .title(t("prefs.mic"))
+            .model(&gtk::StringList::new(&mic_name_refs))
+            .build();
+        let chosen_mic = settings::load_mic_device();
+        mic_row.set_selected(
+            chosen_mic
+                .as_deref()
+                .and_then(|uid| inputs.iter().position(|d| d.uid == uid))
+                .map_or(0, |i| i as u32 + 1),
+        );
+        mic_row.set_subtitle(&match &audio_status {
+            Ok(_) if inputs.is_empty() => t("prefs.mic_none").to_owned(),
+            Ok(_) => t("prefs.mic_hint").to_owned(),
             Err(e) => crate::locales::tf("prefs.devices_unknown", &[e]),
-        };
-        mic_row.set_subtitle(&mic_subtitle);
-        audio.add(&mic_row);
-        let computer_row = adw::ActionRow::builder().title(t("prefs.computer")).build();
+        });
+        let weak = Rc::downgrade(self);
+        let mic_inputs = inputs.clone();
+        mic_row.connect_selected_notify(move |row| {
+            let Some(r) = weak.upgrade() else { return };
+            let uid = match row.selected() {
+                0 => None,
+                n => mic_inputs.get(n as usize - 1).map(|d| d.uid.as_str()),
+            };
+            Self::saved(&Rc::downgrade(&r), settings::save_mic_device(uid));
+            r.mic.restart();
+        });
+        mic_group.add(&mic_row);
+        page.add(&mic_group);
+
+        // The computer audio: every app, or only the ones switched on below.
+        let computer_group = adw::PreferencesGroup::builder()
+            .title(t("prefs.computer"))
+            .build();
+        let scope_row = adw::ComboRow::builder()
+            .title(t("prefs.computer_scope"))
+            .subtitle(t("prefs.computer_scope_hint"))
+            .model(&gtk::StringList::new(&[
+                t("prefs.computer_all"),
+                t("prefs.computer_chosen"),
+            ]))
+            .build();
+        let saved_sources = settings::load_computer_sources();
+        scope_row.set_selected(u32::from(!saved_sources.is_empty()));
+        computer_group.add(&scope_row);
+        let status_row = adw::ActionRow::builder()
+            .title(t("prefs.computer_status"))
+            .build();
         match &audio_status {
             Ok(devices) if devices.tap && devices.tap_denied => {
-                computer_row.set_subtitle(t("prefs.computer_tap_denied"));
+                status_row.set_subtitle(t("prefs.computer_tap_denied"));
                 let open = gtk::Button::builder()
                     .label(t("prefs.open_privacy"))
                     .valign(gtk::Align::Center)
@@ -1656,20 +2074,19 @@ impl Recorder {
                         None::<&gio::AppLaunchContext>,
                     );
                 });
-                computer_row.add_suffix(&open);
+                status_row.add_suffix(&open);
             }
             Ok(devices) if devices.tap => {
-                computer_row.set_subtitle(t("prefs.computer_tap"));
+                status_row.set_subtitle(t("prefs.computer_tap"));
             }
             Ok(crate::helper::AudioDevices {
                 blackhole: Some(device),
                 ..
             }) => {
-                computer_row
-                    .set_subtitle(&crate::locales::tf("prefs.computer_blackhole", &[device]));
+                status_row.set_subtitle(&crate::locales::tf("prefs.computer_blackhole", &[device]));
             }
             _ => {
-                computer_row.set_subtitle(t("prefs.computer_unavailable"));
+                status_row.set_subtitle(t("prefs.computer_unavailable"));
                 let install = gtk::Button::builder()
                     .label(t("prefs.blackhole_how"))
                     .valign(gtk::Align::Center)
@@ -1680,39 +2097,312 @@ impl Recorder {
                         None::<&gio::AppLaunchContext>,
                     );
                 });
-                computer_row.add_suffix(&install);
+                status_row.add_suffix(&install);
             }
         }
-        audio.add(&computer_row);
-        page.add(&audio);
+        computer_group.add(&status_row);
+        page.add(&computer_group);
 
-        let menubar_group = adw::PreferencesGroup::builder()
-            .title(t("prefs.menubar"))
+        // One switch per app with audio, plus the saved ones that are not
+        // running now, so a chosen app is not lost between calls.
+        let apps_group = adw::PreferencesGroup::builder()
+            .title(t("prefs.apps"))
+            .description(t("prefs.apps_about"))
+            .visible(!saved_sources.is_empty())
             .build();
-        let menubar_row = adw::SwitchRow::builder()
-            .title(t("prefs.menubar_show"))
-            .subtitle(t("prefs.menubar_restart"))
-            .active(crate::models::menubar_enabled())
+        scope_row
+            .bind_property("selected", &apps_group, "visible")
+            .transform_to(|_, selected: u32| Some(selected == 1))
+            .sync_create()
             .build();
-        let weak = Rc::downgrade(self);
-        menubar_row.connect_active_notify(move |row| {
-            Self::saved(&weak, crate::models::save_menubar_enabled(row.is_active()));
-        });
-        menubar_group.add(&menubar_row);
-        page.add(&menubar_group);
-        let weak = Rc::downgrade(self);
-        dialog.connect_closed(move |_| {
-            let Some(r) = weak.upgrade() else { return };
-            r.update_model_banner();
-            let saved = settings::load_language();
-            if let Some(index) = LANGUAGE_CODES.iter().position(|code| *code == saved) {
-                r.loading.set(true);
-                r.language_row.set_selected(index as u32);
-                r.again_language_row.set_selected(index as u32);
-                r.loading.set(false);
+        let mut processes = audio_status
+            .as_ref()
+            .map(|d| d.processes.clone())
+            .unwrap_or_default();
+        processes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        processes.dedup_by(|a, b| a.bundle == b.bundle);
+        let mut offered: Vec<(String, String, String)> = processes
+            .iter()
+            .map(|p| {
+                let subtitle = if p.playing {
+                    format!("{} · {}", p.bundle, t("prefs.app_playing"))
+                } else {
+                    p.bundle.clone()
+                };
+                (p.bundle.clone(), p.name.clone(), subtitle)
+            })
+            .collect();
+        for bundle in &saved_sources {
+            if !offered.iter().any(|(b, _, _)| b == bundle) {
+                offered.push((
+                    bundle.clone(),
+                    bundle.clone(),
+                    t("prefs.app_not_running").to_owned(),
+                ));
             }
+        }
+        if offered.is_empty() {
+            apps_group.add(
+                &adw::ActionRow::builder()
+                    .title(t("prefs.apps_none"))
+                    .build(),
+            );
+        }
+        // The chosen bundles, kept in step with the switches; saved only
+        // while the scope is "chosen apps", so "all apps" clears them.
+        let chosen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(saved_sources.clone()));
+        let save_sources = {
+            let weak = Rc::downgrade(self);
+            let (chosen, scope_row) = (chosen.clone(), scope_row.clone());
+            Rc::new(move || {
+                let Some(r) = weak.upgrade() else { return };
+                let list = if scope_row.selected() == 1 {
+                    chosen.borrow().clone()
+                } else {
+                    Vec::new()
+                };
+                Self::saved(&Rc::downgrade(&r), settings::save_computer_sources(&list));
+                r.system.restart();
+            })
+        };
+        for (bundle, name, subtitle) in offered {
+            let row = adw::SwitchRow::builder()
+                .title(&name)
+                .subtitle(&subtitle)
+                .active(saved_sources.contains(&bundle))
+                .build();
+            let (chosen, save_sources) = (chosen.clone(), save_sources.clone());
+            row.connect_active_notify(move |row| {
+                let mut list = chosen.borrow_mut();
+                list.retain(|b| *b != bundle);
+                if row.is_active() {
+                    list.push(bundle.clone());
+                }
+                drop(list);
+                save_sources();
+            });
+            apps_group.add(&row);
+        }
+        let save_on_scope = save_sources.clone();
+        scope_row.connect_selected_notify(move |_| save_on_scope());
+        page.add(&apps_group);
+        page
+    }
+
+    /// Storage: what the app has accumulated, with a button each and a full
+    /// reset. Meetings and Keychain keys are never touched, and each
+    /// confirmation says so.
+    fn prefs_storage(self: &Rc<Self>, dialog: &adw::PreferencesDialog) -> adw::PreferencesPage {
+        let page = Self::prefs_page(t("prefs.storage"), "drive-harddisk-symbolic");
+        let group = adw::PreferencesGroup::builder()
+            .title(t("prefs.storage"))
+            .description(t("storage.about"))
+            .build();
+        let cache_dir = crate::paths::cache();
+        let models_dir = crate::transcribe::models_dir();
+        let settings_files = [crate::paths::settings_file(), crate::paths::config_file()];
+
+        let cache_row = adw::ActionRow::builder().title(t("storage.cache")).build();
+        let models_row = adw::ActionRow::builder().title(t("storage.models")).build();
+        let settings_row = adw::ActionRow::builder()
+            .title(t("storage.settings"))
+            .subtitle(t("storage.settings_hint"))
+            .build();
+        let refresh = {
+            let (cache_row, models_row) = (cache_row.clone(), models_row.clone());
+            let (cache_dir, models_dir) = (cache_dir.clone(), models_dir.clone());
+            Rc::new(move || {
+                let unfinished = unfinished_recordings().len();
+                let mut subtitle = crate::cleanup::human(crate::cleanup::size(&cache_dir));
+                if unfinished > 0 {
+                    subtitle = format!(
+                        "{subtitle} · {}",
+                        tf("storage.unfinished", &[&unfinished.to_string()])
+                    );
+                }
+                cache_row.set_subtitle(&subtitle);
+                models_row.set_subtitle(&crate::cleanup::human(crate::cleanup::models_size(
+                    &models_dir,
+                )));
+            })
+        };
+        refresh();
+
+        // What the live app must keep: the recording in progress, the socket.
+        let keep = {
+            let weak = Rc::downgrade(self);
+            move || -> Vec<PathBuf> {
+                let mut keep = vec![ipc::socket_path()];
+                if let Some(r) = weak.upgrade()
+                    && let Some(staging) = r.staging.borrow().clone()
+                {
+                    keep.push(staging);
+                }
+                keep
+            }
+        };
+        let confirm = |this: &Rc<Self>, title: &str, body: &str, label: &str, run: Rc<dyn Fn()>| {
+            let dialog = adw::AlertDialog::new(Some(title), Some(body));
+            dialog.add_response("cancel", t("import.cancel"));
+            dialog.add_response("go", label);
+            dialog.set_response_appearance("go", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            dialog.connect_response(Some("go"), move |_, _| run());
+            dialog.present(Some(&this.window));
+        };
+
+        let clear_cache = {
+            let weak = Rc::downgrade(self);
+            let (cache_dir, keep, refresh) = (cache_dir.clone(), keep.clone(), refresh.clone());
+            Rc::new(move || {
+                let Some(r) = weak.upgrade() else { return };
+                match crate::cleanup::clear_cache(&cache_dir, &keep()) {
+                    Ok(cleared) => r.toast(&tf(
+                        "storage.cleared",
+                        &[&crate::cleanup::human(cleared.bytes)],
+                    )),
+                    Err(e) => r.toast(&tf("storage.failed", &[&e.to_string()])),
+                }
+                refresh();
+            })
+        };
+        let clear_button = gtk::Button::builder()
+            .label(t("storage.clear"))
+            .valign(gtk::Align::Center)
+            .build();
+        let this = self.clone();
+        let run = clear_cache.clone();
+        clear_button.connect_clicked(move |_| {
+            let unfinished = unfinished_recordings().len();
+            let body = if unfinished > 0 {
+                format!(
+                    "{} {}",
+                    t("storage.cache_body"),
+                    tf("storage.cache_unfinished", &[&unfinished.to_string()])
+                )
+            } else {
+                t("storage.cache_body").to_owned()
+            };
+            confirm(
+                &this,
+                t("storage.cache_title"),
+                &body,
+                t("storage.clear"),
+                run.clone(),
+            );
         });
-        dialog.present(Some(&self.window));
+        cache_row.add_suffix(&clear_button);
+        group.add(&cache_row);
+
+        let delete_models = {
+            let weak = Rc::downgrade(self);
+            let (models_dir, refresh) = (models_dir.clone(), refresh.clone());
+            Rc::new(move || {
+                let Some(r) = weak.upgrade() else { return };
+                match crate::cleanup::delete_models(&models_dir) {
+                    Ok(freed) => r.toast(&tf("storage.cleared", &[&crate::cleanup::human(freed)])),
+                    Err(e) => r.toast(&tf("storage.failed", &[&e.to_string()])),
+                }
+                r.update_model_banner();
+                refresh();
+            })
+        };
+        let models_button = gtk::Button::builder()
+            .label(t("storage.delete"))
+            .valign(gtk::Align::Center)
+            .build();
+        let this = self.clone();
+        let run = delete_models.clone();
+        models_button.connect_clicked(move |_| {
+            confirm(
+                &this,
+                t("storage.models_title"),
+                t("storage.models_body"),
+                t("storage.delete"),
+                run.clone(),
+            );
+        });
+        models_row.add_suffix(&models_button);
+        group.add(&models_row);
+
+        let reset_settings = {
+            let weak = Rc::downgrade(self);
+            let (files, dialog) = (settings_files.clone(), dialog.clone());
+            Rc::new(move || {
+                let Some(r) = weak.upgrade() else { return };
+                match crate::cleanup::reset_settings(&files) {
+                    Ok(()) => {
+                        r.after_settings_reset();
+                        r.toast(t("storage.settings_reset"));
+                        // The rows still show the old values: reopen to see the defaults.
+                        dialog.close();
+                    }
+                    Err(e) => r.toast(&tf("storage.failed", &[&e.to_string()])),
+                }
+            })
+        };
+        let settings_button = gtk::Button::builder()
+            .label(t("storage.reset"))
+            .valign(gtk::Align::Center)
+            .build();
+        let this = self.clone();
+        let run = reset_settings.clone();
+        settings_button.connect_clicked(move |_| {
+            confirm(
+                &this,
+                t("storage.settings_title"),
+                t("storage.settings_body"),
+                t("storage.reset"),
+                run.clone(),
+            );
+        });
+        settings_row.add_suffix(&settings_button);
+        group.add(&settings_row);
+        page.add(&group);
+
+        let everything = adw::PreferencesGroup::builder()
+            .description(t("storage.everything_about"))
+            .build();
+        let reset_all = adw::ButtonRow::builder()
+            .title(t("storage.everything"))
+            .css_classes(["destructive-action"])
+            .build();
+        let this = self.clone();
+        reset_all.connect_activated(move |_| {
+            let (cache, models, settings) = (
+                clear_cache.clone(),
+                delete_models.clone(),
+                reset_settings.clone(),
+            );
+            confirm(
+                &this,
+                t("storage.everything_title"),
+                t("storage.everything_body"),
+                t("storage.everything"),
+                Rc::new(move || {
+                    cache();
+                    models();
+                    settings();
+                }),
+            );
+        });
+        everything.add(&reset_all);
+        page.add(&everything);
+        page
+    }
+
+    /// After the settings files are gone: every live choice back to its
+    /// default, without a relaunch where that is possible.
+    fn after_settings_reset(&self) {
+        crate::theme::apply_appearance(
+            settings::Appearance::System,
+            crate::theme::macos_prefers_dark,
+        );
+        self.settings_changed();
+        // The capture children read their selection when they start.
+        self.mic.restart();
+        self.system.restart();
     }
 
     fn selected_format(&self) -> Format {
@@ -1766,7 +2456,19 @@ impl Recorder {
         let recording = state == State::Recording;
         self.live.set(recording);
         self.dot.set_visible(recording);
-        self.compact_button.set_visible(recording);
+        self.compact_button
+            .set_visible(recording && !self.compact.get());
+        self.strip_pause.set_icon_name(if self.paused.get() {
+            "media-playback-start-symbolic"
+        } else {
+            "media-playback-pause-symbolic"
+        });
+        self.strip_pause
+            .set_tooltip_text(Some(if self.paused.get() {
+                t("ready.resume")
+            } else {
+                t("ready.pause")
+            }));
         self.language_row
             .set_sensitive(!matches!(state, State::Stopping | State::Transcribing));
         self.button.set_sensitive(matches!(
@@ -1806,25 +2508,12 @@ impl Recorder {
             t("done.transcribe_again_gone")
         }));
 
-        let text = match state {
-            State::Idle => t("ready.status_idle").to_owned(),
-            State::Recording if self.paused.get() => t("ready.status_paused").to_owned(),
-            State::Recording => t("ready.status_recording").to_owned(),
-            State::Stopping => t("ready.status_stopping").to_owned(),
-            // Where the audio goes is a privacy question: say it.
-            State::Transcribing => match crate::provider::configured() {
-                Ok(Provider::Cloud(cloud)) => {
-                    tf("ready.status_transcribing_cloud", &[cloud.name()])
-                }
-                _ => t("ready.status_transcribing").to_owned(),
-            },
-            State::Done => String::new(),
-        };
-        self.status_label.set_label(&text);
+        self.status_label.set_label(&self.status_text());
         self.update_actions();
     }
 
     /// Shows the page for the current state, edge to edge while transcribing.
+    /// The window keeps its size; only the compact strip changes it.
     fn show_page(&self) {
         if self.compact.get() {
             return;
@@ -1836,8 +2525,6 @@ impl Recorder {
             _ => "record",
         };
         self.layout.set_visible_child_name(page);
-        // Recording and transcribing share one size, so stopping does not jump.
-        self.fit_window(if page == "done" { DONE_SIZE } else { FULL_SIZE });
         let immersive = matches!(state, State::Stopping | State::Transcribing);
         self.view.set_extend_content_to_top_edge(immersive);
         if immersive {
@@ -1845,26 +2532,51 @@ impl Recorder {
         } else {
             self.window.remove_css_class("immersive");
         }
+        self.sidebar_toggle
+            .set_visible(state == State::Done && self.split.is_collapsed());
     }
 
-    /// Grows the window for the wide done page and shrinks it back for the
-    /// others. Only when the page asks for another size than last time, so a
-    /// window the user resized is left alone otherwise.
-    fn fit_window(&self, size: (i32, i32)) {
-        if self.fitted.replace(size) == size {
-            return;
-        }
-        let minimum = if size == DONE_SIZE {
-            (820, 560)
+    /// Keeps the window size for the next launch: the current one, or the
+    /// one the strip will restore while compact.
+    fn remember_size(&self) {
+        let (width, height) = if self.compact.get() {
+            self.full_size.get()
         } else {
-            (360, 200)
+            self.window.default_size()
         };
-        self.window.set_size_request(minimum.0, minimum.1);
-        self.window.set_default_size(size.0, size.1);
-        self.window.queue_resize();
+        if width >= MIN_SIZE.0 && height >= MIN_SIZE.1 {
+            let _ = settings::save_window_size(width, height);
+        }
     }
 
-    fn tick(&self) {
+    /// The line under the clock: what is happening, and what the timer will
+    /// do about it.
+    fn status_text(&self) -> String {
+        let plan = self.timer_plan.borrow();
+        match self.state.get() {
+            State::Idle => match plan.start_at {
+                Some(at) => tf("timer.status_scheduled", &[&timer::clock_time(at)]),
+                None => t("ready.status_idle").to_owned(),
+            },
+            State::Recording if self.paused.get() => t("ready.status_paused").to_owned(),
+            State::Recording => match plan.remaining(ipc::now(), self.elapsed()) {
+                Some(left) => tf("timer.status_countdown", &[&timer::countdown(left)]),
+                None => t("ready.status_recording").to_owned(),
+            },
+            State::Stopping => t("ready.status_stopping").to_owned(),
+            // Where the audio goes is a privacy question: say it.
+            State::Transcribing => match crate::provider::configured() {
+                Ok(Provider::Cloud(cloud)) => {
+                    tf("ready.status_transcribing_cloud", &[cloud.name()])
+                }
+                _ => t("ready.status_transcribing").to_owned(),
+            },
+            State::Done => String::new(),
+        }
+    }
+
+    fn tick(self: &Rc<Self>) {
+        let now = ipc::now();
         if self.state.get() == State::Recording {
             let elapsed = self.elapsed();
             let clock = format_elapsed(elapsed);
@@ -1879,6 +2591,22 @@ impl Recorder {
             self.compact_timer.set_label(&clock);
             self.dot.set_opacity(opacity);
             self.compact_dot.set_opacity(opacity);
+            // The timer: stop when its time is up, count down before that,
+            // and say so once a minute ahead.
+            let plan = self.timer_plan.borrow().clone();
+            if plan.due_stop(now, elapsed) {
+                self.stop();
+                return;
+            }
+            if let Some(left) = plan.remaining(now, elapsed) {
+                self.status_label.set_label(&self.status_text());
+                if left <= 60 && !self.timer_warned.replace(true) {
+                    self.toast(t("timer.one_minute"));
+                }
+            }
+        } else if self.state.get() == State::Idle && self.timer_plan.borrow().due_start(now) {
+            self.start();
+            return;
         }
         // Either source may fail or fall back (a refused permission, no
         // device, a tap refused and BlackHole used instead, a full disk);
@@ -1898,30 +2626,41 @@ impl Recorder {
         }
     }
 
-    /// Switches between the full layout and the compact one with only the waves.
+    /// Switches between the full layout and the compact strip. The strip
+    /// keeps the header bar: the clock becomes the title, Pause, Stop and
+    /// Expand sit at its end, and the traffic lights stay where they are, so
+    /// the title bar drags the strip the way it drags any window.
     fn set_compact(&self, compact: bool) {
         if compact == self.compact.get() || (compact && self.state.get() != State::Recording) {
             return;
         }
         self.compact.set(compact);
-        let size = if compact {
-            let (w, h) = (self.window.width(), self.window.height());
-            if w > COMPACT_SIZE.0 && h > COMPACT_SIZE.1 {
+        if compact {
+            let (w, h) = self.window.default_size();
+            if w >= MIN_SIZE.0 && h >= MIN_SIZE.1 {
                 self.full_size.set((w, h));
             }
             self.layout.set_visible_child_name("compact");
-            self.view.set_reveal_top_bars(false);
-            // libadwaita keeps every window at least 360x200 unless told otherwise.
+            self.header.set_title_widget(Some(&self.compact_title));
+            self.strip_buttons.set_visible(true);
+            self.gear.set_visible(false);
+            self.sidebar_toggle.set_visible(false);
+            // Not resizable: the window takes the strip's natural size.
             self.window.set_size_request(COMPACT_SIZE.0, COMPACT_SIZE.1);
-            COMPACT_SIZE
+            self.window.set_resizable(false);
+            self.window.set_default_size(COMPACT_SIZE.0, COMPACT_SIZE.1);
         } else {
-            self.view.set_reveal_top_bars(true);
+            self.header.set_title_widget(None::<&gtk::Widget>);
+            self.strip_buttons.set_visible(false);
+            self.gear.set_visible(true);
+            self.window.set_resizable(true);
+            self.window.set_size_request(MIN_SIZE.0, MIN_SIZE.1);
+            let (w, h) = self.full_size.get();
+            self.window.set_default_size(w, h);
             self.show_page();
-            self.window.set_size_request(360, 200);
-            self.full_size.get()
-        };
-        self.window.set_default_size(size.0, size.1);
+        }
         self.window.queue_resize();
+        self.render();
     }
 
     /// Recorded time so far, without the pauses.
@@ -1934,7 +2673,7 @@ impl Recorder {
         (until - self.started_at.get() - self.paused_secs.get()).max(0)
     }
 
-    fn toggle_pause(&self) {
+    fn toggle_pause(self: &Rc<Self>) {
         if self.state.get() != State::Recording {
             return;
         }
@@ -1957,7 +2696,11 @@ impl Recorder {
         for (cell, source) in self.frozen.iter().zip([&self.mic, &self.system]) {
             *cell.borrow_mut() = frozen.then(|| source.levels());
         }
-        for meter in self.meters.iter().chain(self.compact_meters.iter()) {
+        for meter in self
+            .meters
+            .iter()
+            .chain(std::iter::once(&self.compact_wave))
+        {
             meter.queue_draw();
         }
     }
@@ -2281,6 +3024,11 @@ impl Recorder {
         *self.staging.borrow_mut() = Some(staging);
         *self.result_dir.borrow_mut() = None;
         self.player.unload();
+        // A scheduled start has happened, or been overtaken by hand; the
+        // stop limits stay.
+        let mut plan = self.timer_plan.borrow().clone();
+        plan.start_at = None;
+        self.set_timer(plan);
         self.started_at.set(started_at);
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
@@ -2329,6 +3077,8 @@ impl Recorder {
             let _ = caffeinate.kill();
             let _ = caffeinate.wait();
         }
+        // The timer did its job, or was overtaken by hand: one plan per recording.
+        self.set_timer(timer::Plan::default());
         let Some(staging) = self.staging.borrow().clone() else {
             return;
         };
@@ -3753,43 +4503,6 @@ fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
     Some((time, speaker, text.trim()))
 }
 
-/// The few styles libadwaita does not have: a see-through header bar over the
-/// animation, and the transcript card.
-fn load_css() {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(
-        "window.immersive { background: #0d0826; }
-         window.immersive headerbar { background: transparent; box-shadow: none; color: #f8f5f2; }
-         window.immersive headerbar button { color: #f8f5f2; }
-         .transcript { background: transparent; padding: 8px; }
-         .transcript row { padding: 7px 10px; border-radius: 8px; }
-         .transcript row:hover { background: alpha(currentColor, 0.06); }
-         .transcript row.current { background: alpha(@accent_bg_color, 0.25); }
-         .transcript row.chapter { padding-top: 16px; }
-         .transcript row.chapter:first-child { padding-top: 7px; }
-         .chapter-heading { font-weight: 800; font-size: 1.08em; }
-         .speaker-0, .speaker-1, .speaker-2, .speaker-3, .speaker-4, .speaker-5 { font-weight: 700; }
-         .speaker-0 { color: #5a9cf0; } .speaker-1 { color: #f08a3a; } .speaker-2 { color: #57c27a; }
-         .speaker-3 { color: #d066c8; } .speaker-4 { color: #3fc4cf; } .speaker-5 { color: #d9b53a; }
-         .drop-hint { margin: 10px; border: 3px dashed @accent_color; border-radius: 14px;
-                      background: alpha(@window_bg_color, 0.88); color: @accent_color; }
-         .row-actions { opacity: 0; transition: opacity 120ms; }
-         .transcript row:hover .row-actions, .transcript row.editing .row-actions { opacity: 1; }
-         .row-actions button { min-height: 24px; min-width: 24px; padding: 2px; }
-         .transcript-editor { background: alpha(currentColor, 0.06); border-radius: 6px; padding: 4px 6px; }
-         .transcript-editor text { background: transparent; }
-         .done-icon { color: @accent_color; }
-         .player { padding: 6px 14px 6px 6px; }",
-    );
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
-}
-
 pub fn safe_name(text: &str) -> String {
     let cleaned: String = text
         .chars()
@@ -3918,6 +4631,62 @@ fn meter(
     area
 }
 
+/// The strip's wave: the microphone history above the midline and the
+/// computer history below it, the way the player draws a meeting, so the
+/// strip reads as the same app. Paused, the last levels stay, dimmed.
+fn strip_wave(
+    mic: &Source,
+    system: &Source,
+    frozen: &[Frozen; 2],
+    live: &Rc<Cell<bool>>,
+) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::builder()
+        .content_height(44)
+        .width_request(COMPACT_SIZE.0 - 24)
+        .hexpand(true)
+        .css_classes(["strip-wave"])
+        .build();
+    let (mic, system) = (mic.clone(), system.clone());
+    let (frozen_mic, frozen_system) = (frozen[0].clone(), frozen[1].clone());
+    let live = live.clone();
+    area.set_draw_func(move |_, cr, width, height| {
+        let (width, height) = (f64::from(width), f64::from(height));
+        let mid = height / 2.0;
+        let step = width / HISTORY as f64;
+        let bar = (step * 0.6).max(1.0);
+        let paused = frozen_mic.borrow().is_some();
+        let dim = if paused || !live.get() { 0.3 } else { 1.0 };
+        let lanes = [
+            (
+                crate::theme::color("blue", MIC_COLOR),
+                frozen_mic.borrow().clone().unwrap_or_else(|| mic.levels()),
+                -1.0,
+            ),
+            (
+                crate::theme::color("orange", SYSTEM_COLOR),
+                frozen_system
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| system.levels()),
+                1.0,
+            ),
+        ];
+        for ((r, g, b), levels, direction) in lanes {
+            cr.set_source_rgba(r, g, b, 0.15);
+            cr.rectangle(0.0, mid - 0.5, width, 1.0);
+            let _ = cr.fill();
+            for (i, peak) in levels.into_iter().enumerate() {
+                let h = (to_meter(peak) * (mid - 2.0)).max(1.0);
+                cr.set_source_rgba(r, g, b, (0.35 + 0.65 * i as f64 / HISTORY as f64) * dim);
+                let y = if direction < 0.0 { mid - h } else { mid };
+                cr.rectangle(i as f64 * step, y, bar, h);
+                let _ = cr.fill();
+            }
+        }
+    });
+    area
+}
+
 fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
     let block = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -3952,6 +4721,7 @@ mod tests {
         "win.start",
         "win.pause",
         "win.stop",
+        "win.timer",
         "win.compact",
         "win.copy-transcript",
         "win.fullscreen",

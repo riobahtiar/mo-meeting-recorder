@@ -3685,7 +3685,7 @@ mod tests {
     fn menu_items_name_registered_actions() {
         let bar = menu_model();
         let mut actions = Vec::new();
-        actions_in(&bar.upcast_ref::<gio::MenuModel>(), &mut actions);
+        actions_in(bar.upcast_ref::<gio::MenuModel>(), &mut actions);
         assert!(!actions.is_empty());
         for action in &actions {
             let known = action.starts_with("win.")

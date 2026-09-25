@@ -167,7 +167,7 @@ mod tests {
         assert!(rest.contains(&PathBuf::from("/usr/bin")));
         assert!(rest.contains(&PathBuf::from("/bin")));
         assert_eq!(
-            rest.iter().filter(|p| **p == PathBuf::from("/usr/bin")).count(),
+            rest.iter().filter(|p| p.as_os_str() == "/usr/bin").count(),
             1
         );
         match saved {

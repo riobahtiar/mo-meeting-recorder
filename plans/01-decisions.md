@@ -85,9 +85,12 @@ Each entry: the context, the decision, what was rejected and why, and what follo
 ## D13 Identity: MOM Recorder, MOMR, `momr`; the meeting format stays upstream's
 
 **Context.** The maintainer named the app **MOM Recorder**, short **MOMR**. The code carried Omarchy's names in the crate, the app id, the slug, packaging and a bar plugin.
-**Decision.** Display name "MOM Recorder"; "MOMR" where space is short; `momr` for the crate, binary, helper prefix (`momr-audio`, `momr-menubar`), folders under `~/Library` and the socket (`momr.sock`). App id and bundle identifier `io.github.riobahtiar.MOMRecorder`, a namespace the maintainer controls through GitHub; a domain-based id can replace it in plan 11 **before the first DMG**, since the bundle id is also the TCC identity. UTI `io.github.riobahtiar.momr.meeting`. The file extension `.meeting-recorder`, the manifest JSON and `transcript.md` stay exactly as upstream: they are descriptive, not branded, and keep meetings portable. Done in code for crate, app id and slug; Omarchy-only files (pacman packaging, installer, bar plugin, desktop entry, MIME type) deleted.
-**Rejected.** `.momr` as the extension: breaks opening upstream meetings for no gain.
 **Status.** Accepted; the bundle id is Open until plan 11 confirms it.
+
+Confirmed 2026-09-25 (plan 11): the id stays
+`io.github.riobahtiar.MOMRecorder` with UTI
+`io.github.riobahtiar.momr.meeting`, and the Application Support folder stays
+`momr`. No domain-based id, no rename.
 
 ## D14 Homebrew formula first, signed DMG second
 

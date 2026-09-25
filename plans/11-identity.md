@@ -72,9 +72,15 @@ Bump `Cargo.toml` to the first MOMR release (proposal: `2.0.0`, since the identi
 
 ## Status
 
-- [ ] Open decisions settled
-- [ ] Step 1 identifier confirmed
+- [x] Open decisions settled
+- [x] Step 1 identifier confirmed
 - [ ] Step 2 macOS screenshots
-- [ ] Step 3 demo kit reduced
-- [ ] Step 4 comment sweep
+- [x] Step 3 demo kit reduced
+- [x] Step 4 comment sweep
 - [ ] Step 5 version and README
+
+Decided 2026-09-25 with the maintainer: bundle id and UTI stay as built,
+Application Support stays `momr` — no renames. `demo/` is `README.md`,
+`script.txt`, `import-script.txt` and say-based `render.sh` (verified:
+274 s aligned two-track plus 92 s import). Screenshots and the version bump
+wait for a display session and the release tag.

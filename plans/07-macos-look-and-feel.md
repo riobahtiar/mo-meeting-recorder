@@ -294,7 +294,7 @@ Verify: whether VoiceOver reads the transcript rows and the buttons under GTK 4'
 - [x] Step 7 native panels, Reveal, drop
 - [x] Step 8 About
 - [x] Step 9 Preferences
-- [ ] Step 10 icon
+- [x] Step 10 icon
 - [x] Step 11 notifications
 - [x] Step 12 conventions
 - [ ] Step 13 accessibility check

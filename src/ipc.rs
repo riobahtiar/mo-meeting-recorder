@@ -90,14 +90,13 @@ pub fn serve(
     let accepted = clients.clone();
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            // A write timeout rather than non-blocking mode: the flag would be
-            // shared with the reading clone below.
-            if stream
-                .set_write_timeout(Some(Duration::from_millis(20)))
-                .is_err()
-            {
-                continue;
-            }
+            // Best effort: macOS refuses SO_SNDTIMEO once the peer has
+            // already gone, which fire-and-forget clients (`momr start`)
+            // always have. Dropping the connection then would lose the
+            // command, so a client without a timeout still gets its state
+            // lines, and one that stops reading is dropped on the next
+            // failed write instead.
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(20)));
             if let Ok(reader) = stream.try_clone() {
                 let commands = commands.clone();
                 thread::spawn(move || read_commands(reader, &commands));

@@ -24,9 +24,9 @@ use gtk::glib;
 
 pub const APP_ID: &str = "io.github.riobahtiar.MOMRecorder";
 pub const APP_NAME: &str = "momr";
-
 fn main() -> glib::ExitCode {
     extend_path();
+    bundle_environment();
     match std::env::args().nth(1).as_deref() {
         None => ui::run(None),
         Some("watch") => {
@@ -75,6 +75,28 @@ fn main() -> glib::ExitCode {
             eprintln!("{APP_NAME}: unknown command '{other}', see --help");
             glib::ExitCode::from(2)
         }
+    }
+}
+
+/// Inside `MOM Recorder.app`, point GTK at the bundled resources instead of
+/// Homebrew's prefix: schemas, icons and data dirs. No launcher script, so
+/// signing and the TCC identity stay simple. A no-op outside the bundle.
+fn bundle_environment() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(contents) = exe.parent().and_then(|p| p.parent()) else {
+        return;
+    };
+    if contents.file_name().is_none_or(|name| name != "Contents") {
+        return;
+    }
+    let share = contents.join("Resources/share");
+    let schemas = share.join("glib-2.0/schemas");
+    // SAFETY: first thing in main, single-threaded (see extend_path).
+    unsafe {
+        std::env::set_var("XDG_DATA_DIRS", &share);
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", &schemas);
     }
 }
 

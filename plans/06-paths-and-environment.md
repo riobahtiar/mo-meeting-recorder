@@ -20,6 +20,11 @@ unsigned dev binary gets no TCC microphone/tap grant (plan 08 gives the app
 its own identity). `settings.json` appears on the first Preferences change;
 the save path is the same `env_or` mechanism the tests cover.
 
+Socket fix 2026-09-25: `momr start/stop` were intermittently ignored because
+macOS refuses `SO_SNDTIMEO` once a fire-and-forget client has closed, and the
+accept loop dropped the connection then. The timeout is best-effort now;
+five start/stop cycles in a row all land.
+
 ## Prerequisites
 
 Plan 02.

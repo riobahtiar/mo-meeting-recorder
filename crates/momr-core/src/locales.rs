@@ -777,6 +777,21 @@ strings![
     ),
     ("player.play", "Play", "Putar"),
     ("player.pause", "Pause", "Jeda"),
+    ("player.back", "Back 15 seconds", "Mundur 15 detik"),
+    ("player.forward", "Forward 15 seconds", "Maju 15 detik"),
+    ("player.previous_line", "Previous line", "Baris sebelumnya"),
+    ("player.next_line", "Next line", "Baris berikutnya"),
+    ("player.speed", "Playback speed", "Kecepatan putar"),
+    ("player.volume", "Volume", "Volume"),
+    ("player.mute", "Mute", "Bisukan"),
+    ("player.unmute", "Unmute", "Bunyikan"),
+    ("player.lane_mic", "Microphone", "Mikrofon"),
+    ("player.lane_computer", "Computer audio", "Audio komputer"),
+    (
+        "player.keys",
+        "Space plays or pauses, ← and → skip 5 seconds",
+        "Spasi memutar atau menjeda, ← dan → lompat 5 detik"
+    ),
     ("format.mono", "Mono", "Mono"),
     (
         "format.stereo",

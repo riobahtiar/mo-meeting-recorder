@@ -1104,6 +1104,30 @@ impl Recorder {
             }
         });
 
+        // The player's keys on the done page: Space plays or pauses, ← and →
+        // skip. Captured before the focused widget sees them, so Space plays
+        // even when a button has the focus, except in text, where Space and
+        // the arrows keep their meaning.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            let Some(r) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            let typing = gtk::prelude::GtkWindowExt::focus(&r.window)
+                .is_some_and(|w| w.is::<gtk::Text>() || w.is::<gtk::TextView>());
+            if r.state.get() != State::Done
+                || typing
+                || !modifiers.is_empty()
+                || !r.player.handle_key(key)
+            {
+                return glib::Propagation::Proceed;
+            }
+            glib::Propagation::Stop
+        });
+        self.window.add_controller(keys);
+
         let weak = Rc::downgrade(self);
         self.player.connect_error(move |reason| {
             if let Some(r) = weak.upgrade() {
@@ -3580,6 +3604,8 @@ impl Recorder {
         if let Some(manifest) = self.manifest.borrow().as_ref() {
             meta.push(manifest.format.short_label().to_owned());
         }
+        self.player
+            .set_lines(segments.iter().map(|(_, ms)| *ms).collect());
         *self.segments.borrow_mut() = segments;
         *self.lines.borrow_mut() = lines;
         self.player.set_chapters(

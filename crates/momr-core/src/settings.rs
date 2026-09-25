@@ -87,6 +87,22 @@ pub fn save_sources(sources: crate::audio::Sources) -> std::io::Result<()> {
     save("sources", sources.key())
 }
 
+/// The player's speed and volume, kept between meetings and launches.
+pub fn load_player_sound() -> crate::playback::Sound {
+    let settings = load();
+    let default = crate::playback::Sound::default();
+    crate::playback::Sound {
+        speed: settings["player_speed"].as_f64().unwrap_or(default.speed),
+        volume: settings["player_volume"].as_f64().unwrap_or(default.volume),
+    }
+    .clamped()
+}
+
+pub fn save_player_sound(sound: crate::playback::Sound) -> std::io::Result<()> {
+    save_value("player_speed", serde_json::json!(sound.speed))?;
+    save_value("player_volume", serde_json::json!(sound.volume))
+}
+
 /// Whether new recordings are saved with voice enhancement; off until the
 /// ready page's switch says otherwise.
 pub fn load_enhance() -> bool {

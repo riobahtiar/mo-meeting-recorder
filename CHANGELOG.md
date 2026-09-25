@@ -5,6 +5,7 @@ One line per feature added or retired, newest first. Details live in the plan th
 ## Unreleased
 
 ### Added
+- Done page player: previous and next line, back and forward 15 s, speed 0.5–2× (pitch kept), volume 0–150 % with mute, hover time and seek, a gliding playhead and level animation, Space and ←/→ (plan 18).
 - Voice enhancement switch on the ready page: AUSoundIsolation (`momr-audio enhance`) plus an ffmpeg voice chain on the saved audio; `.tracks/` and the transcript stay original (plan 17, D26).
 - Manifest: optional `"enhanced"` field; absent reads as false (plan 17).
 - Ready page: Record the microphone and computer audio, the microphone only or the computer audio only; the side not kept is silence, so the folder shape is unchanged (plan 17).
@@ -46,6 +47,7 @@ One line per feature added or retired, newest first. Details live in the plan th
 - The strip's custom drag handle and its "Drag to move" hint (plan 14).
 
 ### Fixed
+- The bundled `ffprobe` runs again (library validation refused the bundled dylibs), so the player shows the meeting's duration instead of 00:00; the player also falls back to the decoded length (plan 18).
 - AppKit shell launches: the delegate is set by hand, since `@main` needs a nib to create it (plan 12).
 - AppKit pause no longer erases the recording so far: resume appends to the raw tracks (plan 12).
 - AppKit stop no longer hangs on transcripts over the pipe buffer (about 30 minutes of meeting) (plan 12).

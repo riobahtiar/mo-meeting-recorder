@@ -68,7 +68,13 @@
 .transcript-editor { background: alpha(currentColor, 0.06); border-radius: 6px; padding: 4px 6px; }
 .transcript-editor text { background: transparent; }
 .done-icon { color: @accent_color; }
-.player { padding: 6px 14px 6px 6px; }
+/* The done page's player: waveform on top, clock under it, transport and
+   tools in one row. The play button is the one filled control. */
+.player { padding: 12px 16px 10px 16px; }
+.player button.player-play { min-width: 40px; min-height: 40px; padding: 0; border-radius: 9999px; }
+.player button.player-control { min-width: 32px; min-height: 32px; padding: 0; }
+.player dropdown > button { min-height: 28px; padding: 2px 8px; }
+.player scale { padding: 0 4px; }
 
 /* A file hovering over the window. */
 .drop-hint { margin: 10px; border: 3px dashed @accent_color; border-radius: 14px;

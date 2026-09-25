@@ -24,6 +24,7 @@
 | Storage reset, recording timer, audio sources | [15](plans/15-reset-timer-sources.md) | in progress — cleanup and timer logic tested, Settings › Storage, Timer dialog, microphone and per-app pickers coded; helper builds with tested `--device`/`--bundle` flags, on-screen source switching needs a display session |
 | Windows and Linux versions | [16](plans/16-multi-platform-architecture.md) | blueprint — `momr-core` has no `cfg(target_os)`; `momr-platform` has paths, process, fs and sock for macOS, other targets next |
 | Record one side or both; voice enhancement | [17](plans/17-sources-and-voice-enhancement.md) | in progress — Record row and Voice enhancement switch (both shells) coded and tested; enhancement measured on an invented clip (18 dB less noise, sample-aligned); on-screen check needs a display session |
+| A full player on the done page | [18](plans/18-player.md) | in progress — transport, speed, volume, hover seek, playing animation and keys coded and tested; seen on screen paused; playing needs a display check |
 
 Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: the app is GTK 4 and libadwaita. Screenshots come with the macOS look in plan 07.
 
@@ -34,7 +35,7 @@ Scope is macOS 14 or newer on Apple silicon and Intel. iPhone and iPad are out: 
 - **Transcribes on your own machine** by default when you stop (cloud providers are opt-in, see [Privacy](#privacy)), with an animation that shows the lines as they are recognised.
 - **Tells the speakers apart.** Your side and the other side come from the two tracks; several people on the other side are told apart by voice.
 - **Imports any recording** you drop on the window, and separates up to eight voices with NVIDIA's [Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization), run locally.
-- **Gives you a transcript you can listen to**, edit in place, and copy. Click any line to play from there.
+- **Gives you a transcript you can listen to**, edit in place, and copy. Click any line to play from there. The player has back and forward, previous and next line, speed from 0.5× to 2× with the pitch kept, volume, and a waveform you hover and click to seek; Space plays and pauses.
 - **Chapters by your coding agent**, when one is set up. The agent runs with every tool switched off and can only answer with text.
 - **Keeps your recording safe.** An unfinished recording is offered back on the next start.
 - **Records on a timer.** Stop after a set length, or start and stop at clock times (⌘T).

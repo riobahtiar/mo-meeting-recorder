@@ -35,6 +35,7 @@ Checkbox states: `[ ]` not started, `[~]` in progress, `[x]` done.
 | [15 Reset, timer, sources](15-reset-timer-sources.md) | Storage cleanup and reset; timed recordings; microphone and per-app computer audio | 14 | 6 Features | `[~]` |
 | [16 Multi-platform architecture](16-multi-platform-architecture.md) | Core crate, platform seams and the shell to build Windows and Linux versions on | 12 | 4 Native | `[~]` entered 2026-09-25 as blueprint (D25) |
 | [17 Sources and voice enhancement](17-sources-and-voice-enhancement.md) | Record the mic, the computer or both; a voice enhancement switch, transcripts from the original audio (D26) | 12, 15 | 6 Features | `[~]` |
+| [18 Player](18-player.md) | A full player on the done page: transport, speed, volume, waveform seek with hover, playing animation, keys | 04, 14 | 2 Feels native | `[~]` |
 
 Phases: **1 Works** is a usable app started from a terminal. **2 Feels native** is what a Mac user expects from the chrome. **3 Ships** is something a person can download and double-click. **4 Native** is the AppKit shell on the Rust core (plan 12, entered by D24) and the groundwork for other platforms (plan 16). **5 Providers** and **6 Features** are what people asked for once it recorded.
 

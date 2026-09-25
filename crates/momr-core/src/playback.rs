@@ -1,8 +1,10 @@
 //! Playing a meeting: one ffmpeg decoding to the speakers, stopped when
 //! dropped. The input side (seek, mix) is built here; the output comes from
 //! `momr_platform::playback::OUTPUT`, the one part that differs per OS, so no
-//! shell names a sink. Position is the start offset plus the wall clock;
-//! seeking restarts the process at the new offset.
+//! shell names a sink. Position is the start offset plus the wall clock
+//! times the speed; seeking, and a new speed or volume, restart the process
+//! at the position. Speed is ffmpeg's `atempo` (pitch kept, the range it
+//! takes, 0.5–2×), volume its `volume` filter, both after the mix.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -14,11 +16,55 @@ pub const BINS: usize = 1000;
 /// How long a stopped playback gets to end on SIGTERM before SIGKILL.
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
+/// The playback speeds the shells offer, slowest first.
+pub const SPEEDS: [f64; 7] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+/// The loudest playback volume, as a gain: 150 % helps a quiet meeting.
+pub const MAX_VOLUME: f64 = 1.5;
+
+/// How a playback sounds: speed (0.5–2×) and volume (0–`MAX_VOLUME`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sound {
+    pub speed: f64,
+    pub volume: f64,
+}
+
+impl Default for Sound {
+    fn default() -> Self {
+        Sound {
+            speed: 1.0,
+            volume: 1.0,
+        }
+    }
+}
+
+impl Sound {
+    /// Clamped to what ffmpeg's filters take and the shells offer.
+    pub fn clamped(self) -> Sound {
+        Sound {
+            speed: self.speed.clamp(SPEEDS[0], SPEEDS[SPEEDS.len() - 1]),
+            volume: self.volume.clamp(0.0, MAX_VOLUME),
+        }
+    }
+
+    /// The filters after the mix, None when there is nothing to change.
+    fn filters(self) -> Option<String> {
+        let mut filters = Vec::new();
+        if (self.speed - 1.0).abs() > 1e-3 {
+            filters.push(format!("atempo={:.3}", self.speed));
+        }
+        if (self.volume - 1.0).abs() > 1e-3 {
+            filters.push(format!("volume={:.3}", self.volume));
+        }
+        (!filters.is_empty()).then(|| filters.join(","))
+    }
+}
+
 /// A running ffmpeg playback, stopped when dropped.
 pub struct Playback {
     ffmpeg: Child,
     started: Instant,
     from_us: i64,
+    speed: f64,
     /// The last line ffmpeg wrote to stderr, read on its own thread so a
     /// chatty ffmpeg never fills the pipe.
     last_error: std::sync::Arc<std::sync::Mutex<String>>,
@@ -28,32 +74,46 @@ pub struct Playback {
 
 /// ffmpeg's arguments for `files` mixed from `from_us` into `output`: a
 /// `-ss` before each `-i` (so every input seeks, not the mix), `amix` only
-/// when there is more than one. Pure, so the shape is tested.
-fn args(files: &[PathBuf], from_us: i64, output: &[&str]) -> Vec<std::ffi::OsString> {
+/// when there is more than one, then the `sound` filters. Pure, so the
+/// shape is tested.
+fn args(files: &[PathBuf], from_us: i64, sound: Sound, output: &[&str]) -> Vec<std::ffi::OsString> {
     let at = format!("{:.3}", from_us.max(0) as f64 / 1_000_000.0);
     let mut args: Vec<std::ffi::OsString> = ["-v", "error", "-nostdin"].map(Into::into).into();
     for file in files {
         args.extend(["-ss".into(), at.clone().into(), "-i".into(), file.into()]);
     }
+    let after = sound.clamped().filters();
     if files.len() > 1 {
+        let mix = format!("amix=inputs={}:normalize=0", files.len());
         args.push("-filter_complex".into());
-        args.push(format!("amix=inputs={}:normalize=0", files.len()).into());
+        args.push(
+            match after {
+                Some(after) => format!("{mix},{after}"),
+                None => mix,
+            }
+            .into(),
+        );
+    } else if let Some(after) = after {
+        args.push("-af".into());
+        args.push(after.into());
     }
     args.extend(output.iter().map(Into::into));
     args
 }
 
 impl Playback {
-    /// Starts `files` mixed together at `from_us` (clamped to the start).
-    pub fn start(files: &[PathBuf], from_us: i64) -> Result<Playback, String> {
+    /// Starts `files` mixed together at `from_us` (clamped to the start),
+    /// sounding as `sound`.
+    pub fn start(files: &[PathBuf], from_us: i64, sound: Sound) -> Result<Playback, String> {
         if files.is_empty() {
             return Err("no audio to play".into());
         }
         let output = momr_platform::playback::OUTPUT
             .ok_or("playback is not available on this platform yet (plan 16)")?;
         let from_us = from_us.max(0);
+        let sound = sound.clamped();
         let mut ffmpeg = guarded("ffmpeg", crate::helper::path().as_deref())
-            .args(args(files, from_us, output))
+            .args(args(files, from_us, sound, output))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -75,6 +135,7 @@ impl Playback {
             ffmpeg,
             started: Instant::now(),
             from_us,
+            speed: sound.speed,
             last_error,
             reader,
         })
@@ -82,7 +143,7 @@ impl Playback {
 
     /// Where the playhead is, if the process is still the one started.
     pub fn position_us(&self) -> i64 {
-        self.from_us + self.started.elapsed().as_micros() as i64
+        self.from_us + (self.started.elapsed().as_micros() as f64 * self.speed) as i64
     }
 
     /// None while playing; once ended, Ok for the end of the file or Err
@@ -174,13 +235,26 @@ pub fn probe_duration_us(path: &Path) -> Option<i64> {
         .map(|secs| (secs * 1_000_000.0) as i64)
 }
 
+/// How fast `peaks` decodes: enough for the loudest sample per bin.
+const PEAK_RATE: usize = 4000;
+
 /// Decodes `path` at a low rate and keeps the loudest sample per bin, scaled
-/// to 0..1 with a gentle curve so quiet speech still shows.
-pub fn peaks(path: &Path) -> Option<Vec<f32>> {
+/// to 0..1 with a gentle curve so quiet speech still shows. Also returns the
+/// decoded length in microseconds, the player's duration when ffprobe
+/// cannot give one.
+pub fn peaks(path: &Path) -> Option<(Vec<f32>, i64)> {
     let output = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
-        .args(["-ac", "1", "-ar", "4000", "-f", "s16le", "-"])
+        .args([
+            "-ac",
+            "1",
+            "-ar",
+            &PEAK_RATE.to_string(),
+            "-f",
+            "s16le",
+            "-",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -193,8 +267,9 @@ pub fn peaks(path: &Path) -> Option<Vec<f32>> {
         .iter()
         .map(|b| f32::from(i16::from_le_bytes(*b)).abs() / 32768.0)
         .collect();
+    let length_us = (samples.len() as i64) * 1_000_000 / PEAK_RATE as i64;
     if samples.is_empty() {
-        return Some(vec![0.0; BINS]);
+        return Some((vec![0.0; BINS], 0));
     }
     let per_bin = samples.len().div_ceil(BINS);
     let mut bins: Vec<f32> = samples
@@ -203,7 +278,10 @@ pub fn peaks(path: &Path) -> Option<Vec<f32>> {
         .collect();
     bins.resize(BINS, 0.0);
     let loudest = bins.iter().copied().fold(0.0, f32::max).max(1e-4);
-    Some(bins.into_iter().map(|v| (v / loudest).sqrt()).collect())
+    Some((
+        bins.into_iter().map(|v| (v / loudest).sqrt()).collect(),
+        length_us,
+    ))
 }
 
 #[cfg(test)]
@@ -214,7 +292,7 @@ mod tests {
     fn every_input_seeks_and_only_several_are_mixed() {
         let files = [PathBuf::from("a.ogg"), PathBuf::from("b.ogg")];
         let out = ["-f", "audiotoolbox", "-"];
-        let two: Vec<String> = args(&files, 1_500_000, &out)
+        let two: Vec<String> = args(&files, 1_500_000, Sound::default(), &out)
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
@@ -239,17 +317,50 @@ mod tests {
                 "-"
             ]
         );
-        let one: Vec<String> = args(&files[..1], -5, &out)
+        let one: Vec<String> = args(&files[..1], -5, Sound::default(), &out)
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(!one.iter().any(|a| a == "-filter_complex"));
+        assert!(!one.iter().any(|a| a == "-filter_complex" || a == "-af"));
         assert_eq!(one[3..5], ["-ss", "0.000"], "a negative start plays from 0");
+    }
+
+    /// Speed and volume ride after the mix, pitch kept, clamped to the
+    /// range the shells offer; at 1× and 100 % nothing is added.
+    #[test]
+    fn speed_and_volume_follow_the_mix() {
+        let files = [PathBuf::from("a.ogg"), PathBuf::from("b.ogg")];
+        let out = ["-f", "audiotoolbox", "-"];
+        let text = |args: Vec<std::ffi::OsString>| {
+            args.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let fast = Sound {
+            speed: 1.5,
+            volume: 0.5,
+        };
+        let two = text(args(&files, 0, fast, &out));
+        assert!(two.contains(&"amix=inputs=2:normalize=0,atempo=1.500,volume=0.500".into()));
+        let one = text(args(&files[..1], 0, fast, &out));
+        let at = one.iter().position(|a| a == "-af").unwrap();
+        assert_eq!(one[at + 1], "atempo=1.500,volume=0.500");
+        let wild = Sound {
+            speed: 9.0,
+            volume: 7.0,
+        };
+        assert_eq!(
+            wild.clamped(),
+            Sound {
+                speed: 2.0,
+                volume: MAX_VOLUME
+            }
+        );
     }
 
     #[test]
     fn nothing_to_play_is_an_error() {
-        assert!(Playback::start(&[], 0).is_err());
+        assert!(Playback::start(&[], 0, Sound::default()).is_err());
     }
 
     #[test]

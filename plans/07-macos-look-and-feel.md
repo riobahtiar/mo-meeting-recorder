@@ -16,11 +16,11 @@ A Mac user opens MOM Recorder and finds what every Mac app has: a menu bar with 
 - [x] `grep -rn -i omarchy src/` finds nothing.
 
 Observed 2026-09-25 (no display in the shell session): `cargo build`,
-`cargo test` (52 passed), clippy and fmt are clean; a socket-driven
+`cargo test` (104 passed), clippy and fmt are clean; a socket-driven
 record/stop cycle runs with no new warnings. Everything visual — menu bar,
 traffic lights, typography, panels, About and Preferences rendering — needs
-the side-by-side in Verify step 2 on a display. The icon (step 10) and the
-VoiceOver check (step 13) are not started.
+the side-by-side in Verify step 2 on a display. The icon (step 10) ships in
+`data/icon/MOMRecorder.icns`; the VoiceOver check (step 13) is not started.
 
 ## Prerequisites
 

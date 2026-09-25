@@ -38,7 +38,9 @@
 .macos list.boxed-list > row + row { border-top: 1px solid alpha(currentColor, 0.08); }
 
 /* Dialogs read as sheets: slightly larger radius. */
-.macos dialog-host > dialog { border-radius: 12px; }
+/* The Settings page switcher: five tabs share one bar, so their padding */
+/* stays tight; longer titles ("Transkripsi", "Penyimpanan") still fit. */
+.macos viewswitcher button { padding-left: 8px; padding-right: 8px; }
 
 /* The ready page: the level meters in cards, the big clock. */
 .macos .meter-card { padding: 0; }

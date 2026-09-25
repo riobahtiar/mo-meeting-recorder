@@ -3,7 +3,6 @@
 One line per feature added or retired, newest first. Details live in the plan the line names; the pull request has the full story.
 
 ## Unreleased
-
 ### Added
 - Settings › General › Appearance: System, Light or Dark, applied at once (plan 14).
 - Gear button in the header bar that opens Settings; ⌘, unchanged (plan 14).
@@ -18,11 +17,23 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Compact strip reworked: the header bar stays (clock as the title, Pause, Stop, Expand), one two-lane wave under it (plan 14).
 - Transcribing scene: the title is measured and fitted to the window, in Menlo (plan 14).
 - API key rows are expanders with the status and the where-to-get-it hint in full (plan 14).
-
+- Rust workspace: `momr-core` holds cleanup, export, helper and locales with no UI or platform code; the GTK app behaves identically, and the core checks on Windows MSVC (plans 12, 16).
+- `momr-platform` seam crate with de-glibbed `paths` (`$HOME`/`%USERPROFILE%`, absolute `XDG_*`, `~/Documents`); both new crates check on Windows MSVC, lib and tests (plans 12, 16).
+- Recording timer and filename sanitizer in `momr-core` (chrono clock, DST gaps yield None); shell behavior unchanged (plan 12).
+- Transcribe chain in `momr-core` (transcribe, models, meeting, provider, nemotron, diarize, settings, appearance enum); CLI exits convert at the shell boundary, behavior unchanged (plan 12).
+- Platform `process`, `fs` and `sock` seams; audio, IPC, agent and chapters in the core; capture restart signals the single pid, not the group (plan 12).
+- Playback mechanics in `momr-core` with the output sink as a parameter; widget and colors stay in the shell (plan 12).
+- Native AppKit shell started: ready window with live meters from `momr-audio`, app menu and About (plan 12).
+- AppKit recording: staging in the shared layout, pause with clock, stop exports the meeting folder and transcribes (plan 12).
 ### Retired
 - The wildcard focus ring in `macos.css` that outlined every container (plan 14).
 - Per-page window resizing (480×700 ready, 1100×760 done) (plan 14).
 - The strip's custom drag handle and its "Drag to move" hint (plan 14).
+
+### Fixed
+- Settings dialog: wider (820), the stock × in the header hidden (traffic lights already close it), tighter page-switcher padding, so Indonesian tab titles fit (plan 14 follow-up).
+- Swift helper builds on the macOS 27 SDK: the per-app tap passes process object ids straight to `stereoMixdownOfProcesses` (plan 15).
+- Clippy clean again: the Audio settings process list sorts by key (plan 15).
 
 ## 1.1.1 and earlier
 

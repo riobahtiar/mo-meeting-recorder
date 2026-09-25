@@ -81,4 +81,6 @@ The macOS shell stays GTK until plan 12's criteria say otherwise. For Windows th
 
 ## Status
 
-Reference only. Revisit when the Windows version is scheduled.
+Entered 2026-09-25 as the multi-target blueprint (D25): macOS first, core
+compiling for Windows 11+ from slice 1. Next: the `momr-platform` seam
+trait, then Windows implementations seam by seam when scheduled.

@@ -73,4 +73,66 @@ The DMG carries the SwiftUI app; the Homebrew formula keeps the GTK binary as `m
 
 ## Status
 
-Reference only. Revisit after plan 07's smoke checklist.
+Entered 2026-09-25 by maintainer decision (D24): the macOS shell is AppKit,
+not SwiftUI-only — SwiftUI views may live inside AppKit windows where that
+is cheaper. The page order in step 3 and the parity rule in step 4 stand;
+step 1 (workspace split) is the first work. GTK retires when the smoke
+checklist is fully green on the AppKit shell.
+
+Slice 1 done 2026-09-25: workspace with `crates/momr-core` holding
+`cleanup`, `export`, `helper` and `locales`; the GTK app is byte-identical
+in behaviour (105 tests green: 87 shell + 18 core). Seams cut to get there:
+`RATE`/`CHANNELS` live in core `export`, the launch-language chain is pure
+in core (`resolve_lang`) with the macOS reads in `settings`, and the one
+`cfg` in core is the executable-bit leaf in `helper`. Core `cargo check`
+passes for `x86_64-pc-windows-msvc`, lib and tests.
+
+Slice 2 done 2026-09-25: `crates/momr-platform` with the `paths` seam,
+de-glibbed (`$HOME`/`%USERPROFILE%` plus absolute `XDG_*`, `~/Documents`
+instead of the glib special dir). `APP_NAME` lives in the platform crate
+and the shell re-exports it. 105 tests green (85 shell + 18 core + 2
+platform); both new crates check on Windows MSVC, lib and tests.
+
+Slice 3 done 2026-09-25: `timer` in core on chrono (glib `DateTime` gone;
+`next_occurrence` takes Unix seconds, DST gaps yield None), `safe_name`
+lives in core `export` with the shell re-exporting it. 105 tests green
+(81 shell + 22 core + 2 platform). Still shell-side: `models` (needs
+`transcribe`), `meeting` (needs `chapters`), `chapters` (needs `agent`).
+
+Slice 4 done 2026-09-25: the transcribe chain in core — `transcribe`
+(whisper-rs, ExitCode→i32, clock→chrono), `models`, `meeting` (stamp→chrono,
+`Chapter` housed here), `provider` (ureq), `nemotron` (ort, realfft),
+`diarize`, `settings`, plus a pure core `theme` (`Appearance`; the shell
+keeps the palette and switching). CLI exits convert at the shell boundary.
+105 tests green (42 shell + 61 core + 2 platform). Core holds no
+gtk/glib/adw/libc/`cfg(target_os)` (audit); a full Windows build needs a
+Windows runner (ureq's `ring` needs a C toolchain), which is CI's job.
+Shell left: ui, main, animation, player, theme-apply, audio, ipc, agent,
+chapters-generate.
+
+Slice 5 done 2026-09-25: platform `process` (detached spawn, single-pid
+terminate, group kill), `fs` (private dirs, no-follow opens with per-OS
+flags, regular-file links) and `sock` (local sockets, Windows stubs for the
+named-pipe future); `audio`, `ipc`, `agent` and `chapters` in core. 105
+tests green (9 shell + 94 core + 2 platform). One real bug caught by the
+move: group-kill does not apply to capture children, which share our group,
+so `terminate` signals the single pid. Shell left: ui, main, animation,
+player, theme-apply.
+
+Slice 6 done 2026-09-25: core `playback` (ffmpeg mechanics with the output
+sink as a parameter, waveform peaks, clock) with the widget, colors and
+play state staying in the shell's `Player`. 105 tests green (6 shell + 97
+core + 2 platform). Shell left: ui, main, animation, player-widget,
+theme-apply.
+
+Slice 7 done 2026-09-25: `apps/momr-appkit` builds — AppKit ready window
+with two live meters driven by `momr-audio` over the D03 byte contract,
+app menu, About, ⌘R/⌘,/⌘Q. Start and Settings are honest stubs pointing at
+their slices. On-screen check (meters move, menu, About) is the next
+session's job.
+
+Slice 8 done 2026-09-26: recording in the AppKit shell — staging in the
+GTK-identical layout (either shell recovers the other's crash), pause with
+an excluding clock, stop encodes both tracks, writes the manifest and runs
+the core `transcribe` CLI for `transcript.md`, Reveal in Finder included.
+Live record/stop/transcribe run is the next session's job.

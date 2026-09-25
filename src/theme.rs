@@ -126,34 +126,10 @@ fn css(theme: &Theme) -> String {
     )
 }
 
-/// Light, dark or whatever the Mac is set to. Stored by `settings.rs`; the
-/// enum lives here because the animation example builds this module alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Appearance {
-    System,
-    Light,
-    Dark,
-}
-
-impl Appearance {
-    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Appearance::System => "system",
-            Appearance::Light => "light",
-            Appearance::Dark => "dark",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Appearance {
-        match key {
-            "light" => Appearance::Light,
-            "dark" => Appearance::Dark,
-            _ => Appearance::System,
-        }
-    }
-}
+/// Light, dark or whatever the Mac is set to. The enum lives in core
+/// `theme` so settings and every shell share it; this module keeps the
+/// palette and the switching.
+pub use momr_core::theme::Appearance;
 
 /// Puts the chosen appearance in force. For System on a GTK that cannot
 /// follow the Mac itself, `macos_dark` says what the Mac is set to (see

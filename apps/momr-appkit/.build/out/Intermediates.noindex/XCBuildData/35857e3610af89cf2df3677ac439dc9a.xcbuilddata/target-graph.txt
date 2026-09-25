@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'AllExcludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'MomrApp-product' in project 'momr-appkit'
+Target 'MomrApp-product' in project 'momr-appkit' (no dependencies)

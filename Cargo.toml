@@ -3,21 +3,20 @@ name = "momr"
 version = "1.1.1"
 edition = "2024"
 
+[workspace]
+members = [".", "crates/momr-core", "crates/momr-platform"]
+
 [dependencies]
+momr-core = { path = "crates/momr-core" }
+momr-platform = { path = "crates/momr-platform" }
 adw = { version = "0.9.2", package = "libadwaita", features = ["v1_6"] }
 async-channel = "2.5.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_12"] }
 libc = "0.2.189"
 serde_json = "1.0.151"
-ort = "2.0.0-rc.13"
-realfft = "3"
-# HTTPS file upload (ElevenLabs) and JSON bodies (Google, OpenRouter) for the
-# optional cloud transcription providers. No new crates, only ureq's own features.
-ureq = { version = "3.4.2", features = ["multipart", "json"] }
-whisper-rs = "0.16"
 
 [features]
 default = []
 # GPU transcription through whisper.cpp's Metal backend, for Apple silicon and
 # recent Intel Macs. Needs nothing beyond the Xcode command line tools.
-metal = ["whisper-rs/metal"]
+metal = ["momr-core/metal"]

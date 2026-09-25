@@ -18,19 +18,20 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::agent::{self, Agent};
 use crate::animation::TranscribeAnimation;
-use crate::audio::{Device, HISTORY, Source, to_meter};
-use crate::chapters::{self, Chapter};
-use crate::export::{self, Format, export_audio, export_tracks};
-use crate::ipc::{self, SharedStatus, Status};
-use crate::locales::{Lang, t, tf};
-use crate::meeting::{self, Manifest};
 use crate::player::Player;
-use crate::provider::{Cloud, Provider};
-use crate::timer;
-use crate::transcribe::{self, Abort, CANCELLED, Event, LANGUAGE_CODES, language_label};
-use crate::{APP_ID, APP_NAME, settings};
+use crate::{APP_ID, APP_NAME};
+use momr_core::agent::{self, Agent};
+use momr_core::audio::{Device, HISTORY, Source, to_meter};
+use momr_core::chapters;
+use momr_core::export::{self, Format, export_audio, export_tracks};
+use momr_core::ipc::{SharedStatus, Status};
+use momr_core::locales::{Lang, t, tf};
+use momr_core::meeting::Chapter;
+use momr_core::meeting::{self, Manifest};
+use momr_core::provider::{Cloud, Provider};
+use momr_core::settings;
+use momr_core::transcribe::{self, Abort, CANCELLED, Event, LANGUAGE_CODES, language_label};
 
 const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
 const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
@@ -264,15 +265,15 @@ pub fn run(open: Option<&str>) -> glib::ExitCode {
 /// without the helpers has none). It gets the socket path and the interface
 /// language from here, so the two processes cannot disagree on either.
 fn spawn_menubar(slot: &Rc<RefCell<Option<std::process::Child>>>) {
-    if !crate::models::menubar_enabled() {
+    if !momr_core::models::menubar_enabled() {
         return;
     }
-    let Some(binary) = crate::helper::menubar_path() else {
+    let Some(binary) = momr_core::helper::menubar_path() else {
         return;
     };
     match std::process::Command::new(&binary)
-        .env("MOMR_SOCKET", ipc::socket_path())
-        .env("MOMR_LANG", crate::locales::current().code())
+        .env("MOMR_SOCKET", momr_core::ipc::socket_path())
+        .env("MOMR_LANG", momr_core::locales::current().code())
         // The item quits when this pid ends, so a crash or a kill does not
         // leave it behind; a clean quit still stops it below.
         .env("MOMR_PARENT_PID", std::process::id().to_string())
@@ -307,7 +308,7 @@ struct Recorder {
     format_row: adw::ComboRow,
     language_row: adw::ComboRow,
     timer_row: adw::ActionRow,
-    timer_plan: RefCell<timer::Plan>,
+    timer_plan: RefCell<momr_core::timer::Plan>,
     /// Whether the one-minute warning has been shown for this recording.
     timer_warned: Cell<bool>,
     animation: TranscribeAnimation,
@@ -396,8 +397,8 @@ impl Recorder {
         }));
         let (commands_tx, commands_rx) = async_channel::unbounded();
         let (mic_peaks, system_peaks) = (mic.clone(), system.clone());
-        let socket_error = ipc::serve(
-            &ipc::socket_path(),
+        let socket_error = momr_core::ipc::serve(
+            momr_core::ipc::socket_path(),
             shared.clone(),
             move || (mic_peaks.recent_peak(3), system_peaks.recent_peak(3)),
             commands_tx,
@@ -1353,7 +1354,7 @@ impl Recorder {
         let Some(dir) = self.result_dir.borrow().clone() else {
             return;
         };
-        let target = crate::meeting::find(&dir).unwrap_or(dir);
+        let target = momr_core::meeting::find(&dir).unwrap_or(dir);
         let _ = std::process::Command::new("open")
             .arg("-R")
             .arg(target)
@@ -1382,7 +1383,7 @@ impl Recorder {
         if self.state.get() != State::Done {
             return;
         }
-        let language: &'static str = crate::transcribe::LANGUAGE_CODES
+        let language: &'static str = momr_core::transcribe::LANGUAGE_CODES
             .iter()
             .find(|code| **code == language)
             .copied()
@@ -1506,7 +1507,7 @@ impl Recorder {
         let close = dialog.clone();
         set.connect_clicked(move |_| {
             let value = |row: &adw::SpinRow| row.value().round() as i64;
-            let mut plan = timer::Plan::default();
+            let mut plan = momr_core::timer::Plan::default();
             if length_on.is_active() {
                 let secs = value(&length_h) * 3600 + value(&length_m) * 60;
                 if secs <= 0 {
@@ -1516,16 +1517,23 @@ impl Recorder {
                 plan.max_secs = Some(secs);
                 let _ = settings::save_timer_minutes((secs / 60) as u32);
             }
-            let Ok(now) = glib::DateTime::now_local() else {
-                return;
-            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
             if start_on.is_active() {
-                plan.start_at =
-                    timer::next_occurrence(value(&start_h) as i32, value(&start_m) as i32, &now);
+                plan.start_at = momr_core::timer::next_occurrence(
+                    value(&start_h) as i32,
+                    value(&start_m) as i32,
+                    now,
+                );
             }
             if stop_on.is_active() {
-                plan.stop_at =
-                    timer::next_occurrence(value(&stop_h) as i32, value(&stop_m) as i32, &now);
+                plan.stop_at = momr_core::timer::next_occurrence(
+                    value(&stop_h) as i32,
+                    value(&stop_m) as i32,
+                    now,
+                );
                 // A stop before the start means the day after it.
                 if let (Some(start), Some(stop)) = (plan.start_at, plan.stop_at)
                     && stop <= start
@@ -1540,7 +1548,7 @@ impl Recorder {
     }
 
     /// Puts a timer plan in force and shows it on the ready page.
-    fn set_timer(&self, plan: timer::Plan) {
+    fn set_timer(&self, plan: momr_core::timer::Plan) {
         self.timer_row.set_subtitle(&plan.describe());
         self.timer_warned.set(false);
         *self.timer_plan.borrow_mut() = plan;
@@ -1588,7 +1596,10 @@ impl Recorder {
     /// with the reason, since the row itself already shows the new value.
     fn saved(weak: &std::rc::Weak<Self>, result: std::io::Result<()>) {
         if let (Err(e), Some(r)) = (result, weak.upgrade()) {
-            r.toast(&crate::locales::tf("prefs.save_failed", &[&e.to_string()]));
+            r.toast(&momr_core::locales::tf(
+                "prefs.save_failed",
+                &[&e.to_string()],
+            ));
         }
     }
 
@@ -1602,9 +1613,11 @@ impl Recorder {
     fn show_preferences(self: &Rc<Self>) {
         let dialog = adw::PreferencesDialog::builder()
             .title(t("prefs.title"))
-            .content_width(760)
+            .content_width(820)
             .content_height(640)
             .build();
+        dialog.add_css_class("macos");
+        Self::hide_prefs_close(&dialog);
         dialog.add(&self.prefs_general());
         dialog.add(&self.prefs_transcription());
         dialog.add(&self.prefs_recording());
@@ -1616,6 +1629,30 @@ impl Recorder {
             r.settings_changed();
         });
         dialog.present(Some(&self.window));
+    }
+
+    /// Hides the × libadwaita packs at the start of a PreferencesDialog
+    /// header. The dialog window already has traffic lights, so the extra
+    /// button only duplicates Close while stealing width from the page
+    /// switcher, whose longer titles ("Transkripsi", "Penyimpanan") then
+    /// ellipsize. Matches by icon, so a future libadwaita that moves the
+    /// button only means it stays visible, never a crash.
+    fn hide_prefs_close(dialog: &adw::PreferencesDialog) {
+        fn walk(widget: &gtk::Widget) {
+            if let Ok(button) = widget.clone().downcast::<gtk::Button>()
+                && button.icon_name().as_deref() == Some("window-close-symbolic")
+            {
+                button.set_visible(false);
+            }
+            let mut next = widget.first_child();
+            while let Some(child) = next {
+                walk(&child);
+                next = child.next_sibling();
+            }
+        }
+        if let Some(child) = dialog.first_child() {
+            walk(&child);
+        }
     }
 
     /// Re-reads what the ready page shows from the settings files, after
@@ -1653,7 +1690,7 @@ impl Recorder {
         let ui_language = adw::ComboRow::builder()
             .title(t("prefs.ui_language"))
             .model(&gtk::StringList::new(&["English", "Bahasa Indonesia"]))
-            .selected(match crate::locales::current() {
+            .selected(match momr_core::locales::current() {
                 Lang::English => 0,
                 Lang::Indonesian => 1,
             })
@@ -1665,7 +1702,7 @@ impl Recorder {
             } else {
                 Lang::English
             };
-            Self::saved(&weak, crate::settings::save_ui_language(lang));
+            Self::saved(&weak, momr_core::settings::save_ui_language(lang));
         });
         interface.add(&ui_language);
         let appearance_labels = [
@@ -1698,11 +1735,14 @@ impl Recorder {
             .build();
         let menubar_row = adw::SwitchRow::builder()
             .title(t("prefs.menubar_show"))
-            .active(crate::models::menubar_enabled())
+            .active(momr_core::models::menubar_enabled())
             .build();
         let weak = Rc::downgrade(self);
         menubar_row.connect_active_notify(move |row| {
-            Self::saved(&weak, crate::models::save_menubar_enabled(row.is_active()));
+            Self::saved(
+                &weak,
+                momr_core::models::save_menubar_enabled(row.is_active()),
+            );
         });
         menubar_group.add(&menubar_row);
         page.add(&menubar_group);
@@ -1714,22 +1754,22 @@ impl Recorder {
         let transcription = adw::PreferencesGroup::builder()
             .title(t("prefs.transcription"))
             .build();
-        let model_names: Vec<&str> = crate::models::MODELS.iter().map(|m| m.name).collect();
+        let model_names: Vec<&str> = momr_core::models::MODELS.iter().map(|m| m.name).collect();
         let model_row = adw::ComboRow::builder()
             .title(t("prefs.model"))
             .model(&gtk::StringList::new(&model_names))
             .build();
-        let current_model = crate::models::configured();
+        let current_model = momr_core::models::configured();
         model_row.set_selected(
-            crate::models::MODELS
+            momr_core::models::MODELS
                 .iter()
                 .position(|m| m.name == current_model)
                 .unwrap_or(0) as u32,
         );
         let model_subtitle = |name: &str| {
-            let model = crate::models::MODELS.iter().find(|m| m.name == name);
+            let model = momr_core::models::MODELS.iter().find(|m| m.name == name);
             let downloaded = model.is_some_and(|m| {
-                crate::transcribe::models_dir()
+                momr_core::transcribe::models_dir()
                     .join(format!("ggml-{}.bin", m.name))
                     .is_file()
             });
@@ -1748,7 +1788,7 @@ impl Recorder {
             let name = model_names[row.selected() as usize];
             Self::saved(
                 &Rc::downgrade(&r),
-                crate::models::save_config_value("model", name),
+                momr_core::models::save_config_value("model", name),
             );
             row.set_subtitle(&model_subtitle(name));
             r.update_model_banner();
@@ -1788,7 +1828,7 @@ impl Recorder {
             .build();
         // An id in config.toml that names no provider shows as local here and
         // says so, rather than looking like a choice that was made.
-        let (current_provider, provider_problem) = match crate::provider::configured() {
+        let (current_provider, provider_problem) = match momr_core::provider::configured() {
             Ok(provider) => (provider, None),
             Err(e) => (Provider::Local, Some(e)),
         };
@@ -1806,7 +1846,7 @@ impl Recorder {
         let weak = Rc::downgrade(self);
         provider_row.connect_selected_notify(move |row| {
             let provider = Provider::ALL[row.selected() as usize];
-            Self::saved(&weak, crate::provider::save_configured(provider));
+            Self::saved(&weak, momr_core::provider::save_configured(provider));
             row.set_subtitle(Self::provider_privacy(provider));
         });
         transcription.add(&provider_row);
@@ -1835,9 +1875,9 @@ impl Recorder {
                 t("prefs.key_hint_openrouter"),
             ),
         ] {
-            let state = match crate::provider::key_status(cloud) {
+            let state = match momr_core::provider::key_status(cloud) {
                 Ok(()) => t("prefs.key_saved").to_owned(),
-                Err(crate::provider::KeyError::Missing(_)) => t("prefs.key_none").to_owned(),
+                Err(momr_core::provider::KeyError::Missing(_)) => t("prefs.key_none").to_owned(),
                 Err(e) => e.to_string(),
             };
             let expander = adw::ExpanderRow::builder()
@@ -1858,7 +1898,7 @@ impl Recorder {
             key_row.connect_apply(move |row| {
                 let key = row.text().to_string();
                 row.set_text("");
-                match crate::provider::save_api_key(cloud, &key) {
+                match momr_core::provider::save_api_key(cloud, &key) {
                     Ok(()) => {
                         status.set_subtitle(t("prefs.key_saved"));
                         if let Some(r) = weak.upgrade() {
@@ -1882,14 +1922,14 @@ impl Recorder {
             .title(t("prefs.chapters"))
             .description(t("prefs.chapters_about"))
             .build();
-        let agents = crate::agent::installed_agents();
+        let agents = momr_core::agent::installed_agents();
         let mut agent_names = vec![t("prefs.agent_none")];
         agent_names.extend(agents.iter().map(|a| a.name));
         let agent_row = adw::ComboRow::builder()
             .title(t("prefs.agent"))
             .model(&gtk::StringList::new(&agent_names))
             .build();
-        let current_agent = crate::agent::configured_id().unwrap_or_default();
+        let current_agent = momr_core::agent::configured_id().unwrap_or_default();
         agent_row.set_selected(
             agents
                 .iter()
@@ -1904,7 +1944,7 @@ impl Recorder {
                 0 => "",
                 n => agents[n - 1].id,
             };
-            Self::saved(&weak, crate::agent::save_configured_id(id));
+            Self::saved(&weak, momr_core::agent::save_configured_id(id));
         });
         chapters.add(&agent_row);
         page.add(&chapters);
@@ -1966,9 +2006,10 @@ impl Recorder {
                 if let Some(path) = result.ok().and_then(|f| f.path()) {
                     match settings::save_meetings_dir(&path) {
                         Ok(()) => row.set_subtitle(&path.display().to_string()),
-                        Err(e) => {
-                            this.toast(&crate::locales::tf("prefs.save_failed", &[&e.to_string()]))
-                        }
+                        Err(e) => this.toast(&momr_core::locales::tf(
+                            "prefs.save_failed",
+                            &[&e.to_string()],
+                        )),
                     }
                 }
             });
@@ -1997,8 +2038,8 @@ impl Recorder {
 
     fn prefs_audio(self: &Rc<Self>) -> adw::PreferencesPage {
         let page = Self::prefs_page(t("prefs.audio"), "audio-speakers-symbolic");
-        let audio_status = match crate::helper::path() {
-            Some(helper) => crate::helper::list_info(&helper),
+        let audio_status = match momr_core::helper::path() {
+            Some(helper) => momr_core::helper::list_info(&helper),
             None => Err(t("banner.audio_helper_missing").to_owned()),
         };
 
@@ -2027,7 +2068,7 @@ impl Recorder {
         mic_row.set_subtitle(&match &audio_status {
             Ok(_) if inputs.is_empty() => t("prefs.mic_none").to_owned(),
             Ok(_) => t("prefs.mic_hint").to_owned(),
-            Err(e) => crate::locales::tf("prefs.devices_unknown", &[e]),
+            Err(e) => momr_core::locales::tf("prefs.devices_unknown", &[e]),
         });
         let weak = Rc::downgrade(self);
         let mic_inputs = inputs.clone();
@@ -2079,11 +2120,14 @@ impl Recorder {
             Ok(devices) if devices.tap => {
                 status_row.set_subtitle(t("prefs.computer_tap"));
             }
-            Ok(crate::helper::AudioDevices {
+            Ok(momr_core::helper::AudioDevices {
                 blackhole: Some(device),
                 ..
             }) => {
-                status_row.set_subtitle(&crate::locales::tf("prefs.computer_blackhole", &[device]));
+                status_row.set_subtitle(&momr_core::locales::tf(
+                    "prefs.computer_blackhole",
+                    &[device],
+                ));
             }
             _ => {
                 status_row.set_subtitle(t("prefs.computer_unavailable"));
@@ -2119,7 +2163,7 @@ impl Recorder {
             .as_ref()
             .map(|d| d.processes.clone())
             .unwrap_or_default();
-        processes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        processes.sort_by_key(|a| a.name.to_lowercase());
         processes.dedup_by(|a, b| a.bundle == b.bundle);
         let mut offered: Vec<(String, String, String)> = processes
             .iter()
@@ -2198,9 +2242,12 @@ impl Recorder {
             .title(t("prefs.storage"))
             .description(t("storage.about"))
             .build();
-        let cache_dir = crate::paths::cache();
-        let models_dir = crate::transcribe::models_dir();
-        let settings_files = [crate::paths::settings_file(), crate::paths::config_file()];
+        let cache_dir = momr_platform::paths::cache();
+        let models_dir = momr_core::transcribe::models_dir();
+        let settings_files = [
+            momr_platform::paths::settings_file(),
+            momr_platform::paths::config_file(),
+        ];
 
         let cache_row = adw::ActionRow::builder().title(t("storage.cache")).build();
         let models_row = adw::ActionRow::builder().title(t("storage.models")).build();
@@ -2213,7 +2260,7 @@ impl Recorder {
             let (cache_dir, models_dir) = (cache_dir.clone(), models_dir.clone());
             Rc::new(move || {
                 let unfinished = unfinished_recordings().len();
-                let mut subtitle = crate::cleanup::human(crate::cleanup::size(&cache_dir));
+                let mut subtitle = momr_core::cleanup::human(momr_core::cleanup::size(&cache_dir));
                 if unfinished > 0 {
                     subtitle = format!(
                         "{subtitle} · {}",
@@ -2221,9 +2268,9 @@ impl Recorder {
                     );
                 }
                 cache_row.set_subtitle(&subtitle);
-                models_row.set_subtitle(&crate::cleanup::human(crate::cleanup::models_size(
-                    &models_dir,
-                )));
+                models_row.set_subtitle(&momr_core::cleanup::human(
+                    momr_core::cleanup::models_size(&models_dir),
+                ));
             })
         };
         refresh();
@@ -2232,7 +2279,7 @@ impl Recorder {
         let keep = {
             let weak = Rc::downgrade(self);
             move || -> Vec<PathBuf> {
-                let mut keep = vec![ipc::socket_path()];
+                let mut keep = vec![momr_core::ipc::socket_path()];
                 if let Some(r) = weak.upgrade()
                     && let Some(staging) = r.staging.borrow().clone()
                 {
@@ -2257,10 +2304,10 @@ impl Recorder {
             let (cache_dir, keep, refresh) = (cache_dir.clone(), keep.clone(), refresh.clone());
             Rc::new(move || {
                 let Some(r) = weak.upgrade() else { return };
-                match crate::cleanup::clear_cache(&cache_dir, &keep()) {
+                match momr_core::cleanup::clear_cache(&cache_dir, &keep()) {
                     Ok(cleared) => r.toast(&tf(
                         "storage.cleared",
-                        &[&crate::cleanup::human(cleared.bytes)],
+                        &[&momr_core::cleanup::human(cleared.bytes)],
                     )),
                     Err(e) => r.toast(&tf("storage.failed", &[&e.to_string()])),
                 }
@@ -2300,8 +2347,10 @@ impl Recorder {
             let (models_dir, refresh) = (models_dir.clone(), refresh.clone());
             Rc::new(move || {
                 let Some(r) = weak.upgrade() else { return };
-                match crate::cleanup::delete_models(&models_dir) {
-                    Ok(freed) => r.toast(&tf("storage.cleared", &[&crate::cleanup::human(freed)])),
+                match momr_core::cleanup::delete_models(&models_dir) {
+                    Ok(freed) => {
+                        r.toast(&tf("storage.cleared", &[&momr_core::cleanup::human(freed)]))
+                    }
                     Err(e) => r.toast(&tf("storage.failed", &[&e.to_string()])),
                 }
                 r.update_model_banner();
@@ -2331,7 +2380,7 @@ impl Recorder {
             let (files, dialog) = (settings_files.clone(), dialog.clone());
             Rc::new(move || {
                 let Some(r) = weak.upgrade() else { return };
-                match crate::cleanup::reset_settings(&files) {
+                match momr_core::cleanup::reset_settings(&files) {
                     Ok(()) => {
                         r.after_settings_reset();
                         r.toast(t("storage.settings_reset"));
@@ -2555,17 +2604,23 @@ impl Recorder {
         let plan = self.timer_plan.borrow();
         match self.state.get() {
             State::Idle => match plan.start_at {
-                Some(at) => tf("timer.status_scheduled", &[&timer::clock_time(at)]),
+                Some(at) => tf(
+                    "timer.status_scheduled",
+                    &[&momr_core::timer::clock_time(at)],
+                ),
                 None => t("ready.status_idle").to_owned(),
             },
             State::Recording if self.paused.get() => t("ready.status_paused").to_owned(),
-            State::Recording => match plan.remaining(ipc::now(), self.elapsed()) {
-                Some(left) => tf("timer.status_countdown", &[&timer::countdown(left)]),
+            State::Recording => match plan.remaining(momr_core::ipc::now(), self.elapsed()) {
+                Some(left) => tf(
+                    "timer.status_countdown",
+                    &[&momr_core::timer::countdown(left)],
+                ),
                 None => t("ready.status_recording").to_owned(),
             },
             State::Stopping => t("ready.status_stopping").to_owned(),
             // Where the audio goes is a privacy question: say it.
-            State::Transcribing => match crate::provider::configured() {
+            State::Transcribing => match momr_core::provider::configured() {
                 Ok(Provider::Cloud(cloud)) => {
                     tf("ready.status_transcribing_cloud", &[cloud.name()])
                 }
@@ -2576,7 +2631,7 @@ impl Recorder {
     }
 
     fn tick(self: &Rc<Self>) {
-        let now = ipc::now();
+        let now = momr_core::ipc::now();
         if self.state.get() == State::Recording {
             let elapsed = self.elapsed();
             let clock = format_elapsed(elapsed);
@@ -2668,7 +2723,7 @@ impl Recorder {
         let until = if self.paused.get() {
             self.pause_began.get()
         } else {
-            ipc::now()
+            momr_core::ipc::now()
         };
         (until - self.started_at.get() - self.paused_secs.get()).max(0)
     }
@@ -2679,10 +2734,10 @@ impl Recorder {
         }
         if self.paused.get() {
             self.paused_secs
-                .set(self.paused_secs.get() + ipc::now() - self.pause_began.get());
+                .set(self.paused_secs.get() + momr_core::ipc::now() - self.pause_began.get());
             self.paused.set(false);
         } else {
-            self.pause_began.set(ipc::now());
+            self.pause_began.set(momr_core::ipc::now());
             self.paused.set(true);
         }
         self.mic.set_paused(self.paused.get());
@@ -2779,7 +2834,7 @@ impl Recorder {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or_else(ipc::now, |d| d.as_secs() as i64);
+            .map_or_else(momr_core::ipc::now, |d| d.as_secs() as i64);
         let mut out = output_dir(started_at, &title);
         let mut n = 2;
         while out.exists() {
@@ -2814,7 +2869,8 @@ impl Recorder {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (source, target) = (path.clone(), out.clone());
-            let staging = crate::paths::cache().join(format!("import-{}", ipc::now()));
+            let staging =
+                momr_platform::paths::cache().join(format!("import-{}", momr_core::ipc::now()));
             let converted = gio::spawn_blocking(move || import_audio(&source, &target, &staging))
                 .await
                 .unwrap_or_else(|_| Err(t("help.stopped_unexpectedly").into()));
@@ -2884,7 +2940,7 @@ impl Recorder {
         }
         let note = note.unwrap_or_else(|| RecordingNote {
             title: t("done.recovered_title").to_owned(),
-            started_at: ipc::now() - raw_duration(&staging),
+            started_at: momr_core::ipc::now() - raw_duration(&staging),
             format: settings::load_format(),
             language: settings::load_language().to_owned(),
         });
@@ -2913,7 +2969,7 @@ impl Recorder {
         if self.model_downloading.get() {
             return;
         }
-        match crate::models::missing() {
+        match momr_core::models::missing() {
             Some((name, size_mb)) => {
                 let size = if size_mb >= 1000 {
                     format!("{:.1} GB", f64::from(size_mb) / 1000.0)
@@ -2943,7 +2999,7 @@ impl Recorder {
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
         let (done_tx, done_rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let result = crate::models::ensure(&events_tx, &Abort::default());
+            let result = momr_core::models::ensure(&events_tx, &Abort::default());
             let _ = done_tx.send_blocking(result);
             let _ = events_tx.send_blocking(Event::Finished);
         });
@@ -3002,8 +3058,8 @@ impl Recorder {
         self.paused.set(false);
         self.paused_secs.set(0);
         self.pause_began.set(0);
-        let started_at = ipc::now();
-        let staging = crate::paths::cache().join(started_at.to_string());
+        let started_at = momr_core::ipc::now();
+        let staging = momr_platform::paths::cache().join(started_at.to_string());
         if let Err(e) = std::fs::create_dir_all(&staging)
             .and_then(|_| self.mic.start_recording(&staging.join("mic.raw")))
             .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
@@ -3054,7 +3110,7 @@ impl Recorder {
         }
         if self.paused.get() {
             self.paused_secs
-                .set(self.paused_secs.get() + ipc::now() - self.pause_began.get());
+                .set(self.paused_secs.get() + momr_core::ipc::now() - self.pause_began.get());
             self.paused.set(false);
         }
         self.freeze_meters(false);
@@ -3078,7 +3134,7 @@ impl Recorder {
             let _ = caffeinate.wait();
         }
         // The timer did its job, or was overtaken by hand: one plan per recording.
-        self.set_timer(timer::Plan::default());
+        self.set_timer(momr_core::timer::Plan::default());
         let Some(staging) = self.staging.borrow().clone() else {
             return;
         };
@@ -3156,12 +3212,12 @@ impl Recorder {
         self.set_state(State::Transcribing);
         self.animation.reset();
         self.animation
-            .set_stage(crate::locales::t("stage.loading_audio"));
+            .set_stage(momr_core::locales::t("stage.loading_audio"));
         self.animation.set_progress(0.0);
         self.animation.set_running(true);
 
         // Read once per run: the thread and the manifest must agree on it.
-        let provider = crate::provider::configured()?;
+        let provider = momr_core::provider::configured()?;
         let abort = Abort::default();
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
@@ -3241,7 +3297,7 @@ impl Recorder {
                 names.resize_with(found.len(), String::new);
                 for (i, name) in names.iter_mut().enumerate() {
                     if name.is_empty() {
-                        *name = crate::meeting::speaker_n(i + 1);
+                        *name = momr_core::meeting::speaker_n(i + 1);
                     }
                 }
                 manifest.speakers = names;
@@ -3260,7 +3316,7 @@ impl Recorder {
                     }
                     while names.len() < remotes + 1 {
                         let n = names.len();
-                        names.push(crate::meeting::remote_n(n));
+                        names.push(momr_core::meeting::remote_n(n));
                     }
                     names.truncate(remotes + 1);
                     manifest.speakers = names;
@@ -3280,7 +3336,7 @@ impl Recorder {
             markdown = meeting::relabel_all(&markdown, &renames);
             manifest.language = language.to_owned();
             // The model only means something for a local transcript.
-            manifest.model = (provider == Provider::Local).then(crate::models::configured);
+            manifest.model = (provider == Provider::Local).then(momr_core::models::configured);
             manifest.provider = Some(provider.id().to_owned());
             manifest.title = self.title();
             // Chapters of a previous transcript would point at lines that are gone.
@@ -3289,7 +3345,7 @@ impl Recorder {
             let _ = meeting::write(&out, manifest);
         }
         std::fs::write(out.join("transcript.md"), markdown)
-            .map_err(|e| crate::locales::t("help.write_failed").replace("{}", &e.to_string()))
+            .map_err(|e| momr_core::locales::t("help.write_failed").replace("{}", &e.to_string()))
     }
 
     /// Keeps the animation on screen for at least ten seconds, also after a
@@ -4448,7 +4504,7 @@ fn read_recording_note(staging: &std::path::Path) -> Option<RecordingNote> {
 
 /// Recording staging folders left behind, with some audio in them.
 fn unfinished_recordings() -> Vec<PathBuf> {
-    let root = crate::paths::cache();
+    let root = momr_platform::paths::cache();
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -4503,24 +4559,7 @@ fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
     Some((time, speaker, text.trim()))
 }
 
-pub fn safe_name(text: &str) -> String {
-    let cleaned: String = text
-        .chars()
-        .map(|c| {
-            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let trimmed = cleaned.trim_matches(|c| c == ' ' || c == '.');
-    if trimmed.is_empty() {
-        "Meeting".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
+pub use momr_core::export::safe_name;
 
 fn format_elapsed(secs: i64) -> String {
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);

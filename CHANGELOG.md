@@ -16,6 +16,12 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Plans folder: `plans/archives/` with an index for finished plans; plan 16 on Windows and Linux versions.
 
 ### Changed
+- Timer rules live in core (`Plan::from_choices`), so every shell applies the same length, DST and overnight rules (plan 15).
+- Process groups are a type (`process::Group`), so only a child `spawn_detached` made a group leader can be group-killed (plan 12).
+- The playback output comes from `momr-platform` instead of each shell naming `audiotoolbox`; empty playlists and negative starts are refused or clamped (plans 12, 16).
+- One clock format (`timer::clock`) for the recording clock, countdown and player (plan 12).
+- Socket commands (`start`, `stop`, `pause`, `compact`, `watch`) no longer run `defaults` for the language unless they print (plan 12).
+- AppKit shell: `Source` and recorder state enums, a meter that stops its timer off-window, and a test target (plan 12).
 - AppKit shell writes the `recording.json` staging note, so the GTK shell's recovery finishes its crashed recordings (plan 12).
 - Compact strip reworked: the header bar stays (clock as the title, Pause, Stop, Expand), one two-lane wave under it (plan 14).
 - Transcribing scene: the title is measured and fitted to the window, in Menlo (plan 14).
@@ -53,6 +59,7 @@ One line per feature added or retired, newest first. Details live in the plan th
 - Stopping playback, captures and agents calls kill(2) directly and reports failures; grok's binary link error is reported again (plan 12).
 - Agent workdirs are created fresh (never reused) with 0700 on every level (plan 12).
 - The dialog corner radius rule in `macos.css` is back (plan 14).
+- A time the clock repeats when DST ends reads as its first pass: chrono lists the later instant first on macOS, so `earliest()` is not trusted (plan 15).
 - AppKit meters use the GTK shell's scale (both channels, -60 dB), so the two shells' meters read alike (plan 12).
 - The home directory never falls back to a relative path, so no file lands relative to wherever the app runs (plan 06).
 - Module docs, AGENTS.md, the porting map and plans 12, 14 and 16 describe the workspace as built (plans 12, 16).

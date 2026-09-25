@@ -164,7 +164,7 @@ fn parse_args(args: &[String]) -> Result<Args, ()> {
 /// audio and transcript are saved, 1 when anything failed (the reason is
 /// the last stderr line), 2 for a usage error. The staging folder is removed
 /// only when both tracks and the transcript reached the meeting folder.
-pub fn cli(args: &[String]) -> i32 {
+pub fn cli(args: &[String]) -> u8 {
     let Ok(args) = parse_args(args) else {
         eprintln!("Usage: {APP_NAME} finish <staging folder> [--title T]");
         return 2;

@@ -1508,36 +1508,26 @@ impl Recorder {
         let this = self.clone();
         let close = dialog.clone();
         set.connect_clicked(move |_| {
+            use momr_core::timer::{Plan, Refused};
             let value = |row: &adw::SpinRow| row.value().round() as i64;
-            let mut plan = momr_core::timer::Plan::default();
-            if length_on.is_active() {
-                let secs = value(&length_h) * 3600 + value(&length_m) * 60;
-                if secs <= 0 {
-                    this.toast(t("timer.needs_length"));
-                    return;
-                }
-                plan.max_secs = Some(secs);
-                let _ = settings::save_timer_minutes((secs / 60) as u32);
-            }
-            let now = momr_core::ipc::now();
-            let clock = |h: &adw::SpinRow, m: &adw::SpinRow, after: i64| {
-                momr_core::timer::next_occurrence(value(h) as u32, value(m) as u32, after)
+            let time = |on: &adw::SwitchRow, h: &adw::SpinRow, m: &adw::SpinRow| {
+                on.is_active().then(|| (value(h) as u32, value(m) as u32))
             };
-            if start_on.is_active() {
-                plan.start_at = clock(&start_h, &start_m, now);
-                if plan.start_at.is_none() {
-                    this.toast(t("timer.no_such_time"));
-                    return;
-                }
-            }
-            if stop_on.is_active() {
-                // After the start when there is one, so a stop before the
-                // start means the day after it, DST changes included.
-                plan.stop_at = clock(&stop_h, &stop_m, plan.start_at.unwrap_or(now));
-                if plan.stop_at.is_none() {
-                    this.toast(t("timer.no_such_time"));
-                    return;
-                }
+            let length = length_on
+                .is_active()
+                .then(|| value(&length_h) * 3600 + value(&length_m) * 60);
+            let plan = match Plan::from_choices(
+                length,
+                time(&start_on, &start_h, &start_m),
+                time(&stop_on, &stop_h, &stop_m),
+                momr_core::ipc::now(),
+            ) {
+                Ok(plan) => plan,
+                Err(Refused::NoLength) => return this.toast(t("timer.needs_length")),
+                Err(Refused::NoSuchTime) => return this.toast(t("timer.no_such_time")),
+            };
+            if let Some(secs) = plan.max_secs {
+                let _ = settings::save_timer_minutes((secs / 60) as u32);
             }
             this.set_timer(plan);
             close.close();
@@ -2612,10 +2602,7 @@ impl Recorder {
             },
             State::Recording if self.paused.get() => t("ready.status_paused").to_owned(),
             State::Recording => match plan.remaining(momr_core::ipc::now(), self.elapsed()) {
-                Some(left) => tf(
-                    "timer.status_countdown",
-                    &[&momr_core::timer::countdown(left)],
-                ),
+                Some(left) => tf("timer.status_countdown", &[&momr_core::timer::clock(left)]),
                 None => t("ready.status_recording").to_owned(),
             },
             State::Stopping => t("ready.status_stopping").to_owned(),
@@ -2634,7 +2621,7 @@ impl Recorder {
         let now = momr_core::ipc::now();
         if self.state.get() == State::Recording {
             let elapsed = self.elapsed();
-            let clock = format_elapsed(elapsed);
+            let clock = momr_core::timer::clock(elapsed);
             let opacity = if self.paused.get() {
                 0.35
             } else if elapsed % 2 == 0 {
@@ -2900,7 +2887,7 @@ impl Recorder {
             .and_then(|t| t.format("%A %H:%M"))
             .map(|s| s.to_string())
             .unwrap_or_default();
-        let length = format_elapsed(raw_duration(&staging));
+        let length = momr_core::timer::clock(raw_duration(&staging));
         let dialog = adw::AlertDialog::new(
             Some(t("done.recovery_title")),
             Some(
@@ -4443,15 +4430,6 @@ fn clock_to_ms(clock: &str) -> i64 {
         .filter_map(|part| part.parse::<i64>().ok())
         .fold(0, |total, part| total * 60 + part)
         * 1000
-}
-
-fn format_elapsed(secs: i64) -> String {
-    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
-    }
 }
 
 /// What a meter shows while the recording is paused: the levels at the

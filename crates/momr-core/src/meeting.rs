@@ -263,9 +263,10 @@ pub fn date_line(started_at: i64) -> String {
 /// timestamp is out of range.
 fn local_time(started_at: i64, format: &str) -> String {
     use chrono::TimeZone;
+    // A Unix time names one instant, so this is never ambiguous.
     chrono::Local
         .timestamp_opt(started_at, 0)
-        .earliest()
+        .single()
         .map(|t| t.format(format).to_string())
         .unwrap_or_default()
 }
@@ -377,10 +378,8 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
     let date = chrono::NaiveDate::from_ymd_opt(num(0..4)?, num(4..6)? as u32, num(6..8)? as u32)?;
     let time = chrono::NaiveTime::from_hms_opt(num(8..10)? as u32, num(10..12)? as u32, 0)?;
     // The hour DST repeats reads as its first pass, as glib read it.
-    let started = date
-        .and_time(time)
-        .and_local_timezone(chrono::Local)
-        .earliest()?;
+    let started =
+        crate::timer::first_reading(date.and_time(time).and_local_timezone(chrono::Local))?;
     let format = if dir.join("mic.ogg").exists() {
         Format::Separate
     } else {

@@ -4,9 +4,9 @@
 //! bar item or any other client.
 //!
 //! The socket commands (`start`, `stop`, `pause`, `compact`, `watch`) only
-//! talk to a running app, so they skip the environment set-up: SwiftBar and
-//! keybindings run them without `TERM`, where the login-shell probe would
-//! cost every click up to three seconds.
+//! talk to a running app, so they skip the environment set-up and the
+//! language lookup: SwiftBar and keybindings run them without `TERM`, where
+//! the login-shell probe would cost every click up to three seconds.
 
 mod animation;
 mod player;
@@ -18,13 +18,15 @@ use gtk::glib;
 pub const APP_ID: &str = "io.github.riobahtiar.MOMRecorder";
 pub use momr_platform::APP_NAME;
 fn main() -> glib::ExitCode {
-    momr_core::locales::init_lang(momr_core::settings::current_locale());
-
     let command = std::env::args().nth(1);
-    if !matches!(
+    let socket_command = matches!(
         command.as_deref(),
         Some("start" | "stop" | "compact" | "pause" | "watch")
-    ) {
+    );
+    if !socket_command {
+        // The launch language asks `defaults`, a process per run; the
+        // socket commands print only on failure, so they ask then.
+        momr_core::locales::init_lang(momr_core::settings::current_locale());
         extend_path(login_shell_path);
         bundle_environment();
     }
@@ -38,6 +40,7 @@ fn main() -> glib::ExitCode {
             if momr_core::ipc::send(command) {
                 glib::ExitCode::SUCCESS
             } else {
+                momr_core::locales::init_lang(momr_core::settings::current_locale());
                 eprintln!("{APP_NAME}: {}", momr_core::locales::t("cli.not_running"));
                 glib::ExitCode::FAILURE
             }
@@ -93,10 +96,10 @@ fn main() -> glib::ExitCode {
     }
 }
 
-/// The core reports command-line exits as plain integers; GTK wants its own
-/// code type. Only 0, 1 and 2 ever cross here.
-fn exit_code(code: i32) -> glib::ExitCode {
-    glib::ExitCode::from(code as u8)
+/// The core reports command-line exits as a plain byte, the range a process
+/// exit has; GTK wants its own code type.
+fn exit_code(code: u8) -> glib::ExitCode {
+    glib::ExitCode::from(code)
 }
 
 /// Inside `MOM Recorder.app`, point GTK at the bundled resources instead of

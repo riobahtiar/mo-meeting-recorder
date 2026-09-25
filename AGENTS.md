@@ -29,7 +29,7 @@ brew install gtk4 libadwaita adwaita-icon-theme cmake pkgconf ffmpeg
 cargo build --release
 cargo test                                             # every crate: the workspace sets default-members
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
-swift build --package-path apps/momr-appkit            # the AppKit shell
+swift test --package-path apps/momr-appkit             # the AppKit shell, built and tested
 cargo run --release --example transcribe_animation     # the animation alone, no audio needed
 ```
 

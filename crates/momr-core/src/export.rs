@@ -279,6 +279,23 @@ pub fn safe_name(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Meeting folders, manifests and staging all go through this, on three
+    /// file systems; every character one of them refuses is replaced.
+    #[test]
+    fn safe_name_makes_names_every_os_accepts() {
+        for (title, safe) in [
+            ("Weekly sync", "Weekly sync"),
+            ("a/b:c", "a-b-c"),
+            ("q?*\"<>|\\", "q-------"),
+            (" .Plan. ", "Plan"),
+            ("", "Meeting"),
+            ("...", "Meeting"),
+            ("Überblick 2026", "Überblick 2026"),
+        ] {
+            assert_eq!(safe_name(title), safe, "{title:?}");
+        }
+    }
+
     /// A raw track (s16le, RATE, CHANNELS) of a 440 Hz tone at `amplitude`.
     fn tone(path: &Path, amplitude: f64, secs: u32) {
         let mut bytes = Vec::new();

@@ -17,13 +17,27 @@ import Foundation
 /// on one serial queue (`queue`) and are only touched there. A failed write
 /// (a full disk) stops that track's recording and is reported once, since
 /// the meeting is saved from what reached the disk.
+/// Which side a capture records: the `momr-audio` subcommand, and what the
+/// status line calls it.
+enum Source: String {
+    case mic
+    case system
+
+    var label: String {
+        switch self {
+        case .mic: "Microphone"
+        case .system: "Computer audio"
+        }
+    }
+}
+
 final class SourceCapture {
     typealias LevelHandler = (Float) -> Void
     typealias NoteHandler = (String?) -> Void
     typealias WriteErrorHandler = (String) -> Void
 
-    private let subcommand: String
-    private let label: String
+    private let source: Source
+    private var label: String { source.label }
     private var process: Process?
     /// Whether the app wants this source running: set by `start`, cleared by
     /// `stop`, so an exit after `stop` is not restarted or reported.
@@ -47,10 +61,9 @@ final class SourceCapture {
     /// Set while recording (and not paused): every byte lands here too.
     /// Only touched on `queue`.
     private var recordFile: FileHandle?
-    init(_ subcommand: String, label: String) {
-        self.subcommand = subcommand
-        self.label = label
-        queue = DispatchQueue(label: "momr.capture.\(subcommand)")
+    init(_ source: Source) {
+        self.source = source
+        queue = DispatchQueue(label: "momr.capture.\(source.rawValue)")
     }
 
     /// Starts or ends teeing into `file`. Returns once no more bytes go to
@@ -95,7 +108,7 @@ final class SourceCapture {
         }
         let process = Process()
         process.executableURL = helper
-        process.arguments = [subcommand]
+        process.arguments = [source.rawValue]
         let out = Pipe()
         let err = Pipe()
         process.standardOutput = out

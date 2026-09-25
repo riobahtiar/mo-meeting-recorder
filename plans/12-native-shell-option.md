@@ -157,3 +157,11 @@ found at Start through the login shell's PATH, and quitting mid-recording
 asks. `momr finish` was run end to end on an invented meeting (folder,
 mono tracks, manifest, transcript, a same-minute `… 2`, empty staging
 refused).
+
+Review suggestions 2026-09-26 (PR 3): the Timer dialog's rules are core
+`Plan::from_choices` (with a DST test pinned to New York, which caught
+chrono listing the later instant of a repeated hour first), process
+groups are a `Group` type, the playback output is `momr-platform`'s, one
+`timer::clock` format, and the socket commands skip the `defaults` lookup.
+Tests added for process groups, fs, the socket takeover, `safe_name`,
+playback arguments, and an AppKit test target (resume appends, meter math).

@@ -475,7 +475,7 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
 /// <program> <args…>`, with `gtimeout -k 5 <timeout>` inside when it is on
 /// `PATH`. Takes the flag as a parameter so tests can cover both shapes.
 /// `run_built` spawns it through `process::spawn_detached`, which puts it in
-/// its own session (so `kill_group` reaches the whole tree) on Unix.
+/// its own session (so its `Group` reaches the whole tree) on Unix.
 fn sh_command(built: &Built, timeout: Duration, gtimeout: bool) -> Command {
     let script = if gtimeout {
         format!(
@@ -524,7 +524,7 @@ fn run_built(
         })
         .stdout(stdout)
         .stderr(stderr);
-    let mut child = momr_platform::process::spawn_detached(&mut command)
+    let (mut child, group) = momr_platform::process::spawn_detached(&mut command)
         .map_err(|e| crate::locales::tf("agent.no_start", &[agent.name, &e.to_string()]))?;
 
     // The prompt goes in from a thread: a long transcript is more than a pipe
@@ -546,9 +546,9 @@ fn run_built(
         }
     };
     let Some(status) = status else {
-        use momr_platform::process::{Signal, already_gone, kill_group};
+        use momr_platform::process::{Signal, already_gone};
         for (signal, wait) in [(Signal::Term, KILL_GRACE), (Signal::Kill, Duration::ZERO)] {
-            if let Err(e) = kill_group(child.id(), signal)
+            if let Err(e) = group.kill(signal)
                 && !already_gone(&e)
             {
                 eprintln!("{}: stop {}: {e}", momr_platform::APP_NAME, agent.name);
@@ -739,7 +739,7 @@ fn workdir() -> std::io::Result<PathBuf> {
 
 /// `momr ask "<prompt>"` with the text on stdin, or
 /// `ask --agent` to show which agent would be used.
-pub fn cli(args: &[String]) -> i32 {
+pub fn cli(args: &[String]) -> u8 {
     let agent = match status() {
         Ok(agent) => agent,
         Err(why) => {

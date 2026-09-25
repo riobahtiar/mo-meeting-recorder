@@ -3,9 +3,9 @@
 //!
 //! Playback is one ffmpeg decoding to the default output, because the app
 //! already depends on ffmpeg for recording and converting. The mechanics
-//! live in core `playback` (this shell passes the macOS `audiotoolbox`
-//! sink); pausing stops the process and playing starts it again at the
-//! position; a meeting saved as separate files is mixed on the fly.
+//! live in core `playback`, the output in `momr-platform`; pausing stops the
+//! process and playing starts it again at the position; a meeting saved as
+//! separate files is mixed on the fly.
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -15,7 +15,8 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use momr_core::export;
-use momr_core::playback::{self, BINS, Playback, clock, peaks, probe_duration_us};
+use momr_core::playback::{self, BINS, Playback, peaks, probe_duration_us};
+use momr_core::timer::clock;
 
 const MIC_COLOR: (f64, f64, f64) = (0.0, 0.478, 1.0);
 const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
@@ -162,7 +163,7 @@ impl Player {
             let mut state = self.state.borrow_mut();
             state.duration_us = playable
                 .iter()
-                .map(|p| probe_duration_us(p))
+                .filter_map(|p| probe_duration_us(p))
                 .max()
                 .unwrap_or(0);
             state.files = playable.clone();
@@ -271,11 +272,9 @@ impl Player {
                 state.paused_at_us = 0;
             }
             state.playback = None;
-            playback::Playback::start(&state.files, state.paused_at_us, "audiotoolbox").map(
-                |playback| {
-                    state.playback = Some(playback);
-                },
-            )
+            playback::Playback::start(&state.files, state.paused_at_us).map(|playback| {
+                state.playback = Some(playback);
+            })
         };
         if let Err(reason) = &started {
             self.report(reason);

@@ -1541,7 +1541,7 @@ fn cli_provider(parsed: &FileArgs) -> Result<Provider, String> {
 }
 
 /// `momr transcribe <mic> <computer> [--language xx] [--model name] [--provider id]`
-pub fn cli(args: &[String]) -> i32 {
+pub fn cli(args: &[String]) -> u8 {
     let Ok(parsed) = parse_file_args(args, false) else {
         return usage();
     };
@@ -1560,7 +1560,7 @@ pub fn cli(args: &[String]) -> i32 {
 }
 
 /// `momr transcribe-file <audio> [--speakers N] [--language xx] [--model name] [--provider id]`
-pub fn cli_file(args: &[String]) -> i32 {
+pub fn cli_file(args: &[String]) -> u8 {
     let Ok(parsed) = parse_file_args(args, true) else {
         return usage();
     };
@@ -1586,7 +1586,7 @@ pub fn cli_file(args: &[String]) -> i32 {
 
 /// Runs a transcription for the command line: progress and live lines on
 /// stderr, the Markdown on stdout.
-fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> i32 {
+fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> u8 {
     let started = Instant::now();
     match run_reporting(work) {
         Ok(transcript) => {
@@ -1640,7 +1640,7 @@ pub fn run_reporting(
     result
 }
 
-fn usage() -> i32 {
+fn usage() -> u8 {
     eprintln!(
         "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name] [--provider local|elevenlabs|google|openrouter]"
     );

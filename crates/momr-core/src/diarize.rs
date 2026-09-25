@@ -200,7 +200,7 @@ pub fn turn_start_near(turns: &[Turn], speaker: usize, around_ms: i64) -> Option
 
 /// `diarize <audio> [--speakers N]`: prints the speaker turns as JSON, for
 /// comparing diarization engines on the same file.
-pub fn cli(args: &[String]) -> i32 {
+pub fn cli(args: &[String]) -> u8 {
     let mut path = None;
     let mut speakers = None;
     let mut iter = args.iter();

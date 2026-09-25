@@ -1,8 +1,8 @@
-//! Playing a meeting: one ffmpeg decoding to an output sink, stopped when
-//! dropped. The sink is a parameter (`audiotoolbox` on macOS; the Windows
-//! shell passes its own when it lands), because the ffmpeg argument shape is
-//! shared and only the last `-f` differs. Position is the start offset plus
-//! the wall clock; seeking restarts the process at the new offset.
+//! Playing a meeting: one ffmpeg decoding to the speakers, stopped when
+//! dropped. The input side (seek, mix) is built here; the output comes from
+//! `momr_platform::playback::OUTPUT`, the one part that differs per OS, so no
+//! shell names a sink. Position is the start offset plus the wall clock;
+//! seeking restarts the process at the new offset.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -22,32 +22,45 @@ pub struct Playback {
     /// The last line ffmpeg wrote to stderr, read on its own thread so a
     /// chatty ffmpeg never fills the pipe.
     last_error: std::sync::Arc<std::sync::Mutex<String>>,
+    /// That thread, so `ended` can wait for the last line instead of guessing.
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// ffmpeg's arguments for `files` mixed from `from_us` into `output`: a
+/// `-ss` before each `-i` (so every input seeks, not the mix), `amix` only
+/// when there is more than one. Pure, so the shape is tested.
+fn args(files: &[PathBuf], from_us: i64, output: &[&str]) -> Vec<std::ffi::OsString> {
+    let at = format!("{:.3}", from_us.max(0) as f64 / 1_000_000.0);
+    let mut args: Vec<std::ffi::OsString> = ["-v", "error", "-nostdin"].map(Into::into).into();
+    for file in files {
+        args.extend(["-ss".into(), at.clone().into(), "-i".into(), file.into()]);
+    }
+    if files.len() > 1 {
+        args.push("-filter_complex".into());
+        args.push(format!("amix=inputs={}:normalize=0", files.len()).into());
+    }
+    args.extend(output.iter().map(Into::into));
+    args
 }
 
 impl Playback {
-    /// Starts `files` mixed together at `from_us`, through `sink`.
-    pub fn start(files: &[PathBuf], from_us: i64, sink: &str) -> Result<Playback, String> {
-        let at = format!("{:.3}", from_us as f64 / 1_000_000.0);
-        let mut command = guarded("ffmpeg", crate::helper::path().as_deref());
-        command.args(["-v", "error", "-nostdin"]);
-        for file in files {
-            command.args(["-ss", &at, "-i"]).arg(file);
+    /// Starts `files` mixed together at `from_us` (clamped to the start).
+    pub fn start(files: &[PathBuf], from_us: i64) -> Result<Playback, String> {
+        if files.is_empty() {
+            return Err("no audio to play".into());
         }
-        if files.len() > 1 {
-            command.args([
-                "-filter_complex",
-                &format!("amix=inputs={}:normalize=0", files.len()),
-            ]);
-        }
-        let mut ffmpeg = command
-            .args(["-f", sink, "-"])
+        let output = momr_platform::playback::OUTPUT
+            .ok_or("playback is not available on this platform yet (plan 16)")?;
+        let from_us = from_us.max(0);
+        let mut ffmpeg = guarded("ffmpeg", crate::helper::path().as_deref())
+            .args(args(files, from_us, output))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| e.to_string())?;
         let last_error = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        if let Some(pipe) = ffmpeg.stderr.take() {
+        let reader = ffmpeg.stderr.take().map(|pipe| {
             let last_error = last_error.clone();
             std::thread::spawn(move || {
                 use std::io::BufRead;
@@ -56,13 +69,14 @@ impl Playback {
                         *last_error.lock().unwrap() = line.trim().to_owned();
                     }
                 }
-            });
-        }
+            })
+        });
         Ok(Playback {
             ffmpeg,
             started: Instant::now(),
             from_us,
             last_error,
+            reader,
         })
     }
 
@@ -78,8 +92,12 @@ impl Playback {
         if status.success() {
             return Some(Ok(()));
         }
-        // Give the reader thread a moment to take the last line.
-        std::thread::sleep(Duration::from_millis(50));
+        // The reader ends at EOF, which follows the exit; wait for it, but
+        // never long: a grandchild holding the pipe must not stall the UI.
+        let deadline = Instant::now() + Duration::from_millis(50);
+        while self.reader.as_ref().is_some_and(|r| !r.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let reason = self.last_error.lock().unwrap().clone();
         Some(Err(if reason.is_empty() {
             format!("ffmpeg exit {}", status.code().unwrap_or(-1))
@@ -136,8 +154,9 @@ fn guarded(program: &str, helper: Option<&Path>) -> Command {
     }
 }
 
-/// Length of an audio file in microseconds, from ffprobe.
-pub fn probe_duration_us(path: &Path) -> i64 {
+/// Length of an audio file in microseconds, from ffprobe; None when ffprobe
+/// cannot read it, which is not the same as an empty file.
+pub fn probe_duration_us(path: &Path) -> Option<i64> {
     Command::new("ffprobe")
         .args([
             "-v",
@@ -153,7 +172,6 @@ pub fn probe_duration_us(path: &Path) -> i64 {
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .and_then(|text| text.trim().parse::<f64>().ok())
         .map(|secs| (secs * 1_000_000.0) as i64)
-        .unwrap_or(0)
 }
 
 /// Decodes `path` at a low rate and keeps the loudest sample per bin, scaled
@@ -188,19 +206,51 @@ pub fn peaks(path: &Path) -> Option<Vec<f32>> {
     Some(bins.into_iter().map(|v| (v / loudest).sqrt()).collect())
 }
 
-/// The "mm:ss" or "h:mm:ss" clock under the waveform.
-pub fn clock(secs: i64) -> String {
-    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_input_seeks_and_only_several_are_mixed() {
+        let files = [PathBuf::from("a.ogg"), PathBuf::from("b.ogg")];
+        let out = ["-f", "audiotoolbox", "-"];
+        let two: Vec<String> = args(&files, 1_500_000, &out)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            two,
+            [
+                "-v",
+                "error",
+                "-nostdin",
+                "-ss",
+                "1.500",
+                "-i",
+                "a.ogg",
+                "-ss",
+                "1.500",
+                "-i",
+                "b.ogg",
+                "-filter_complex",
+                "amix=inputs=2:normalize=0",
+                "-f",
+                "audiotoolbox",
+                "-"
+            ]
+        );
+        let one: Vec<String> = args(&files[..1], -5, &out)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!one.iter().any(|a| a == "-filter_complex"));
+        assert_eq!(one[3..5], ["-ss", "0.000"], "a negative start plays from 0");
+    }
+
+    #[test]
+    fn nothing_to_play_is_an_error() {
+        assert!(Playback::start(&[], 0).is_err());
+    }
 
     #[test]
     fn guarded_wraps_in_the_helper() {

@@ -14,5 +14,10 @@ let package = Package(
             name: "MomrApp",
             path: "Sources/MomrApp"
         ),
+        .testTarget(
+            name: "MomrAppTests",
+            dependencies: ["MomrApp"],
+            path: "Tests/MomrAppTests"
+        ),
     ]
 )

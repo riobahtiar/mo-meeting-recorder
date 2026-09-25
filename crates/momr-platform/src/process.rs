@@ -18,16 +18,39 @@ pub enum Signal {
     Kill,
 }
 
+/// A process group this app started: only `spawn_detached` makes one, so a
+/// group kill can never be aimed at a pid that shares our own group (a
+/// capture child), which would signal the app itself. The mix-up happened
+/// once (plan 12 slice 5); the type keeps it from happening again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Group(u32);
+
+impl Group {
+    /// Stops the whole tree: the group on Unix (pid == pgid after
+    /// `setsid`), the one process on Windows until Job Objects land with
+    /// the Windows shell.
+    pub fn kill(self, signal: Signal) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            send(-i64::from(self.0), signal)
+        }
+        #[cfg(not(unix))]
+        {
+            taskkill(self.0, signal)
+        }
+    }
+}
+
 /// Spawns `command` detached from this process's terminal and group: its own
-/// session on Unix (so `kill_group` reaches the whole tree and no terminal
+/// session on Unix (so `Group::kill` reaches the whole tree and no terminal
 /// stops it), a plain spawn where the OS has no sessions.
-pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
+pub fn spawn_detached(command: &mut Command) -> io::Result<(Child, Group)> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: setsid is async-signal-safe and touches only the child's
         // own state: a new session, so its own process group (pid == pgid,
-        // which `kill_group` relies on) and no controlling terminal.
+        // which `Group` relies on) and no controlling terminal.
         unsafe {
             command.pre_exec(|| {
                 libc_sets_id();
@@ -35,7 +58,9 @@ pub fn spawn_detached(command: &mut Command) -> io::Result<Child> {
             });
         }
     }
-    command.spawn()
+    let child = command.spawn()?;
+    let group = Group(child.id());
+    Ok((child, group))
 }
 
 #[cfg(unix)]
@@ -85,9 +110,8 @@ pub fn already_gone(error: &io::Error) -> bool {
 }
 
 /// Stops one process by pid, gracefully: SIGTERM on Unix. Unlike
-/// `kill_group` this addresses the single pid, for children that share our
-/// own process group (capture restarts); group-killing those would signal
-/// the whole group, us included.
+/// `Group::kill` this addresses the single pid, for children that share our
+/// own process group (capture restarts, playback).
 pub fn terminate(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -95,29 +119,86 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        kill_group(pid, Signal::Term)
+        taskkill(pid, Signal::Term)
     }
 }
 
-/// Stops a process tree by pid: the whole group on Unix (the pid is a pgid
-/// through `spawn_detached`), the one process on Windows until Job Objects
-/// land with the Windows shell.
-pub fn kill_group(pid: u32, signal: Signal) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        send(-i64::from(pid), signal)
+#[cfg(not(unix))]
+fn taskkill(pid: u32, signal: Signal) -> io::Result<()> {
+    let mut args = vec!["/PID".to_owned(), pid.to_string()];
+    if signal == Signal::Kill {
+        args.push("/F".to_owned());
     }
-    #[cfg(not(unix))]
-    {
-        let mut args = vec!["/PID".to_owned(), pid.to_string()];
-        if signal == Signal::Kill {
-            args.push("/F".to_owned());
+    let status = Command::new("taskkill").args(&args).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("taskkill exited with {status}")))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn gone_within(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let status = Command::new("taskkill").args(&args).status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("taskkill exited with {status}")))
-        }
+        None
+    }
+
+    fn pgid(pid: u32) -> Option<u32> {
+        let out = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+
+    #[test]
+    fn a_detached_child_leads_its_own_group() {
+        let (mut child, group) = spawn_detached(Command::new("sleep").arg("30")).unwrap();
+        assert_eq!(pgid(child.id()), Some(child.id()));
+        assert_eq!(group, Group(child.id()));
+        group.kill(Signal::Kill).unwrap();
+        assert!(gone_within(&mut child, Duration::from_secs(2)).is_some());
+    }
+
+    /// The point of a group: the grandchild an agent's shell started dies
+    /// with it, instead of outliving the app.
+    #[test]
+    fn a_group_kill_reaches_the_grandchild() {
+        let marker = format!("{}", 900_000 + std::process::id() % 1000);
+        let script = format!("sleep {marker} & wait");
+        let (mut child, group) = spawn_detached(Command::new("sh").args(["-c", &script])).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        group.kill(Signal::Term).unwrap();
+        assert!(gone_within(&mut child, Duration::from_secs(2)).is_some());
+        std::thread::sleep(Duration::from_millis(200));
+        let survivors = Command::new("pgrep")
+            .args(["-f", &format!("^sleep {marker}$")])
+            .output()
+            .unwrap();
+        assert!(
+            survivors.stdout.is_empty(),
+            "the grandchild outlived its group"
+        );
+    }
+
+    #[test]
+    fn terminate_sends_sigterm_and_a_dead_pid_is_already_gone() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        terminate(child.id()).unwrap();
+        let status = gone_within(&mut child, Duration::from_secs(2)).unwrap();
+        assert_eq!(status.signal(), Some(sys::SIGTERM));
+        let error = terminate(child.id()).unwrap_err();
+        assert!(already_gone(&error), "{error}");
     }
 }

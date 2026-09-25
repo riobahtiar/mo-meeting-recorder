@@ -5,8 +5,8 @@ import AppKit
 /// The done page and Settings arrive in later slices.
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
-    private let mic = SourceCapture("mic", label: "Microphone")
-    private let computer = SourceCapture("system", label: "Computer audio")
+    private let mic = SourceCapture(.mic)
+    private let computer = SourceCapture(.system)
     private let micMeter = MeterView()
     private let computerMeter = MeterView()
     private let statusLabel = NSTextField(labelWithString: "")

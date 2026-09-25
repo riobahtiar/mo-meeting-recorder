@@ -13,5 +13,6 @@ pub const APP_NAME: &str = "momr";
 
 pub mod fs;
 pub mod paths;
+pub mod playback;
 pub mod process;
 pub mod sock;

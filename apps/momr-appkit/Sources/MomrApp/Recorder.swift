@@ -14,12 +14,22 @@ final class Recorder {
     private let startedAt: Int64
     private var micFile: FileHandle?
     private var systemFile: FileHandle?
-    private var pausedBegan: Date?
     private var pausedTotal: TimeInterval = 0
-    private(set) var paused = false
-    /// Set by `stop`: the staging folder is being finished, so pause and
-    /// resume must not reopen files in it.
-    private var stopped = false
+
+    /// Where the recording is. `stopped` is terminal: the staging folder is
+    /// being finished, so pause and resume must not reopen files in it.
+    private enum State {
+        case recording
+        case paused(since: Date)
+        case stopped
+    }
+
+    private var state = State.recording
+
+    var paused: Bool {
+        if case .paused = state { return true }
+        return false
+    }
 
     /// Seconds on the clock (pauses excluded).
     var elapsed: Int {
@@ -27,7 +37,8 @@ final class Recorder {
     }
 
     private var pausedSoFar: Int {
-        pausedBegan.map { Int(Date().timeIntervalSince($0)) } ?? 0
+        if case let .paused(since) = state { return Int(Date().timeIntervalSince(since)) }
+        return 0
     }
 
     /// Opens the staging folder and starts both tracks. Throws with the
@@ -66,7 +77,7 @@ final class Recorder {
     /// A handle that writes after what `url` already holds: the file is
     /// created only when missing, and resume reopens it at its end, so a
     /// pause never costs the audio recorded before it.
-    private static func appending(to url: URL) throws -> FileHandle {
+    static func appending(to url: URL) throws -> FileHandle {
         if !FileManager.default.fileExists(atPath: url.path),
            !FileManager.default.createFile(atPath: url.path, contents: nil) {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
@@ -77,21 +88,17 @@ final class Recorder {
     }
 
     func pause() {
-        guard !paused, !stopped else { return }
-        paused = true
-        pausedBegan = Date()
+        guard case .recording = state else { return }
+        state = .paused(since: Date())
         closeFiles()
     }
 
     /// Reopens both tracks. Returns why a track could not be reopened (that
     /// side records nothing from here on), or nil when both run again.
     func resume() -> String? {
-        guard paused, !stopped else { return nil }
-        paused = false
-        if let began = pausedBegan {
-            pausedTotal += Date().timeIntervalSince(began)
-        }
-        pausedBegan = nil
+        guard case let .paused(since) = state else { return nil }
+        state = .recording
+        pausedTotal += Date().timeIntervalSince(since)
         var problems: [String] = []
         do {
             micFile = try Self.appending(to: staging.appendingPathComponent("mic.raw"))
@@ -133,7 +140,7 @@ final class Recorder {
     /// Finishes through `momr finish` on a background queue and reports on
     /// the main queue.
     func stop(title: String, completion: @escaping (Outcome) -> Void) {
-        stopped = true
+        state = .stopped
         closeFiles()
         let staging = staging
         DispatchQueue.global(qos: .userInitiated).async {

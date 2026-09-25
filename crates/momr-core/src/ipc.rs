@@ -266,6 +266,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn idle() -> SharedStatus {
+        Arc::new(Mutex::new(Status {
+            state: "idle",
+            ..Default::default()
+        }))
+    }
+
+    /// A crash leaves the socket file behind with nobody listening; the next
+    /// launch must take it over, while a second instance must leave a live
+    /// one alone rather than unlink the first app's socket.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_socket_is_replaced_and_a_live_one_kept() {
+        let dir = std::env::temp_dir().join(format!("momr-ipc-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        drop(sock::bind(&path).unwrap());
+        assert!(path.exists(), "the crashed app's file stays");
+        let (tx, _rx) = async_channel::unbounded();
+        serve(&path, idle(), || (0.0, 0.0), tx.clone()).expect("takes over a stale socket");
+        assert!(serve(&path, idle(), || (0.0, 0.0), tx).is_err());
+        assert!(sock::connect(&path).is_ok(), "the first app still answers");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn long_base_falls_back_to_the_temp_dir() {
         let base = Path::new("/Users/").join("a".repeat(200));

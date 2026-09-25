@@ -5,7 +5,7 @@ One line per feature added or retired, newest first. Details live in the plan th
 ## Unreleased
 
 ### Added
-- Done page player: previous and next line, back and forward 15 s, speed 0.5–2× (pitch kept), volume 0–150 % with mute, hover time and seek, a gliding playhead and level animation, Space and ←/→ (plan 18).
+- Done page player: previous and next line, back and forward 15 s, speed 0.5–2× (pitch kept) and volume 0–150 % with mute, both live without a restart, hover time and seek, a gliding playhead, level bars and a halo on play, Space and ←/→ (plan 18).
 - Voice enhancement switch on the ready page: AUSoundIsolation (`momr-audio enhance`) plus an ffmpeg voice chain on the saved audio; `.tracks/` and the transcript stay original (plan 17, D26).
 - Manifest: optional `"enhanced"` field; absent reads as false (plan 17).
 - Ready page: Record the microphone and computer audio, the microphone only or the computer audio only; the side not kept is silence, so the folder shape is unchanged (plan 17).

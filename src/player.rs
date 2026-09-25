@@ -1,19 +1,20 @@
 //! The player on the done page (plan 18): a two-lane waveform of the meeting
 //! (you above the line, the other side below it) with a playhead, click or
-//! drag to seek, and under it the transport: previous and next transcript
-//! line, back and forward 15 s, play, speed, volume, and a level animation
-//! while it plays.
+//! drag to seek, and under it the transport, centred: previous and next
+//! transcript line, back and forward 15 s and play, with the speed and the
+//! level bars on the left and volume on the right.
 //!
 //! Playback is one ffmpeg decoding to the default output, because the app
 //! already depends on ffmpeg for recording and converting. The mechanics
 //! live in core `playback`, the output in `momr-platform`; pausing stops the
 //! process and playing starts it again at the position; a meeting saved as
-//! separate files is mixed on the fly. A new speed or volume restarts it at
-//! the position too, so the volume slider is applied once it rests rather
-//! than on every step of a drag.
+//! separate files is mixed on the fly. Speed and volume change live, as
+//! commands to the running ffmpeg (core `playback`), so the slider moves
+//! without a restart or a stutter.
 //!
-//! While playing, the waveform and the level bars redraw on the frame clock,
-//! so the playhead glides instead of stepping; paused, nothing ticks.
+//! While playing, the waveform, the level bars and the halo behind the play
+//! button redraw on the frame clock, so the playhead glides and the halo
+//! breathes with the voices; paused, nothing ticks.
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -34,8 +35,10 @@ const SYSTEM_COLOR: (f64, f64, f64) = (1.0, 0.584, 0.0);
 /// The skip buttons and the arrow keys.
 const SKIP_US: i64 = 15_000_000;
 const KEY_SKIP_US: i64 = 5_000_000;
-/// A slider that has rested this long is applied (one ffmpeg restart).
-const VOLUME_SETTLE: Duration = Duration::from_millis(180);
+/// A slider that has rested this long is saved to settings.
+const SAVE_SETTLE: Duration = Duration::from_millis(400);
+/// The play button's halo, in px: room for it to swell around the button.
+const HALO: i32 = 60;
 /// "Previous line" within this much of a line's start goes to the one
 /// before, as media players do with tracks.
 const RESTART_GRACE_MS: i64 = 2000;
@@ -72,19 +75,22 @@ pub struct Player {
     root: gtk::Box,
     button: gtk::Button,
     wave: gtk::DrawingArea,
+    /// The halo behind the play button, pulsing with the audio.
+    halo: gtk::DrawingArea,
     levels: gtk::DrawingArea,
     elapsed: gtk::Label,
     remaining: gtk::Label,
-    speed: gtk::DropDown,
+    speed: gtk::MenuButton,
     mute: gtk::Button,
     volume: gtk::Scale,
+    volume_label: gtk::Label,
     /// Everything but the play button, off while nothing is loaded.
     controls: Vec<gtk::Widget>,
     state: Rc<RefCell<State>>,
     sound: Rc<Cell<Sound>>,
     /// The volume before Mute, so Unmute gives it back.
     unmuted: Rc<Cell<f64>>,
-    /// Bumped per slider step; only the last one restarts playback.
+    /// Bumped per slider step; only the last one is saved to settings.
     volume_generation: Rc<Cell<u64>>,
     /// Called with the position in ms while playing, for the transcript highlight.
     on_position: PositionCallback,
@@ -110,6 +116,10 @@ fn speed_label(speed: f64) -> String {
     format!("{text}×")
 }
 
+fn percent(volume: f64) -> String {
+    format!("{}%", (volume * 100.0).round() as i64)
+}
+
 impl Player {
     pub fn new() -> Self {
         let wave = gtk::DrawingArea::builder()
@@ -117,8 +127,10 @@ impl Player {
             .hexpand(true)
             .build();
         wave.set_cursor_from_name(Some("pointer"));
-        // Which lane is which, as a legend between the two times: labels on
-        // the waveform itself would sit on the bars.
+
+        // Under the waveform: elapsed time, which lane is which, remaining
+        // time. The legend is here because labels on the waveform itself
+        // would sit on the bars.
         let lane = |text: &str, class: &str| {
             let dot = gtk::Label::builder()
                 .label("●")
@@ -133,96 +145,107 @@ impl Player {
             lane.append(&name);
             lane
         };
-        let legend = gtk::Box::builder()
-            .spacing(14)
-            .halign(gtk::Align::Center)
-            .build();
+        let legend = gtk::Box::builder().spacing(14).build();
         legend.append(&lane(t("player.lane_mic"), "speaker-0"));
         legend.append(&lane(t("player.lane_computer"), "speaker-1"));
-
         let elapsed = gtk::Label::builder()
             .label("00:00")
-            .xalign(0.0)
-            .hexpand(true)
             .css_classes(["numeric", "caption", "dim-label"])
             .build();
         let remaining = gtk::Label::builder()
             .label("-00:00")
-            .xalign(1.0)
             .css_classes(["numeric", "caption", "dim-label"])
             .build();
-        remaining.set_hexpand(true);
-        let times = gtk::Box::builder().build();
-        times.append(&elapsed);
-        times.append(&legend);
-        times.append(&remaining);
+        let times = gtk::CenterBox::builder()
+            .start_widget(&elapsed)
+            .center_widget(&legend)
+            .end_widget(&remaining)
+            .build();
 
+        // The transport, centred: line and skip buttons around play, which
+        // sits on a halo that pulses while it plays.
         let previous = icon_button("media-skip-backward-symbolic", t("player.previous_line"));
         let back = icon_button("media-seek-backward-symbolic", t("player.back"));
         let button = gtk::Button::builder()
             .icon_name("media-playback-start-symbolic")
             .tooltip_text(t("player.play"))
+            .halign(gtk::Align::Center)
             .valign(gtk::Align::Center)
             .css_classes(["circular", "suggested-action", "player-play"])
-            .width_request(40)
-            .height_request(40)
-            .halign(gtk::Align::Center)
             .build();
+        let halo = gtk::DrawingArea::builder()
+            .content_width(HALO)
+            .content_height(HALO)
+            .can_target(false)
+            .build();
+        let play = gtk::Overlay::builder().child(&halo).build();
+        play.add_overlay(&button);
         let forward = icon_button("media-seek-forward-symbolic", t("player.forward"));
         let next = icon_button("media-skip-forward-symbolic", t("player.next_line"));
+        let transport = gtk::Box::builder()
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .build();
+        transport.append(&previous);
+        transport.append(&back);
+        transport.append(&play);
+        transport.append(&forward);
+        transport.append(&next);
 
+        // Left: the level bars and the speed, a menu of the speeds.
         let sound = momr_core::settings::load_player_sound();
-        let speed_labels: Vec<String> = SPEEDS.iter().map(|s| speed_label(*s)).collect();
-        let speed_refs: Vec<&str> = speed_labels.iter().map(String::as_str).collect();
-        let speed = gtk::DropDown::from_strings(&speed_refs);
-        speed.set_tooltip_text(Some(t("player.speed")));
-        speed.set_valign(gtk::Align::Center);
-        speed.add_css_class("flat");
-        speed.set_selected(
-            SPEEDS
-                .iter()
-                .position(|s| (s - sound.speed).abs() < 1e-3)
-                .unwrap_or(2) as u32,
-        );
+        let speed = gtk::MenuButton::builder()
+            .label(speed_label(sound.speed))
+            .tooltip_text(t("player.speed"))
+            .valign(gtk::Align::Center)
+            .css_classes(["flat", "player-speed"])
+            .always_show_arrow(false)
+            .build();
+        let levels = gtk::DrawingArea::builder()
+            .content_width(22)
+            .content_height(22)
+            .valign(gtk::Align::Center)
+            .build();
+        let left = gtk::Box::builder()
+            .spacing(10)
+            .valign(gtk::Align::Center)
+            .margin_end(16)
+            .build();
+        left.append(&levels);
+        left.append(&speed);
+
+        // Right: mute, the slider and its percentage.
         let mute = icon_button("audio-volume-high-symbolic", t("player.mute"));
         let volume =
             gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, MAX_VOLUME * 100.0, 1.0);
         volume.set_draw_value(false);
-        volume.set_width_request(96);
+        volume.set_width_request(92);
         volume.set_valign(gtk::Align::Center);
         volume.set_tooltip_text(Some(t("player.volume")));
-        // The notch marks 100 %: past it the meeting is louder than recorded.
-        volume.add_mark(100.0, gtk::PositionType::Bottom, None);
         volume.set_value(sound.volume * 100.0);
-        let levels = gtk::DrawingArea::builder()
-            .content_width(26)
-            .content_height(22)
+        volume.add_css_class("player-volume");
+        let volume_label = gtk::Label::builder()
+            .label(percent(sound.volume))
+            .width_chars(4)
+            .xalign(1.0)
             .valign(gtk::Align::Center)
+            .css_classes(["numeric", "caption", "dim-label"])
             .build();
-
-        let transport = gtk::Box::builder()
+        let right = gtk::Box::builder()
             .spacing(2)
-            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Center)
+            .margin_start(16)
             .build();
-        for widget in [&previous, &back] {
-            transport.append(widget);
-        }
-        transport.append(&button);
-        for widget in [&forward, &next] {
-            transport.append(widget);
-        }
-        let tools = gtk::Box::builder()
-            .spacing(4)
-            .hexpand(true)
-            .halign(gtk::Align::End)
+        right.append(&mute);
+        right.append(&volume);
+        right.append(&volume_label);
+
+        let bar = gtk::CenterBox::builder()
+            .start_widget(&left)
+            .center_widget(&transport)
+            .end_widget(&right)
+            .css_classes(["player-bar"])
             .build();
-        tools.append(&levels);
-        tools.append(&speed);
-        tools.append(&mute);
-        tools.append(&volume);
-        let bar = gtk::Box::builder().spacing(12).build();
-        bar.append(&transport);
-        bar.append(&tools);
 
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -238,12 +261,14 @@ impl Player {
             root,
             button,
             wave,
+            halo,
             levels,
             elapsed,
             remaining,
             speed,
             mute,
             volume,
+            volume_label,
             controls: vec![
                 previous.clone().upcast(),
                 back.clone().upcast(),
@@ -264,6 +289,7 @@ impl Player {
             shown_second: Rc::new(Cell::new(-1)),
         };
         player.set_volume_icon();
+        player.speed.set_popover(Some(&player.speed_menu()));
 
         let this = player.clone();
         player.wave.set_draw_func(move |_, cr, width, height| {
@@ -272,6 +298,10 @@ impl Player {
         let this = player.clone();
         player.levels.set_draw_func(move |_, cr, width, height| {
             this.draw_levels(cr, f64::from(width), f64::from(height));
+        });
+        let this = player.clone();
+        player.halo.set_draw_func(move |_, cr, width, height| {
+            this.draw_halo(cr, f64::from(width), f64::from(height));
         });
 
         let this = player.clone();
@@ -285,35 +315,17 @@ impl Player {
         let this = player.clone();
         next.connect_clicked(move |_| this.next_line());
         let this = player.clone();
-        player.speed.connect_selected_notify(move |dropdown| {
-            if let Some(speed) = SPEEDS.get(dropdown.selected() as usize) {
-                this.set_sound(Sound {
-                    speed: *speed,
-                    ..this.sound.get()
-                });
-                this.restart();
-            }
-        });
-        let this = player.clone();
         player.volume.connect_value_changed(move |scale| {
             let volume = scale.value() / 100.0;
             if volume > 0.0 {
                 this.unmuted.set(volume);
             }
-            this.set_sound(Sound {
+            this.apply_sound(Sound {
                 volume,
                 ..this.sound.get()
             });
+            this.volume_label.set_label(&percent(volume));
             this.set_volume_icon();
-            // Applied once the slider rests: each application restarts ffmpeg.
-            let generation = this.volume_generation.get() + 1;
-            this.volume_generation.set(generation);
-            let later = this.clone();
-            glib::timeout_add_local_once(VOLUME_SETTLE, move || {
-                if later.volume_generation.get() == generation {
-                    later.restart();
-                }
-            });
         });
         let this = player.clone();
         player.mute.connect_clicked(move |_| {
@@ -373,6 +385,43 @@ impl Player {
 
         player.set_loaded(false);
         player
+    }
+
+    /// The speed menu: one row per speed, the current one checked.
+    fn speed_menu(&self) -> gtk::Popover {
+        let list = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .build();
+        let popover = gtk::Popover::builder()
+            .child(&list)
+            .css_classes(["menu"])
+            .build();
+        let mut first: Option<gtk::CheckButton> = None;
+        for speed in SPEEDS {
+            let check = gtk::CheckButton::builder()
+                .label(speed_label(speed))
+                .active((speed - self.sound.get().speed).abs() < 1e-3)
+                .build();
+            match &first {
+                Some(first) => check.set_group(Some(first)),
+                None => first = Some(check.clone()),
+            }
+            let this = self.clone();
+            let menu = popover.clone();
+            check.connect_toggled(move |check| {
+                if check.is_active() {
+                    this.speed.set_label(&speed_label(speed));
+                    this.apply_sound(Sound {
+                        speed,
+                        ..this.sound.get()
+                    });
+                    menu.popdown();
+                }
+            });
+            list.append(&check);
+        }
+        popover
     }
 
     pub fn widget(&self) -> &gtk::Box {
@@ -585,20 +634,42 @@ impl Player {
         self.refresh();
     }
 
-    /// A new speed or volume takes effect: playing, ffmpeg restarts at the
-    /// position; paused, it applies on the next play.
-    fn restart(&self) {
-        if self.is_playing() {
+    /// A new speed or volume takes effect at once: playing, it goes to
+    /// ffmpeg as a live command (a restart at the position only when ffmpeg
+    /// stopped listening); paused, it applies on the next play. The setting
+    /// is saved once the slider rests, not on every step of a drag.
+    fn apply_sound(&self, sound: Sound) {
+        let sound = sound.clamped();
+        let before = self.sound.replace(sound);
+        let live = {
+            let mut state = self.state.borrow_mut();
+            match state.playback.as_mut() {
+                Some(playback) => {
+                    let mut result = Ok(());
+                    if (sound.volume - before.volume).abs() > 1e-6 {
+                        result = playback.set_volume(sound.volume);
+                    }
+                    if result.is_ok() && (sound.speed - before.speed).abs() > 1e-6 {
+                        result = playback.set_speed(sound.speed);
+                    }
+                    Some(result)
+                }
+                None => None,
+            }
+        };
+        if let Some(Err(_)) = live {
             let position = self.position_us();
             self.state.borrow_mut().paused_at_us = position;
             self.play();
         }
-    }
-
-    fn set_sound(&self, sound: Sound) {
-        let sound = sound.clamped();
-        self.sound.set(sound);
-        let _ = momr_core::settings::save_player_sound(sound);
+        let generation = self.volume_generation.get() + 1;
+        self.volume_generation.set(generation);
+        let later = self.clone();
+        glib::timeout_add_local_once(SAVE_SETTLE, move || {
+            if later.volume_generation.get() == generation {
+                let _ = momr_core::settings::save_player_sound(later.sound.get());
+            }
+        });
     }
 
     fn set_volume_icon(&self) {
@@ -755,6 +826,7 @@ impl Player {
         }
         self.wave.queue_draw();
         self.levels.queue_draw();
+        self.halo.queue_draw();
         if let Some(callback) = self.on_position.borrow().as_ref() {
             callback(position / 1000);
         }
@@ -840,21 +912,50 @@ impl Player {
         }
     }
 
+    /// Five bars that grow from the middle both ways, so they sit on the
+    /// same centre line as the buttons beside them.
     fn draw_levels(&self, cr: &gtk::cairo::Context, width: f64, height: f64) {
         let state = self.state.borrow();
         let (ar, ag, ab) = accent();
         let gap = 2.0;
         let bar = (width - gap * (LEVEL_BARS as f64 - 1.0)) / LEVEL_BARS as f64;
+        let mid = height / 2.0;
         cr.set_line_cap(gtk::cairo::LineCap::Round);
         cr.set_line_width(bar);
         for (i, level) in state.levels.0.iter().enumerate() {
             let x = i as f64 * (bar + gap) + bar / 2.0;
             // A floor, so the bars read as a meter at rest too.
-            let h = (level.clamp(0.0, 1.0) * (height - bar)).max(1.0);
+            let half = (level.clamp(0.0, 1.0) * (mid - bar / 2.0)).max(0.5);
             cr.set_source_rgba(ar, ag, ab, if *level > 0.01 { 0.95 } else { 0.35 });
-            cr.move_to(x, height - bar / 2.0);
-            cr.line_to(x, height - bar / 2.0 - h);
+            cr.move_to(x, mid - half);
+            cr.line_to(x, mid + half);
             let _ = cr.stroke();
+        }
+    }
+
+    /// A soft ring behind the play button that swells and brightens with the
+    /// loudness at the playhead; nothing while paused.
+    fn draw_halo(&self, cr: &gtk::cairo::Context, width: f64, height: f64) {
+        let state = self.state.borrow();
+        let levels = &state.levels.0;
+        let level = levels.iter().sum::<f64>() / levels.len() as f64;
+        if level <= 0.01 {
+            return;
+        }
+        let (ar, ag, ab) = accent();
+        let (cx, cy) = (width / 2.0, height / 2.0);
+        let button = f64::from(self.button.width().max(40)) / 2.0;
+        let reach = (width / 2.0 - button).max(1.0);
+        for (ring, alpha) in [(1.0, 0.18), (0.55, 0.28)] {
+            cr.set_source_rgba(ar, ag, ab, alpha * level.min(1.0));
+            cr.arc(
+                cx,
+                cy,
+                button + reach * ring * level.min(1.0),
+                0.0,
+                std::f64::consts::TAU,
+            );
+            let _ = cr.fill();
         }
     }
 }

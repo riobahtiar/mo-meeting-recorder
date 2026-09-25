@@ -2,9 +2,14 @@
 //! dropped. The input side (seek, mix) is built here; the output comes from
 //! `momr_platform::playback::OUTPUT`, the one part that differs per OS, so no
 //! shell names a sink. Position is the start offset plus the wall clock
-//! times the speed; seeking, and a new speed or volume, restart the process
-//! at the position. Speed is ffmpeg's `atempo` (pitch kept, the range it
-//! takes, 0.5–2×), volume its `volume` filter, both after the mix.
+//! times the speed; seeking restarts the process at the new offset.
+//!
+//! Speed is ffmpeg's `atempo` (pitch kept, the range it takes, 0.5–2×) and
+//! volume its `volume` filter, both after the mix and always in the graph,
+//! so they can be changed while playing: ffmpeg reads commands on stdin
+//! (`c<target> -1 <command> <value>`), which is how a volume slider moves
+//! without restarting the process and without a stutter. Measured: a
+//! `volume 0.1` command took the level down 20 dB mid-stream, `ret:0`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -46,17 +51,23 @@ impl Sound {
         }
     }
 
-    /// The filters after the mix, None when there is nothing to change.
-    fn filters(self) -> Option<String> {
-        let mut filters = Vec::new();
-        if (self.speed - 1.0).abs() > 1e-3 {
-            filters.push(format!("atempo={:.3}", self.speed));
-        }
-        if (self.volume - 1.0).abs() > 1e-3 {
-            filters.push(format!("volume={:.3}", self.volume));
-        }
-        (!filters.is_empty()).then(|| filters.join(","))
+    /// The filters after the mix. Both are always there, at 1× and 100 %
+    /// too, because a live command needs a filter to reach.
+    fn filters(self) -> String {
+        format!("atempo={:.3},volume={:.3}", self.speed, self.volume)
     }
+}
+
+/// The stdin line that sets `command` on every filter that takes it:
+/// ffmpeg's interactive `c` command, target `-1` meaning now.
+fn command_line(filter: &str, command: &str, value: f64) -> String {
+    format!("c{filter} -1 {command} {value:.3}\n")
+}
+
+/// Whether a stderr line is ffmpeg answering a command rather than a
+/// reason to stop, so the last-line reason is never "Command reply".
+fn is_command_echo(line: &str) -> bool {
+    line.starts_with("Enter command") || line.starts_with("Command reply")
 }
 
 /// A running ffmpeg playback, stopped when dropped.
@@ -65,6 +76,8 @@ pub struct Playback {
     started: Instant,
     from_us: i64,
     speed: f64,
+    /// ffmpeg's stdin, for the live speed and volume commands.
+    commands: Option<std::process::ChildStdin>,
     /// The last line ffmpeg wrote to stderr, read on its own thread so a
     /// chatty ffmpeg never fills the pipe.
     last_error: std::sync::Arc<std::sync::Mutex<String>>,
@@ -78,7 +91,8 @@ pub struct Playback {
 /// shape is tested.
 fn args(files: &[PathBuf], from_us: i64, sound: Sound, output: &[&str]) -> Vec<std::ffi::OsString> {
     let at = format!("{:.3}", from_us.max(0) as f64 / 1_000_000.0);
-    let mut args: Vec<std::ffi::OsString> = ["-v", "error", "-nostdin"].map(Into::into).into();
+    // No `-nostdin`: stdin carries the live commands.
+    let mut args: Vec<std::ffi::OsString> = ["-v", "error"].map(Into::into).into();
     for file in files {
         args.extend(["-ss".into(), at.clone().into(), "-i".into(), file.into()]);
     }
@@ -86,14 +100,8 @@ fn args(files: &[PathBuf], from_us: i64, sound: Sound, output: &[&str]) -> Vec<s
     if files.len() > 1 {
         let mix = format!("amix=inputs={}:normalize=0", files.len());
         args.push("-filter_complex".into());
-        args.push(
-            match after {
-                Some(after) => format!("{mix},{after}"),
-                None => mix,
-            }
-            .into(),
-        );
-    } else if let Some(after) = after {
+        args.push(format!("{mix},{after}").into());
+    } else {
         args.push("-af".into());
         args.push(after.into());
     }
@@ -114,19 +122,21 @@ impl Playback {
         let sound = sound.clamped();
         let mut ffmpeg = guarded("ffmpeg", crate::helper::path().as_deref())
             .args(args(files, from_us, sound, output))
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| e.to_string())?;
+        let commands = ffmpeg.stdin.take();
         let last_error = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let reader = ffmpeg.stderr.take().map(|pipe| {
             let last_error = last_error.clone();
             std::thread::spawn(move || {
                 use std::io::BufRead;
                 for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        *last_error.lock().unwrap() = line.trim().to_owned();
+                    let line = line.trim();
+                    if !line.is_empty() && !is_command_echo(line) {
+                        *last_error.lock().unwrap() = line.to_owned();
                     }
                 }
             })
@@ -136,9 +146,37 @@ impl Playback {
             started: Instant::now(),
             from_us,
             speed: sound.speed,
+            commands,
             last_error,
             reader,
         })
+    }
+
+    /// Sets the volume while playing. Err when ffmpeg no longer listens,
+    /// and the caller restarts it instead.
+    pub fn set_volume(&mut self, volume: f64) -> Result<(), String> {
+        let volume = volume.clamp(0.0, MAX_VOLUME);
+        self.send(&command_line("volume", "volume", volume))
+    }
+
+    /// Sets the speed while playing. The clock is rebased first, so the
+    /// position stays right across the change.
+    pub fn set_speed(&mut self, speed: f64) -> Result<(), String> {
+        let speed = speed.clamp(SPEEDS[0], SPEEDS[SPEEDS.len() - 1]);
+        self.send(&command_line("atempo", "tempo", speed))?;
+        self.from_us = self.position_us();
+        self.started = Instant::now();
+        self.speed = speed;
+        Ok(())
+    }
+
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        use std::io::Write;
+        let stdin = self.commands.as_mut().ok_or("ffmpeg has no stdin")?;
+        stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+            .map_err(|e| e.to_string())
     }
 
     /// Where the playhead is, if the process is still the one started.
@@ -174,6 +212,8 @@ impl Drop for Playback {
     /// SIGKILL, so a bare kill would leave the meeting playing. SIGKILL only
     /// follows when the grace period runs out.
     fn drop(&mut self) {
+        // Stdin goes first; the signals below are what stop ffmpeg.
+        self.commands = None;
         stop(&mut self.ffmpeg, STOP_GRACE);
     }
 }
@@ -301,7 +341,6 @@ mod tests {
             [
                 "-v",
                 "error",
-                "-nostdin",
                 "-ss",
                 "1.500",
                 "-i",
@@ -311,7 +350,7 @@ mod tests {
                 "-i",
                 "b.ogg",
                 "-filter_complex",
-                "amix=inputs=2:normalize=0",
+                "amix=inputs=2:normalize=0,atempo=1.000,volume=1.000",
                 "-f",
                 "audiotoolbox",
                 "-"
@@ -321,28 +360,28 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(!one.iter().any(|a| a == "-filter_complex" || a == "-af"));
-        assert_eq!(one[3..5], ["-ss", "0.000"], "a negative start plays from 0");
+        assert!(!one.iter().any(|a| a == "-filter_complex"));
+        assert_eq!(one[2..4], ["-ss", "0.000"], "a negative start plays from 0");
+        assert!(
+            !one.iter().any(|a| a == "-nostdin"),
+            "stdin carries the live commands"
+        );
     }
 
     /// Speed and volume ride after the mix, pitch kept, clamped to the
-    /// range the shells offer; at 1× and 100 % nothing is added.
+    /// range the shells offer, and the live commands address those filters.
     #[test]
-    fn speed_and_volume_follow_the_mix() {
-        let files = [PathBuf::from("a.ogg"), PathBuf::from("b.ogg")];
+    fn speed_and_volume_follow_the_mix_and_change_live() {
+        let files = [PathBuf::from("a.ogg")];
         let out = ["-f", "audiotoolbox", "-"];
-        let text = |args: Vec<std::ffi::OsString>| {
-            args.iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        };
-        let fast = Sound {
+        let sound = Sound {
             speed: 1.5,
             volume: 0.5,
         };
-        let two = text(args(&files, 0, fast, &out));
-        assert!(two.contains(&"amix=inputs=2:normalize=0,atempo=1.500,volume=0.500".into()));
-        let one = text(args(&files[..1], 0, fast, &out));
+        let one: Vec<String> = args(&files, 0, sound, &out)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         let at = one.iter().position(|a| a == "-af").unwrap();
         assert_eq!(one[at + 1], "atempo=1.500,volume=0.500");
         let wild = Sound {
@@ -356,6 +395,16 @@ mod tests {
                 volume: MAX_VOLUME
             }
         );
+        assert_eq!(
+            command_line("volume", "volume", 0.25),
+            "cvolume -1 volume 0.250\n"
+        );
+        assert_eq!(
+            command_line("atempo", "tempo", 1.5),
+            "catempo -1 tempo 1.500\n"
+        );
+        assert!(is_command_echo("Command reply for stream -1: ret:0 res:"));
+        assert!(!is_command_echo("audiotoolbox: no output device"));
     }
 
     #[test]

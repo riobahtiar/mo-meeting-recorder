@@ -14,7 +14,7 @@ The done page's player grows from a play button beside a thin waveform into a pr
 
 ## Background
 
-- Playback is one ffmpeg into audiotoolbox (`crates/momr-core/src/playback.rs`); pausing stops it and playing starts it at the position. Speed and volume are ffmpeg filters after the mix (`atempo`, which keeps pitch and takes 0.5–2×, and `volume`), so changing either restarts the process at the position, and the volume slider is applied once it rests (180 ms) rather than on every step of a drag. The position is the start plus the wall clock times the speed.
+- Playback is one ffmpeg into audiotoolbox (`crates/momr-core/src/playback.rs`); pausing stops it and playing starts it at the position. Speed and volume are ffmpeg filters after the mix (`atempo`, which keeps pitch and takes 0.5–2×, and `volume`), always in the graph so they can change live: ffmpeg reads `c<filter> -1 <command> <value>` lines on stdin, which `momr-audio run` passes through. A first version restarted ffmpeg on every change and the slider stuttered ("volume control are bad", 2026-09-26); measured since, a live `volume 0.1` takes the level down 20 dB mid-stream with no restart, also through the wrapper. The position is the start plus the wall clock times the speed, rebased on a speed change. A restart at the position is the fallback when ffmpeg no longer listens.
 - The screenshot's 00:00 / 00:00 was not the player: the bundle's `ffprobe` is signed with the hardened runtime and, ad hoc, has no Team ID, so library validation refused the bundled ffmpeg dylibs and it died at launch. `ffmpeg` has the entitlement that turns validation off; `ffprobe` did not. It now gets `packaging/macos/entitlements-tools.plist` (library validation off, no microphone), and the player falls back to the length `peaks` decodes when ffprobe gives none.
 - A terminal-run dev build has no `XDG_DATA_DIRS`, so GTK finds only its built-in icons, which lack the seek and skip icons; the bundle points GTK at its own copy of every Adwaita symbolic icon. Run a dev build with `XDG_DATA_DIRS=$(brew --prefix)/share` to see them.
 
@@ -26,7 +26,7 @@ The done page's player grows from a play button beside a thin waveform into a pr
 
 ### 2. GTK player
 
-`src/player.rs`: the card (waveform, time and legend row, transport and tools row), `set_lines` from the transcript for previous and next line (media-player rule: within 2 s of a line's start, previous goes to the line before), `handle_key` for the done page's capture-phase key controller in `ui.rs`, a frame-clock tick while playing for the playhead and the eased level bars. `macos.css` sizes the round play button and the controls.
+`src/player.rs`: the card (waveform; elapsed, legend and remaining; one row on a shared centre line with the level bars and a speed menu on the left, the transport centred with a halo behind play, and mute, a thin slider and its percentage on the right), `set_lines` from the transcript for previous and next line (media-player rule: within 2 s of a line's start, previous goes to the line before), `handle_key` for the done page's capture-phase key controller in `ui.rs`, a frame-clock tick while playing for the playhead and the eased level bars. `macos.css` sizes the round play button and the controls.
 
 ### 3. Bundle
 
@@ -43,5 +43,5 @@ The done page's player grows from a play button beside a thin waveform into a pr
 ## Status
 
 - [x] Step 1 core (tested: filter shapes, clamping)
-- [x] Step 2 GTK player (tested: line steps, speed labels; seen on screen with an invented meeting, paused: layout, icons, legend, round play button; playing is Verify 2–4)
-- [x] Step 3 bundle (to be seen in the next bundle build: Verify 5)
+- [x] Step 2 GTK player (tested: line steps, speed labels; seen on screen with an invented meeting, paused: layout, icons, legend, round play button, the aligned row after the second pass; playing is Verify 2–4)
+- [x] Step 3 bundle (Verify 5 seen 2026-09-26: the bundled ffprobe runs and reads durations)

@@ -6,10 +6,19 @@ Models, config, settings and the cache live where macOS keeps them (`~/Library/A
 
 ## Done when
 
-- [ ] `ls ~/Library/Application\ Support/momr/` shows `models/`, `config.toml` (when written) and `settings.json` after a run.
-- [ ] The app started with `open target/release/momr` (Finder-like environment) records, plays back and finds the configured agent.
-- [ ] `momr watch` works from a second terminal.
-- [ ] `grep -n "XDG_" src/` matches only the `XDG_*` variables the agent runner sets *for the agent* (its private data and state dirs).
+- [x] `ls ~/Library/Application\ Support/momr/` shows `models/`, `config.toml` (when written) and `settings.json` after a run.
+- [x] The app started with `open target/release/momr` (Finder-like environment) records, plays back and finds the configured agent.
+- [x] `momr watch` works from a second terminal.
+- [x] `grep -n "XDG_" src/` matches only the `XDG_*` variables the agent runner sets *for the agent* (its private data and state dirs).
+
+Observed 2026-09-25: fresh `~/Library/Caches/momr` is created on first run
+(the socket bind made its own parent dir first); staging, socket and watch
+all live there; `transcribe-file --model tiny` finds the migrated models with
+no download. `open` launches, serves `watch`, and spawns both `momr-audio`
+children, so `extend_path` works — but both meters read flat 0.0 there: an
+unsigned dev binary gets no TCC microphone/tap grant (plan 08 gives the app
+its own identity). `settings.json` appears on the first Preferences change;
+the save path is the same `env_or` mechanism the tests cover.
 
 ## Prerequisites
 
@@ -106,13 +115,13 @@ Update the "Where things go" paragraph of the root README to the `~/Library` loc
 ## Risks and notes
 
 - `set_var` in edition 2024 is `unsafe` for a reason: it must happen before threads. `main()` is the only place.
-- If Homebrew GLib were ever built without Cocoa support, `user_data_dir()` would return `~/.local/share`. The formula (plan 08) pins GLib from Homebrew, which is built with it.
+- Measured 2026-09-25: Homebrew GLib 2.90 has no Cocoa support (`user_data_dir()` gives `~/.local/share`), which is why D22 builds the `~/Library` defaults directly. Only `user_special_dir(Documents)` is trusted from GLib.
 
 ## Status
 
-- [ ] Step 1 `paths.rs` and callers
-- [ ] Step 2 meetings folder
-- [ ] Step 3 socket length fallback
-- [ ] Step 4 `PATH`
-- [ ] Step 5 README paths
-- [ ] Step 6 tests
+- [x] Step 1 `paths.rs` and callers
+- [x] Step 2 meetings folder
+- [x] Step 3 socket length fallback
+- [x] Step 4 `PATH`
+- [x] Step 5 README paths
+- [x] Step 6 tests

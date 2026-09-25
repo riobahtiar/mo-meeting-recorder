@@ -1,6 +1,6 @@
 //! Live state for a menu bar item or any other client.
 //!
-//! The app listens on a Unix socket in $XDG_RUNTIME_DIR and writes one JSON
+//! The app listens on a Unix socket in `~/Library/Caches` and writes one JSON
 //! line per tick to every connected client: 20 times a second while recording,
 //! once a second otherwise. `momr watch` connects to it and
 //! copies those lines to stdout, printing `{"state":"off"}` while the app is not
@@ -13,12 +13,10 @@
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use gtk::glib;
 
 use crate::APP_NAME;
 use crate::audio::{Source, to_meter};
@@ -40,7 +38,19 @@ pub struct Status {
 pub type SharedStatus = Arc<Mutex<Status>>;
 
 fn socket_path() -> PathBuf {
-    glib::user_runtime_dir().join(format!("{APP_NAME}.sock"))
+    socket_path_in(&crate::paths::cache())
+}
+
+/// `momr.sock` under `base`, or directly under the temp dir when that would
+/// overflow macOS's 104-byte `sun_path` limit (long user names). `$TMPDIR` is
+/// a private per-user directory, so the fallback keeps its privacy.
+fn socket_path_in(base: &Path) -> PathBuf {
+    let path = base.join(format!("{APP_NAME}.sock"));
+    if path.as_os_str().len() > 100 {
+        std::env::temp_dir().join(format!("{APP_NAME}.sock"))
+    } else {
+        path
+    }
 }
 
 pub fn now() -> i64 {
@@ -63,6 +73,10 @@ pub fn serve(
     commands: async_channel::Sender<&'static str>,
 ) {
     let path = socket_path();
+    if let Some(dir) = path.parent() {
+        // First run: ~/Library/Caches/momr does not exist yet.
+        let _ = std::fs::create_dir_all(dir);
+    }
     // A socket file left behind by a crash refuses new binds; nobody answers on it.
     if UnixStream::connect(&path).is_err() {
         let _ = std::fs::remove_file(&path);
@@ -191,5 +205,27 @@ pub fn watch() {
             return;
         }
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_base_keeps_the_socket_next_to_the_cache() {
+        let base = Path::new("/Users/someone/Library/Caches/momr");
+        assert_eq!(socket_path_in(base), base.join(format!("{APP_NAME}.sock")));
+    }
+
+    #[test]
+    fn long_base_falls_back_to_the_temp_dir() {
+        let base = Path::new("/Users/").join("a".repeat(200));
+        let path = socket_path_in(&base);
+        assert!(path.as_os_str().len() <= 100, "{}", path.display());
+        assert_eq!(
+            path.file_name().unwrap(),
+            format!("{APP_NAME}.sock").as_str()
+        );
     }
 }

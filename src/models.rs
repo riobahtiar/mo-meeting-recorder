@@ -87,12 +87,7 @@ pub fn set_override(name: &str) {
 }
 
 pub fn config_file() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".config"))
-        .join(crate::APP_NAME)
-        .join("config.toml")
+    crate::paths::config_file()
 }
 
 /// The value of `key = "…"` in config.toml, comments stripped; None when the
@@ -135,11 +130,10 @@ fn file_name(model: &Model) -> String {
     format!("ggml-{}.bin", model.name)
 }
 
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".local/share"))
+/// voxtype's models, wherever voxtype keeps them: same files, no need to have
+/// them twice.
+fn voxtype_models() -> PathBuf {
+    glib::user_data_dir().join("voxtype/models")
 }
 
 /// A complete model file: at least most of its expected size.
@@ -152,7 +146,7 @@ fn usable(path: &Path, model: Option<&Model>) -> bool {
 pub fn find() -> Option<PathBuf> {
     let name = configured();
     match known(&name) {
-        Some(model) => [models_dir(), data_dir().join("voxtype/models")]
+        Some(model) => [models_dir(), voxtype_models()]
             .into_iter()
             .map(|dir| dir.join(file_name(model)))
             .find(|path| usable(path, Some(model))),

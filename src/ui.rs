@@ -1360,9 +1360,7 @@ impl Recorder {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (source, target) = (path.clone(), out.clone());
-            let staging = glib::user_cache_dir()
-                .join(APP_NAME)
-                .join(format!("import-{}", ipc::now()));
+            let staging = crate::paths::cache().join(format!("import-{}", ipc::now()));
             let converted = gio::spawn_blocking(move || import_audio(&source, &target, &staging))
                 .await
                 .unwrap_or_else(|_| Err("the import stopped unexpectedly".into()));
@@ -1540,9 +1538,7 @@ impl Recorder {
         self.paused_secs.set(0);
         self.pause_began.set(0);
         let started_at = ipc::now();
-        let staging = glib::user_cache_dir()
-            .join(APP_NAME)
-            .join(started_at.to_string());
+        let staging = crate::paths::cache().join(started_at.to_string());
         if let Err(e) = std::fs::create_dir_all(&staging)
             .and_then(|_| self.mic.start_recording(&staging.join("mic.raw")))
             .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
@@ -2753,9 +2749,7 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .and_then(|t| t.format("%Y%m%d%H%M"))
         .map(|s| s.to_string())
         .unwrap_or_default();
-    glib::home_dir()
-        .join("Documents/Meetings")
-        .join(format!("{stamp} {}", safe_name(title)))
+    crate::paths::meetings().join(format!("{stamp} {}", safe_name(title)))
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -2949,7 +2943,7 @@ fn read_recording_note(staging: &std::path::Path) -> Option<RecordingNote> {
 
 /// Recording staging folders left behind, with some audio in them.
 fn unfinished_recordings() -> Vec<PathBuf> {
-    let root = glib::user_cache_dir().join(APP_NAME);
+    let root = crate::paths::cache();
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };

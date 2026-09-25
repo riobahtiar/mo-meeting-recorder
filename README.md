@@ -12,7 +12,7 @@
 | Records the microphone and the computer audio | [03](plans/03-audio-capture.md) | in progress — helper captures both (tap plays back at 0.77 peak), staging tracks equal length, transcribe gives You and Remote; drawn meters and device switching need a display session |
 | Plays back; compact strip; ⌘ shortcuts | [04](plans/04-playback-window-shortcuts.md) | in progress — audiotoolbox playback, `run` watchdog (kill -9 safe), caffeinate held/reaped, ⌘ accelerators; in-app seek and strip need a display session |
 | Chapters through an agent set in `config.toml` | [05](plans/05-agent-and-config.md) | in progress — `agent = "…"` selects, `ask` runs live (pi), crush refused, hung group killed in test; long-meeting chapters need a display session |
-| Files under `~/Library`; works when launched from Finder | [06](plans/06-paths-and-environment.md) | not started |
+| Files under `~/Library`; works when launched from Finder | [06](plans/06-paths-and-environment.md) | done — `~/Library` homes (GLib has no Cocoa support here, see D22), socket/staging/watch verified, `open` launch spawns helper (TCC-flat meters until the plan 08 bundle) |
 | Native menu bar, window chrome, system font, Apple colours, Preferences, About | [07](plans/07-macos-look-and-feel.md) | not started |
 | Homebrew formula; signed `MOM Recorder.app` in a DMG that opens `.meeting-recorder` files | [08](plans/08-app-bundle-and-distribution.md) | not started |
 | Live recording status in the menu bar | [09](plans/09-menu-bar-item.md) | not started |
@@ -40,7 +40,7 @@ cargo build --release
 
 Until [plan 02](plans/02-compile-on-macos.md) lands, the build stops in `src/player.rs` on a Linux-only call. The first transcription downloads the whisper model (about 1.6 GB, once); telling voices apart in an imported file downloads the speaker model (about 120 MB) on first use.
 
-Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here. Models, settings and the cache go under `~/Library/Application Support/momr` and `~/Library/Caches/momr` once [plan 06](plans/06-paths-and-environment.md) lands.
+Every meeting is a plain folder in `~/Documents/Meetings`: the audio, `transcript.md`, a small `.meeting-recorder` manifest and a hidden `.tracks/` with both sides. The layout is the same as upstream's, so a meeting recorded with the Linux app opens here. Models, settings and `config.toml` live under `~/Library/Application Support/momr`; staging, the cache and the live-state socket under `~/Library/Caches/momr`.
 
 ## Command line
 

@@ -453,16 +453,9 @@ fn locate(map: &[(usize, Region)], glued_ms: i64) -> (i64, usize) {
 // ---------------------------------------------------------------------------
 // Model
 
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".local/share"))
-}
-
-/// Where downloaded models live: `$XDG_DATA_HOME/momr/models`.
+/// Where downloaded models live: `~/Library/Application Support/momr/models`.
 pub fn models_dir() -> PathBuf {
-    data_dir().join(APP_NAME).join("models")
+    crate::paths::models()
 }
 
 /// Downloads `url` to `target` through a `.part` file, reporting progress as

@@ -3,18 +3,11 @@
 
 use std::path::PathBuf;
 
-use gtk::glib;
-
-use crate::APP_NAME;
 use crate::export::Format;
 use crate::transcribe::LANGUAGES;
 
 fn path() -> PathBuf {
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| glib::home_dir().join(".local/state"));
-    state.join(APP_NAME).join("settings.json")
+    crate::paths::settings_file()
 }
 
 fn load() -> serde_json::Value {

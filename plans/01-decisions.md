@@ -157,3 +157,23 @@ Each entry: the context, the decision, what was rejected and why, and what follo
 **Rejected.** Replacing the local default, and scattering provider keys through config files without the app saying where each comes from.
 **Consequences.** A new plan after the core phases (11) specifies the provider backends, key storage and the locales module; the README privacy section gains a per-provider "what leaves your Mac" note when the first provider ships.
 **Status.** Accepted for direction; provider and locale details Open until the core phases land.
+
+## D22 `paths.rs` builds `~/Library` locations itself
+
+**Context.** D08 said one `paths.rs` wraps GLib, whose `user_data_dir()` and
+friends return `~/Library/Application Support` and `~/Library/Caches` on
+macOS. Measured 2026-09-25 with Homebrew GLib 2.90 and no `XDG_*` set, they
+return `~/.local/share`, `~/.config`, `~/.cache` and `~/.local/state`:
+Linux paths, no Cocoa support. Only `user_special_dir(Documents)` resolves
+to `~/Documents` as hoped.
+**Decision.** `paths.rs` honours `XDG_*` when set and otherwise builds the
+macOS locations from the home directory itself: config, data and state under
+`~/Library/Application Support/momr`, cache under `~/Library/Caches/momr`,
+meetings from `user_special_dir(Documents)` with a home fallback. No
+`cfg(target_os)`: the codebase is macOS-only (D02), so these are the paths.
+**Rejected.** Trusting GLib and landing back in `~/.local`: wrong folders,
+and the plan 06 goal names `~/Library` explicitly.
+**Consequences.** Plan 06 steps 1 and 3 change shape (hardcoded defaults,
+same `XDG_*` overrides, so its tests still apply); the formula (plan 08)
+does not need to fix GLib.
+**Status.** Accepted.

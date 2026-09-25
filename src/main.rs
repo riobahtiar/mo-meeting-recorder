@@ -13,6 +13,7 @@ mod ipc;
 mod meeting;
 mod models;
 mod nemotron;
+mod paths;
 mod player;
 mod settings;
 mod theme;
@@ -25,6 +26,7 @@ pub const APP_ID: &str = "io.github.riobahtiar.MOMRecorder";
 pub const APP_NAME: &str = "momr";
 
 fn main() -> glib::ExitCode {
+    extend_path();
     match std::env::args().nth(1).as_deref() {
         None => ui::run(None),
         Some("watch") => {
@@ -72,6 +74,97 @@ fn main() -> glib::ExitCode {
         Some(other) => {
             eprintln!("{APP_NAME}: unknown command '{other}', see --help");
             glib::ExitCode::from(2)
+        }
+    }
+}
+
+/// A Finder or Spotlight launch brings only `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// without Homebrew, the helper's neighbours or the user's tool bins. Prepend
+/// them before GTK starts any thread, so `ffmpeg`, `momr-audio` and the agents
+/// resolve the same way they do from a terminal.
+fn extend_path() {
+    use std::path::PathBuf;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut extra: Vec<PathBuf> = vec!["/opt/homebrew/bin".into(), "/usr/local/bin".into()];
+    if let Some(home) = home {
+        for dir in [
+            ".local/bin",
+            ".cargo/bin",
+            ".npm-global/bin",
+            ".bun/bin",
+            ".volta/bin",
+        ] {
+            extra.push(home.join(dir));
+        }
+    }
+    // The helper next to this executable first.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        extra.insert(0, dir.to_path_buf());
+    }
+    // A GUI launch has no login shell; ask it once for its PATH, best effort
+    // with a short timeout so a slow rc file cannot hang the launch.
+    if std::env::var_os("TERM").is_none()
+        && let Ok(shell) = std::env::var("SHELL")
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let output = std::process::Command::new(&shell)
+                .args(["-lc", "printf %s \"$PATH\""])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output();
+            let _ = tx.send(output);
+        });
+        if let Ok(Ok(output)) = rx.recv_timeout(std::time::Duration::from_secs(3))
+            && output.status.success()
+        {
+            let shell_path = String::from_utf8_lossy(&output.stdout);
+            extra.extend(std::env::split_paths(&shell_path.into_owned()));
+        }
+    }
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let keep: Vec<PathBuf> = std::env::split_paths(&current).collect();
+    let mut joined = extra.into_iter().filter(|p| p.is_dir()).collect::<Vec<_>>();
+    joined.extend(keep);
+    if let Ok(path) = std::env::join_paths(joined) {
+        // SAFETY: first thing in main, before any other thread exists; the
+        // environment is not read concurrently. (set_var is unsafe in edition
+        // 2024.)
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    /// `PATH` is process-global, so serialise with the other env-touching tests.
+    static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[test]
+    fn extend_path_puts_the_exe_dir_first_and_keeps_the_original() {
+        let _guard: MutexGuard<'static, ()> = LOCK.lock().unwrap();
+        let saved = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+        extend_path();
+        let path = std::env::var_os("PATH").unwrap();
+        let mut entries = std::env::split_paths(&path);
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(entries.next().unwrap(), exe_dir);
+        let rest: Vec<PathBuf> = entries.collect();
+        assert!(rest.contains(&PathBuf::from("/usr/bin")));
+        assert!(rest.contains(&PathBuf::from("/bin")));
+        match saved {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
         }
     }
 }

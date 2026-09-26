@@ -53,8 +53,7 @@ private func tapCleanupHandler(_ sig: Int32) {
 private func tapDescription(processes: [AudioObjectID]?) -> CATapDescription {
     let desc: CATapDescription
     if let processes {
-        desc = CATapDescription(
-            stereoMixdownOfProcesses: processes.map { NSNumber(value: $0) })
+        desc = CATapDescription(stereoMixdownOfProcesses: processes)
     } else {
         desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
     }

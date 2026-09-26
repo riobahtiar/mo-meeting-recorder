@@ -475,7 +475,7 @@ pub fn transcribe_chunk(
             Err(e) if e.transient && attempt < ATTEMPTS && !aborted() => {
                 eprintln!(
                     "{}: {} (attempt {attempt} of {ATTEMPTS}), retrying",
-                    crate::APP_NAME,
+                    momr_platform::APP_NAME,
                     e.message
                 );
                 std::thread::sleep(Duration::from_secs(2u64.pow(attempt)));

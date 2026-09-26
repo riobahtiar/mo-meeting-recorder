@@ -73,9 +73,13 @@ pub fn next_occurrence(hour: u32, minute: u32, now_local: &glib::DateTime) -> i6
 Coded 2026-09-25 in a Linux container: the cleanup rules, the timer
 arithmetic, the capture flags and the restart are covered by `cargo test`;
 the Swift changes (`Devices.swift`, `--device`, `--bundle`, the rebuilt tap)
-have not been compiled, since the container has no Swift toolchain. The
-first macOS session runs `swift build` and `swift test`, then the Verify
-list.
+did not compile there (no Swift toolchain), which `swift build` on macOS 27
+caught as a type error: `stereoMixdownOfProcesses` takes the process object
+ids straight, not wrapped in `NSNumber`. Fixed the same day; `swift build
+-c release` and `swift test` are green (13 momr-audioTests including
+`--device`/`--bundle` argument cases, 14 MomrWatchTests), with `cargo test`
+at 104 passed and clippy and fmt clean. The Verify list still needs the
+display session.
 
 ## Status
 

@@ -3,5 +3,7 @@
 # A `swift build` run from the repository root leaves the root one.
 helpers/momr-audio/.build/
 /.build/
+# SwiftPM products of apps/momr-appkit; swift build recreates them.
+apps/*/.build/
 # The full screenshot and video library; only the images the README uses live in screenshots/.
 /media/

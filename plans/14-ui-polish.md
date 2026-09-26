@@ -84,6 +84,7 @@ Delete the wildcard focus rule from `data/macos.css`. Move the app's own rules o
 4. Settings in Indonesian at the default width: no "…" in any row; expand each key row.
 5. Transcribe with the window at its minimum width and at full screen: the title fits both.
 6. ⇧⌘M while recording: the strip shows the clock in the title bar, the two-lane wave and three buttons; Pause and Stop work from it; ⇧⌘M again restores the previous size.
+7. Open Settings and close it without the mouse (Escape) and with it: the hidden × leaves no Mac user stuck. The dialog is drawn inside the main window, so the traffic lights there close the app, not Settings; if closing is not obvious, bring the × back and narrow the switcher padding instead.
 
 Coded 2026-09-25 in a Linux container against GTK 4.14 and libadwaita 1.5
 headers (the 1.6 symbols left unresolved at link time): `cargo check`,

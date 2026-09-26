@@ -2,7 +2,7 @@
 
 ## Goal
 
-Know when the GTK app is not good enough and what to build if so: a SwiftUI front end on the same Rust core. This plan is a reference until the criteria below say otherwise; nothing here is scheduled.
+Know when the GTK app is not good enough and what to build if so: a native front end on the same Rust core. Entered 2026-09-25 (D24, see Status): the shell is AppKit, and the steps below are the work.
 
 ## When to enter this plan
 
@@ -73,4 +73,95 @@ The DMG carries the SwiftUI app; the Homebrew formula keeps the GTK binary as `m
 
 ## Status
 
-Reference only. Revisit after plan 07's smoke checklist.
+Entered 2026-09-25 by maintainer decision (D24): the macOS shell is AppKit,
+not SwiftUI-only — SwiftUI views may live inside AppKit windows where that
+is cheaper. The page order in step 3 and the parity rule in step 4 stand;
+step 1 (workspace split) is the first work. GTK retires when the smoke
+checklist is fully green on the AppKit shell.
+
+Slice 1 done 2026-09-25: workspace with `crates/momr-core` holding
+`cleanup`, `export`, `helper` and `locales`; the GTK app is byte-identical
+in behaviour (105 tests green: 87 shell + 18 core). Seams cut to get there:
+`RATE`/`CHANNELS` live in core `export`, the launch-language chain is pure
+in core (`resolve_lang`) with the macOS reads in `settings`, and the one
+`cfg` in core is the executable-bit leaf in `helper`. Core `cargo check`
+passes for `x86_64-pc-windows-msvc`, lib and tests.
+
+Slice 2 done 2026-09-25: `crates/momr-platform` with the `paths` seam,
+de-glibbed (`$HOME`/`%USERPROFILE%` plus absolute `XDG_*`, `~/Documents`
+instead of the glib special dir). `APP_NAME` lives in the platform crate
+and the shell re-exports it. 105 tests green (85 shell + 18 core + 2
+platform); both new crates check on Windows MSVC, lib and tests.
+
+Slice 3 done 2026-09-25: `timer` in core on chrono (glib `DateTime` gone;
+`next_occurrence` takes Unix seconds, DST gaps yield None), `safe_name`
+lives in core `export` with the shell re-exporting it. 105 tests green
+(81 shell + 22 core + 2 platform). Still shell-side: `models` (needs
+`transcribe`), `meeting` (needs `chapters`), `chapters` (needs `agent`).
+
+Slice 4 done 2026-09-25: the transcribe chain in core — `transcribe`
+(whisper-rs, ExitCode→i32, clock→chrono), `models`, `meeting` (stamp→chrono,
+`Chapter` housed here), `provider` (ureq), `nemotron` (ort, realfft),
+`diarize`, `settings`, plus a pure core `theme` (`Appearance`; the shell
+keeps the palette and switching). CLI exits convert at the shell boundary.
+105 tests green (42 shell + 61 core + 2 platform). Core holds no
+gtk/glib/adw/libc/`cfg(target_os)` (audit); a full Windows build needs a
+Windows runner (ureq's `ring` needs a C toolchain), which is CI's job.
+Shell left: ui, main, animation, player, theme-apply, audio, ipc, agent,
+chapters-generate.
+
+Slice 5 done 2026-09-25: platform `process` (detached spawn, single-pid
+terminate, group kill), `fs` (private dirs, no-follow opens with per-OS
+flags, regular-file links) and `sock` (local sockets, Windows stubs for the
+named-pipe future); `audio`, `ipc`, `agent` and `chapters` in core. 105
+tests green (9 shell + 94 core + 2 platform). One real bug caught by the
+move: group-kill does not apply to capture children, which share our group,
+so `terminate` signals the single pid. Shell left: ui, main, animation,
+player, theme-apply.
+
+Slice 6 done 2026-09-25: core `playback` (ffmpeg mechanics with the output
+sink as a parameter, waveform peaks, clock) with the widget, colors and
+play state staying in the shell's `Player`. 105 tests green (6 shell + 97
+core + 2 platform). Shell left: ui, main, animation, player-widget,
+theme-apply.
+
+Slice 7 done 2026-09-25: `apps/momr-appkit` builds — AppKit ready window
+with two live meters driven by `momr-audio` over the D03 byte contract,
+app menu, About, ⌘R/⌘,/⌘Q. Start and Settings are honest stubs pointing at
+their slices. On-screen check (meters move, menu, About) is the next
+session's job.
+
+Slice 8 done 2026-09-26: recording in the AppKit shell — staging in the
+GTK-identical layout (either shell recovers the other's crash), pause with
+an excluding clock, stop encodes both tracks, writes the manifest and runs
+the core `transcribe` CLI for `transcript.md`, Reveal in Finder included.
+Live record/stop/transcribe run is the next session's job.
+
+Review fixes 2026-09-26 (PR 3, critical): the AppKit shell now launches
+(`@main` needs a nib; the delegate is set by hand), resume appends instead
+of truncating the raw tracks, stop reads the transcript before waiting on
+`momr`, and a capture child that exits is reported and restarted like
+`audio.rs` does. The socket accept loop survives a failed accept, and
+`default-members` makes plain `cargo test` run all 105 tests again. The
+launch was checked by starting the binary (both `momr-audio` children
+came up); meters on screen and a live record are still to watch.
+
+Review fixes 2026-09-26 (PR 3, important): the AppKit shell no longer
+writes the meeting format by hand. Stop runs `momr finish` (core
+`finish`), the one writer of the folder, manifest, tracks and transcript,
+which also backs the GTK shell's recording note and speaker fitting. The
+AppKit shell writes `recording.json`, so the GTK recovery finishes its
+crashes; this shell has no recovery scan of its own yet (step 3.5). Capture
+state is on one queue, write and resume failures are shown, `momr` is
+found at Start through the login shell's PATH, and quitting mid-recording
+asks. `momr finish` was run end to end on an invented meeting (folder,
+mono tracks, manifest, transcript, a same-minute `… 2`, empty staging
+refused).
+
+Review suggestions 2026-09-26 (PR 3): the Timer dialog's rules are core
+`Plan::from_choices` (with a DST test pinned to New York, which caught
+chrono listing the later instant of a repeated hour first), process
+groups are a `Group` type, the playback output is `momr-platform`'s, one
+`timer::clock` format, and the socket commands skip the `defaults` lookup.
+Tests added for process groups, fs, the socket takeover, `safe_name`,
+playback arguments, and an AppKit test target (resume appends, meter math).

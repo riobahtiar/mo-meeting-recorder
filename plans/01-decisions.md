@@ -188,3 +188,71 @@ does not need to fix GLib.
 **Rejected.** Localised transcript labels: every script that looks for a `You:` line breaks on an Indonesian install, and a meeting moved to upstream shows mixed labels. Letting `momr-menubar` read `AppleLanguages` on its own: it would ignore the Preferences choice and disagree with the window.
 **Consequences.** A meeting from either app, and from either interface language, carries the same default labels, so renaming and scripts behave the same way. A language change in Preferences takes effect on the next launch, for the window and the menu bar item together.
 **Status.** Accepted.
+
+## D24 Modular render engine; macOS shell is AppKit, GTK retires
+
+**Context.** The GTK port proved the seams (capture, playback, providers,
+timer, sources) but a display session confirmed plan 12's criterion 2: the
+app reads as non-native unprompted (CSS-chrome look, client-drawn borders,
+CPU-drawn UI). Patching GTK further cannot reach AppKit materials, the
+compositor frame, or full VoiceOver.
+**Decision.** The render engine is modular per build target: a UI-free Rust
+core crate plus one shell per target, selected at build time. For macOS the
+shell is AppKit (SwiftUI views embedded inside AppKit windows where that is
+cheaper, not a second UI). The GTK app ships until the AppKit shell reaches
+parity on the plan 10 smoke checklist, then GTK is deleted per D02's
+same-change rule. Plans 12 (shell order) and 16 (workspace, seam trait)
+are entered and normative for the shape; where they say SwiftUI-only, AppKit
+with embedded SwiftUI governs.
+**Rejected.** Keeping GTK as the macOS shell with more CSS: bounded,
+documented shortfall, no path to the frame, materials or accessibility.
+Rewriting the core in Swift: whisper.cpp, ONNX Runtime and the audio helpers
+are the app, and they stay Rust.
+**Consequences.** First step is a pure refactor (workspace split, GTK app
+behaves identically, CI proves it). `momr-audio` and `momr-menubar` stay:
+the tap helper and the status item are already native. The DMG then carries
+only the AppKit app; the Homebrew formula keeps `momr-gtk` for a release or
+two.
+**Status.** Accepted; decided 2026-09-25 with the maintainer.
+
+## D25 The core compiles for Windows 11+, macOS and Linux; seams live in one place
+
+**Context.** D24 splits a UI-free core from per-target shells, with macOS
+first. The same split is the Windows and Linux route (plan 16), but only if
+the core never absorbs a platform API by accident.
+**Decision.** `momr-core` builds on Windows 11+, macOS and Linux from day
+one: std plus the transcription crates only, no GTK, no glib, no
+`std::os::*` and no `cfg(target_os)` inside it — with one documented
+exception, a leaf OS-API shim where std has no portable spelling (today:
+the executable bit in `helper.rs`, which tries the spawn on Windows).
+`momr-platform` is the bottom crate: std-only and portable, so the core
+may use it for paths and, later, the other seams, and the shells use both.
+`cfg(target_os)` lives in `momr-platform` and nowhere else. macOS is the
+only tested target until a platform is scheduled; the others must at least
+keep compiling the core.
+**Rejected.** Gating platform code inside the core: D02 already showed where
+that ends — two test surfaces and lingering per-OS paths.
+**Consequences.** Slice 1 moves only modules that already satisfy the rule;
+anything with a glib or Unix import stays in the GTK app until its seam is
+cut. The `metal`/`vulkan`/`cuda` features stay whisper-rs features selected
+per target, never core code.
+**Status.** Accepted; decided 2026-09-25 with the maintainer.
+
+## D26 Transcripts come from the original audio, never the enhanced one
+
+**Context.** Plan 17 adds a voice enhancement toggle (noise removal and a
+cleaner, fuller voice). Noise suppression and enhancement change the
+signal whisper hears, and heavy processing can cost recognition accuracy
+or add artifacts that whisper turns into words.
+**Decision.** Enhancement only shapes the audio a person listens to (the
+meeting's audio files). Transcription, transcribe-again and diarization
+always read the unprocessed tracks: the raw staging tracks at Stop, and
+the kept `.tracks/` afterwards, which stay unprocessed.
+**Rejected.** Transcribing the enhanced audio: it would tie transcript
+quality to the enhancement's artifacts, and turning the toggle off could
+no longer give back the original result.
+**Consequences.** `.tracks/` keeps its meaning (the original two sides,
+for transcribing again), so no reader of the folder changes. The enhanced
+audio is what `audio.ogg` or the top-level pair holds, and the manifest
+says whether it was enhanced.
+**Status.** Accepted; decided 2026-09-26 with the maintainer.

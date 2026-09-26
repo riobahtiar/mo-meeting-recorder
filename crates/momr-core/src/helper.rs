@@ -139,12 +139,27 @@ fn parse_list(text: &str) -> Result<AudioDevices, String> {
     })
 }
 
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+/// Whether `which` may hand this path to `Command`: a real file that the OS
+/// would execute. The only non-test `cfg` in the core (D25 allows this one leaf):
+/// Unix checks the mode bits, Windows has no such bit and tries the spawn.
+/// Shared with the agent runner, which finds its agents the same way.
+pub fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
-fn which(name: &str) -> Option<PathBuf> {
+/// The first executable `name` on `PATH`, if any.
+pub fn which(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
             .map(|dir| dir.join(name))
@@ -226,6 +241,9 @@ mod tests {
         assert!(parse_list("").is_err());
     }
 
+    /// Mode bits exist only on Unix; on Windows `is_executable` is
+    /// `is_file`, which needs no test beyond the lookup tests above.
+    #[cfg(unix)]
     #[test]
     fn only_executable_files_count() {
         use std::os::unix::fs::PermissionsExt;

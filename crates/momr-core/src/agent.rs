@@ -30,8 +30,6 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -149,7 +147,7 @@ pub fn default_agent() -> Option<Agent> {
 
 /// The default agent, or why it cannot be used.
 pub fn status() -> Result<Agent, Unavailable> {
-    status_with(configured_id, |id| which(id).is_some())
+    status_with(configured_id, |id| crate::helper::which(id).is_some())
 }
 
 /// The agent id in config.toml, None when unset.
@@ -217,7 +215,7 @@ const AGENT_IDS: &[&str] = &[
 pub fn installed_agents() -> Vec<Choice> {
     AGENT_IDS
         .iter()
-        .filter(|id| which(id).is_some())
+        .filter(|id| crate::helper::which(id).is_some())
         .map(|id| Choice {
             id,
             name: label(id),
@@ -261,7 +259,7 @@ fn blocker(id: &str) -> Option<String> {
 fn ori_harness() -> Option<&'static str> {
     ["claude", "pi"]
         .into_iter()
-        .find(|name| which(name).is_some())
+        .find(|name| crate::helper::which(name).is_some())
 }
 
 /// Asks opencode what the agent defined above resolved to, and insists on
@@ -377,24 +375,25 @@ fn build(id: &str, prompt: &str, dir: &Path) -> Result<Built, String> {
             // letting it bootstrap writes 166 MB under the ulimit.
             let source = std::env::var_os("GROK_HOME")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home().join(".grok"));
+                .unwrap_or_else(|| momr_platform::paths::home_dir().join(".grok"));
             let native = source.join("bin/grok");
-            if !is_executable(&native) {
+            if !crate::helper::is_executable(&native) {
                 return Err(crate::locales::t("agent.grok_setup").into());
             }
             let native = std::fs::canonicalize(&native).map_err(|e| e.to_string())?;
             let grok_home = dir.join("grok-home");
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(grok_home.join("bin"))
-                .map_err(|e| e.to_string())?;
+            momr_platform::fs::secure_dir(&grok_home.join("bin")).map_err(|e| e.to_string())?;
             // Symlinks rather than copies: these are credentials the agent
             // rewrites when it refreshes a token.
+            // A missed one only costs the agent that file, so these are best
+            // effort.
             for name in ["auth.json", "config.toml"] {
-                link_regular(&source.join(name), &grok_home.join(name));
+                let _ =
+                    momr_platform::fs::link_if_regular(&source.join(name), &grok_home.join(name));
             }
-            std::os::unix::fs::symlink(&native, grok_home.join("bin/grok"))
+            // The binary is not optional: without it the trampoline would
+            // bootstrap into the ulimit and fail with a confusing size error.
+            momr_platform::fs::link(&native, &grok_home.join("bin/grok"))
                 .map_err(|e| e.to_string())?;
             built.env.push(("GROK_HOME", grok_home.into()));
             // The updater downloads 166 MB, which the ulimit would refuse.
@@ -475,6 +474,8 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
 /// The `sh` wrapper around the agent: `sh -c <script> sh <file-limit-kb>
 /// <program> <args…>`, with `gtimeout -k 5 <timeout>` inside when it is on
 /// `PATH`. Takes the flag as a parameter so tests can cover both shapes.
+/// `run_built` spawns it through `process::spawn_detached`, which puts it in
+/// its own session (so its `Group` reaches the whole tree) on Unix.
 fn sh_command(built: &Built, timeout: Duration, gtimeout: bool) -> Command {
     let script = if gtimeout {
         format!(
@@ -492,16 +493,6 @@ fn sh_command(built: &Built, timeout: Duration, gtimeout: bool) -> Command {
         .arg(built.file_limit_kb.to_string())
         .arg(&built.program)
         .args(&built.args);
-    // SAFETY: setsid is async-signal-safe and touches only the child's own
-    // state. It is the direct equivalent of the `setsid` binary: a new
-    // session, so its own process group (pid == pgid, which `kill_group`
-    // relies on) and no controlling terminal.
-    unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
     command
 }
 
@@ -518,11 +509,11 @@ fn run_built(
 
     // `ulimit -f` has to be set in the process that becomes the agent, so it
     // goes through a shell that execs it. The agent's stdout and stderr go to
-    // files, which is what the limit bounds. `sh_command` puts it in its own
-    // session through `pre_exec(setsid)`, and wraps it in `gtimeout` when that
-    // is on PATH, so the agent is bounded even when this process dies before
+    // files, which is what the limit bounds. `sh_command` wraps it in
+    // `gtimeout` when that is on PATH and `spawn_detached` gives it its own
+    // session, so the agent is bounded even when this process dies before
     // the loop below can kill it; the loop is the backstop.
-    let mut command = sh_command(built, timeout, which("gtimeout").is_some());
+    let mut command = sh_command(built, timeout, crate::helper::which("gtimeout").is_some());
     command
         .envs(built.env.iter().map(|(k, v)| (k, v)))
         .current_dir(dir)
@@ -533,8 +524,7 @@ fn run_built(
         })
         .stdout(stdout)
         .stderr(stderr);
-    let mut child = command
-        .spawn()
+    let (mut child, group) = momr_platform::process::spawn_detached(&mut command)
         .map_err(|e| crate::locales::tf("agent.no_start", &[agent.name, &e.to_string()]))?;
 
     // The prompt goes in from a thread: a long transcript is more than a pipe
@@ -556,12 +546,18 @@ fn run_built(
         }
     };
     let Some(status) = status else {
-        kill_group(child.id(), "TERM");
-        let deadline = Instant::now() + KILL_GRACE;
-        while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
-            std::thread::sleep(Duration::from_millis(100));
+        use momr_platform::process::{Signal, already_gone};
+        for (signal, wait) in [(Signal::Term, KILL_GRACE), (Signal::Kill, Duration::ZERO)] {
+            if let Err(e) = group.kill(signal)
+                && !already_gone(&e)
+            {
+                eprintln!("{}: stop {}: {e}", momr_platform::APP_NAME, agent.name);
+            }
+            let deadline = Instant::now() + wait;
+            while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-        kill_group(child.id(), "KILL");
         let _ = child.wait();
         return Err(crate::locales::tf(
             "agent.no_answer",
@@ -720,15 +716,10 @@ fn truncate(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-/// Reads at most `max` bytes, refusing to follow a symlink or block on a fifo:
-/// these files are written by the agent, not by us.
+/// Reads at most `max` bytes through the platform's symlink- and fifo-safe
+/// open: these files are written by the agent, not by us.
 fn read_bounded(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // The values differ per platform, which is why they come from `libc`.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
+    let file = momr_platform::fs::open_no_follow(path)?;
     let mut bytes = Vec::new();
     file.take(max).read_to_end(&mut bytes)?;
     Ok(bytes)
@@ -742,59 +733,24 @@ fn workdir() -> std::io::Result<PathBuf> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let dir = base.join(format!("momr-agent-{}-{nanos}", std::process::id()));
-    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    momr_platform::fs::new_private_dir(&dir)?;
     Ok(dir)
-}
-
-fn kill_group(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
-        .args([&format!("-{signal}"), "--", &format!("-{pid}")])
-        .stderr(Stdio::null())
-        .status();
-}
-
-/// A symlink to `src` at `dest`, only when `src` is a regular file and not
-/// itself a symlink.
-fn link_regular(src: &Path, dest: &Path) {
-    if std::fs::symlink_metadata(src).is_ok_and(|m| m.file_type().is_file()) {
-        let _ = std::os::unix::fs::symlink(src, dest);
-    }
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|p| is_executable(p))
-    })
-}
-
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// `momr ask "<prompt>"` with the text on stdin, or
 /// `ask --agent` to show which agent would be used.
-pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
-    use gtk::glib::ExitCode;
+pub fn cli(args: &[String]) -> u8 {
     let agent = match status() {
         Ok(agent) => agent,
         Err(why) => {
             eprintln!("{why}");
-            return ExitCode::FAILURE;
+            return 1;
         }
     };
     match args.first().map(String::as_str) {
         Some("--agent") => {
             println!("{} ({})", agent.name, agent.id);
-            ExitCode::SUCCESS
+            0
         }
         Some(prompt) => {
             let mut text = String::new();
@@ -804,25 +760,25 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
                 .is_err()
             {
                 eprintln!("{}", crate::locales::t("ask.no_stdin"));
-                return ExitCode::FAILURE;
+                return 1;
             }
             match run(&agent, prompt, &text) {
                 Ok(answer) => {
                     println!("{answer}");
-                    ExitCode::SUCCESS
+                    0
                 }
                 Err(e) => {
                     eprintln!("{e}");
-                    ExitCode::FAILURE
+                    1
                 }
             }
         }
         None => {
             eprintln!(
                 "{}",
-                crate::locales::t("ask.usage").replace("{}", crate::APP_NAME)
+                crate::locales::t("ask.usage").replace("{}", momr_platform::APP_NAME)
             );
-            ExitCode::from(2)
+            2
         }
     }
 }

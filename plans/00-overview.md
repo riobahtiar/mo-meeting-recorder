@@ -7,7 +7,7 @@ MOM Recorder is a macOS app that records the microphone and the computer audio a
 ## Scope
 
 - **macOS 14 (Sonoma) and newer**, Apple silicon and Intel. The Core Audio process tap API for capturing computer audio without a virtual device needs 14.2.
-- **macOS only.** Linux code paths are removed as their macOS replacement lands, not kept behind `cfg`. Upstream is the origin, not a merge partner: a fix from upstream is cherry-picked when it still applies to the shared core (transcription, diarization, export, transcript editing).
+- **macOS only.** Linux code paths are removed as their macOS replacement lands; `cfg(target_os)` exists only in `crates/momr-platform` (D25), for targets that are scheduled. Upstream is the origin, not a merge partner: a fix from upstream is cherry-picked when it still applies to the shared core (transcription, diarization, export, transcript editing).
 - **Not iOS or iPadOS.** GTK 4 and libadwaita have no port there.
 - **Not a rewrite.** The Rust code stays; platform work happens at the seams listed below.
 - **Meetings stay compatible with upstream.** The folder layout, the `.meeting-recorder` manifest and `transcript.md` are unchanged, so a meeting recorded with the Linux app opens here.
@@ -41,6 +41,8 @@ Every operating-system dependency is a child process or a path. That is what mak
 
 ## Architecture on macOS
 
+The Rust code is a workspace (plan 12, D25): `crates/momr-core` is the engine without a window, `crates/momr-platform` the OS seams, `src/` the GTK shell. `apps/momr-appkit` is the native shell that is to replace GTK (D24); it runs the `momr` binary for the engine.
+
 ```
 MOM Recorder.app
 ├── Contents/MacOS/momr                       the Rust binary, GTK 4 + libadwaita
@@ -61,17 +63,17 @@ One row per seam. "Remove" means the Linux code is deleted when the macOS replac
 |---|---|---|---|---|
 | Microphone capture | `audio.rs` `capture()` | `parec -d @DEFAULT_SOURCE@`, raw s16le 48 kHz stereo on stdout | `ffmpeg -f avfoundation -i ":default"` first; then `momr-audio mic`, which follows default-device changes. Remove `parec`. | 03 |
 | Computer audio capture | `audio.rs` `capture()` | `parec -d @DEFAULT_MONITOR@` | `momr-audio system`: Core Audio process tap on all processes, resampled to 48 kHz; BlackHole loopback device as fallback | 03 |
-| Children die with the app | `player.rs` `die_with_parent()` | `prctl(PR_SET_PDEATHSIG)` | `momr-audio run -- <cmd>`: execs the command and kills it when the parent exits (kqueue on the parent pid). Remove `prctl`. | 02, 04 |
-| Playback | `player.rs` `Playback::start()` | `ffmpeg` piped into `pacat` | `ffmpeg … -f audiotoolbox -`, one process. Remove `pacat`. | 04 |
+| Children die with the app | `crates/momr-core/src/playback.rs` `guarded()` | `prctl(PR_SET_PDEATHSIG)` | `momr-audio run -- <cmd>`: execs the command and kills it when the parent exits (kqueue on the parent pid). Remove `prctl`. | 02, 04 |
+| Playback | `crates/momr-core/src/playback.rs` `Playback::start()` | `ffmpeg` piped into `pacat` | `ffmpeg … -f audiotoolbox -`, one process. Remove `pacat`. | 04 |
 | Compact strip | `ui.rs` `set_compact()`, `hyprctl_*()` | `hyprctl dispatch` resize and move | `gtk::Window::set_default_size`. Remove `hyprctl_*`. | 04 |
 | Keyboard | `ui.rs` `set_accels_for_action` | `<Control>m/w/q` | `<Primary>`; compact on ⇧⌘M because ⌘M minimizes | 04, 07 |
 | Chapters agent | `agent.rs` `status()` | `omarchy-default-agent` prints the id | `agent = "…"` in `config.toml`. Remove the Omarchy lookup and its message. | 05 |
-| Agent process group and timeout | `agent.rs` `run()` | `setsid sh -c 'ulimit -f … && exec timeout …'` | `pre_exec(setsid)`, `ulimit -f` through `sh`, in-process timeout; `gtimeout` used when present | 05 |
-| Bounded reads | `agent.rs` `read_bounded()` | Linux literals for `O_NOFOLLOW`, `O_NONBLOCK` | `libc::O_NOFOLLOW`, `libc::O_NONBLOCK` | 02 |
-| Directories | `settings.rs`, `models.rs`, `transcribe.rs` | Hand-rolled `XDG_*` with `~/.local/…` fallbacks | One `paths.rs` that builds `~/Library/Application Support/momr` and `~/Library/Caches/momr` from the home directory (Homebrew's GLib has no Cocoa support, D22), an absolute `XDG_*` still winning | 06 |
+| Agent process group and timeout | `agent.rs` `run()` | `setsid sh -c 'ulimit -f … && exec timeout …'` | `momr_platform::process::spawn_detached` (its own session), `ulimit -f` through `sh`, in-process timeout; `gtimeout` used when present | 05 |
+| Bounded reads | `agent.rs` `read_bounded()` | Linux literals for `O_NOFOLLOW`, `O_NONBLOCK` | `momr_platform::fs::open_no_follow` with the macOS values | 02 |
+| Directories | `settings.rs`, `models.rs`, `transcribe.rs` | Hand-rolled `XDG_*` with `~/.local/…` fallbacks | `crates/momr-platform/src/paths.rs` builds `~/Library/Application Support/momr` and `~/Library/Caches/momr` from the home directory (Homebrew's GLib has no Cocoa support, D22), an absolute `XDG_*` still winning | 06 |
 | PATH for GUI launches | `main.rs` | inherited from the session | Finder launches with `/usr/bin:/bin:…`; prepend Homebrew and user bin dirs before GTK starts | 06 |
-| Meetings folder | `ui.rs` `output_dir()` | `~/Documents/Meetings` | Same, through `glib::user_special_dir(Documents)` | 06 |
-| Live state socket | `ipc.rs` | Unix socket in `$XDG_RUNTIME_DIR` | Same code; `~/Library/Caches/momr/momr.sock` (under an absolute `$XDG_CACHE_HOME` when set), falling back to `$TMPDIR/momr.sock` past the 104-byte `sun_path` limit | 06 |
+| Meetings folder | `meeting.rs` `folder_for()` | `~/Documents/Meetings` | Same, `home_dir()/Documents/Meetings` (`paths::meetings`) unless Settings moved it | 06 |
+| Live state socket | `ipc.rs` | Unix socket in `$XDG_RUNTIME_DIR` | Same protocol through `momr_platform::sock`; `~/Library/Caches/momr/momr.sock` (under an absolute `$XDG_CACHE_HOME` when set), falling back to `$TMPDIR/momr.sock` past the 104-byte `sun_path` limit | 06 |
 | Theme | `theme.rs` | Reads Omarchy's `colors.toml`, followed live | libadwaita follows system appearance and accent; speaker and wave colours from Apple's system palette. Remove the `colors.toml` reader. | 07 |
 | Menu bar, chrome, controls | `ui.rs` | libadwaita defaults | Native `GMenuModel` menubar, window buttons left, `macos.css`, About and Preferences dialogs | 07 |
 | File panels | `ui.rs` `gtk::FileDialog` | GTK dialog | Native `NSOpenPanel` through GTK's quartz file chooser; nothing to change, verify filters | 07 |
@@ -80,14 +82,14 @@ One row per seam. "Remove" means the Linux code is deleted when the macOS replac
 | ONNX Runtime | `nemotron.rs` | `ort` with `download-binaries` | Same; prebuilt Apple binaries download at build time | 02 |
 | Opening `.meeting-recorder` files | `main.rs` argv | freedesktop MIME type (files already removed) | `Info.plist` document type and UTI; `GApplication` `open` signal, because Finder does not pass argv | 08 |
 | Install | (pacman packaging removed) | | Homebrew formula, then signed `.app` in a DMG | 08 |
-| Identity | `main.rs` `APP_ID`, `APP_NAME`; `Cargo.toml` | done: `momr`, `io.github.riobahtiar.MOMRecorder` | Confirm the bundle id before the first DMG; sweep the remaining comments | 11 |
+| Identity | `main.rs` `APP_ID`, `momr-platform` `APP_NAME`; `Cargo.toml` | done: `momr`, `io.github.riobahtiar.MOMRecorder` | Confirm the bundle id before the first DMG; sweep the remaining comments | 11 |
 
 ## Phases
 
 1. **Works** (plans 02 to 06; 02 and 06 are in `archives/`): a developer builds it and records a meeting from a terminal.
 2. **Feels native** (07, 09): a Mac user does not notice it is GTK from the chrome, menus, shortcuts, fonts or colours.
 3. **Ships** (08, 10, 11): DMG and Homebrew, CI, identity confirmed.
-4. **Optional** (12, 16): a SwiftUI shell on the Rust core, only if phase 2 falls short by the criteria in that plan; a core crate and a cross-platform shell when Windows or Linux is scheduled.
+4. **Native** (12, 16): entered 2026-09-25 (D24) — an AppKit shell on the Rust core, GTK retiring at parity; a core crate and a cross-platform shell when Windows or Linux is scheduled.
 5. **Providers** (13) and **Features** (14, 15): cloud transcription, the Indonesian interface, and what the first display session asked for.
 
 ## Risks

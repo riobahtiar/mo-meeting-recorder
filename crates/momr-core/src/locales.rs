@@ -46,35 +46,32 @@ impl Lang {
     }
 }
 
-/// The interface language for this launch: the one saved in Settings, else
-/// the first of macOS's preferred languages (what a Finder launch sees; $LANG
-/// is usually unset there), else $LANG for a terminal without defaults.
-/// Tests always read English, so they pass whatever the developer's settings.
-pub fn current() -> Lang {
-    static LANG: OnceLock<Lang> = OnceLock::new();
-    if cfg!(test) {
-        return Lang::English;
-    }
-    *LANG.get_or_init(|| {
-        crate::settings::load_ui_language()
-            .or_else(|| apple_language().map(|l| Lang::from_locale(&l)))
-            .unwrap_or_else(|| Lang::from_locale(&std::env::var("LANG").unwrap_or_default()))
-    })
+/// The launch language, chosen once per process by the shell at startup
+/// (it feeds the Settings choice through `init_lang` before any `t()`
+/// call). Reads as English until then, so unit tests — which never
+/// initialise — pass whatever the developer's settings.
+static LANG: OnceLock<Lang> = OnceLock::new();
+
+/// Records the launch language; the shell calls this once at startup.
+pub fn init_lang(lang: Lang) {
+    let _ = LANG.set(lang);
 }
 
-/// The first entry of the global `AppleLanguages` default.
-fn apple_language() -> Option<String> {
-    let output = std::process::Command::new("/usr/bin/defaults")
-        .args(["read", "-g", "AppleLanguages"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    first_apple_language(&String::from_utf8_lossy(&output.stdout))
+/// The launch language, English until `init_lang` runs.
+pub fn current() -> Lang {
+    LANG.get().copied().unwrap_or(Lang::English)
+}
+
+/// The launch-language chain, pure for tests: the Settings choice wins, else
+/// the first macOS preferred language, else `$LANG`.
+pub fn resolve_lang(saved: Option<Lang>, apple_first: Option<&str>, lang_env: &str) -> Lang {
+    saved
+        .or_else(|| apple_first.map(Lang::from_locale))
+        .unwrap_or_else(|| Lang::from_locale(lang_env))
 }
 
 /// `(\n    "id-ID",\n    "en-US"\n)` to `id-ID`.
-fn first_apple_language(plist: &str) -> Option<String> {
+pub fn first_apple_language(plist: &str) -> Option<String> {
     plist
         .split(['(', ',', ')', '\n'])
         .map(|item| item.trim().trim_matches('"'))
@@ -202,6 +199,49 @@ strings![
         "Dipakai untuk transkrip setelah panggilan"
     ),
     ("ready.format_title", "Audio file", "Berkas audio"),
+    ("ready.sources_title", "Record", "Rekam"),
+    (
+        "ready.enhance_title",
+        "Voice enhancement",
+        "Peningkatan suara"
+    ),
+    (
+        "ready.enhance_subtitle",
+        "Less noise and clearer voices in the saved audio; the transcript uses the original",
+        "Lebih sedikit bising dan suara lebih jernih di audio tersimpan; transkrip memakai aslinya"
+    ),
+    (
+        "enhance.no_helper",
+        "the momr-audio helper is missing",
+        "helper momr-audio tidak ada"
+    ),
+    (
+        "enhance.unavailable",
+        "voice isolation is not available on this Mac",
+        "isolasi suara tidak tersedia di Mac ini"
+    ),
+    (
+        "enhance.failed",
+        "Saved without voice enhancement: {}",
+        "Disimpan tanpa peningkatan suara: {}"
+    ),
+    (
+        "ready.sources_subtitle",
+        "Which side of the call is kept",
+        "Sisi panggilan mana yang disimpan"
+    ),
+    ("ready.not_recorded", "Not recorded", "Tidak direkam"),
+    (
+        "sources.both",
+        "Microphone and computer audio",
+        "Mikrofon dan audio komputer"
+    ),
+    ("sources.mic", "Microphone only", "Hanya mikrofon"),
+    (
+        "sources.computer",
+        "Computer audio only",
+        "Hanya audio komputer"
+    ),
     (
         "ready.format_subtitle",
         "Can be changed during the call",
@@ -737,6 +777,21 @@ strings![
     ),
     ("player.play", "Play", "Putar"),
     ("player.pause", "Pause", "Jeda"),
+    ("player.back", "Back 15 seconds", "Mundur 15 detik"),
+    ("player.forward", "Forward 15 seconds", "Maju 15 detik"),
+    ("player.previous_line", "Previous line", "Baris sebelumnya"),
+    ("player.next_line", "Next line", "Baris berikutnya"),
+    ("player.speed", "Playback speed", "Kecepatan putar"),
+    ("player.volume", "Volume", "Volume"),
+    ("player.mute", "Mute", "Bisukan"),
+    ("player.unmute", "Unmute", "Bunyikan"),
+    ("player.lane_mic", "Microphone", "Mikrofon"),
+    ("player.lane_computer", "Computer audio", "Audio komputer"),
+    (
+        "player.keys",
+        "Space plays or pauses, ← and → skip 5 seconds",
+        "Spasi memutar atau menjeda, ← dan → lompat 5 detik"
+    ),
     ("format.mono", "Mono", "Mono"),
     (
         "format.stereo",
@@ -813,6 +868,11 @@ strings![
         "cli.transcribe",
         "transcribe    transcribe two tracks and print the transcript as Markdown",
         "transcribe    transkripsikan dua trek dan cetak transkrip sebagai Markdown"
+    ),
+    (
+        "cli.finish",
+        "finish        save a stopped recording from its staging folder: audio, manifest, transcript",
+        "finish        simpan rekaman yang dihentikan dari folder stagingnya: audio, manifest, transkrip"
     ),
     (
         "cli.ask",
@@ -1133,6 +1193,11 @@ strings![
         "Set a length of at least one minute",
         "Atur durasi minimal satu menit"
     ),
+    (
+        "timer.no_such_time",
+        "That time is skipped by the clock (a daylight-saving change); pick another",
+        "Waktu itu dilewati jam (pergantian waktu musim panas); pilih waktu lain"
+    ),
     ("timer.starts_at", "Starts {}", "Mulai {}"),
     ("timer.stops_after", "Stops after {}", "Berhenti setelah {}"),
     ("timer.stops_at", "Stops {}", "Berhenti {}"),
@@ -1317,11 +1382,26 @@ mod tests {
         let sources = [
             include_str!("agent.rs"),
             include_str!("audio.rs"),
-            include_str!("main.rs"),
+            include_str!("chapters.rs"),
+            include_str!("cleanup.rs"),
+            include_str!("diarize.rs"),
+            include_str!("export.rs"),
+            include_str!("finish.rs"),
+            include_str!("helper.rs"),
+            include_str!("ipc.rs"),
+            include_str!("meeting.rs"),
+            include_str!("models.rs"),
+            include_str!("nemotron.rs"),
+            include_str!("playback.rs"),
             include_str!("provider.rs"),
+            include_str!("settings.rs"),
             include_str!("timer.rs"),
             include_str!("transcribe.rs"),
-            include_str!("ui.rs"),
+            // The GTK shell looks its strings up in this table too, so its
+            // sources are scanned from here, three levels up at the root.
+            include_str!("../../../src/main.rs"),
+            include_str!("../../../src/player.rs"),
+            include_str!("../../../src/ui.rs"),
         ];
         let mut missing = Vec::new();
         for source in sources {
@@ -1360,6 +1440,15 @@ mod tests {
     fn fill_is_one_pass() {
         assert_eq!(fill("{} and {}", &["a{}", "b"]), "a{} and b");
         assert_eq!(fill("{} only", &[]), "{} only");
+    }
+
+    #[test]
+    fn launch_language_prefers_settings_then_system_then_env() {
+        use Lang::{English, Indonesian};
+        assert_eq!(resolve_lang(Some(English), Some("id-ID"), "id_ID"), English);
+        assert_eq!(resolve_lang(None, Some("\"id-ID\""), "en-US"), Indonesian);
+        assert_eq!(resolve_lang(None, None, "id_ID.UTF-8"), Indonesian);
+        assert_eq!(resolve_lang(None, None, ""), English);
     }
 
     #[test]

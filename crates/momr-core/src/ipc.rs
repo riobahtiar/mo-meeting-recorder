@@ -13,15 +13,14 @@
 //! transcription progress from 0 to 1 while the state is "transcribing".
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::APP_NAME;
 use crate::audio::to_meter;
-
+use momr_platform::APP_NAME;
+use momr_platform::sock::{self, Stream};
 const MAX_LINE: usize = 4096;
 
 #[derive(Clone, Default)]
@@ -41,7 +40,7 @@ pub type SharedStatus = Arc<Mutex<Status>>;
 /// Where the app listens. `momr-menubar` gets it as `MOMR_SOCKET`, so the
 /// two can never disagree about the rule below.
 pub fn socket_path() -> PathBuf {
-    socket_path_in(&crate::paths::cache())
+    socket_path_in(&momr_platform::paths::cache())
 }
 
 /// `momr.sock` under `base`, or directly under the temp dir when that would
@@ -72,25 +71,44 @@ pub const COMMANDS: [&str; 4] = ["start", "stop", "compact", "pause"];
 /// (mic, computer) peaks. An error means no menu bar item or `momr stop`
 /// can reach this app, which the caller tells the user.
 pub fn serve(
-    path: &Path,
+    path: impl AsRef<Path>,
     status: SharedStatus,
     peaks: impl Fn() -> (f32, f32) + Send + 'static,
     commands: async_channel::Sender<&'static str>,
 ) -> Result<(), String> {
+    let path = path.as_ref();
     if let Some(dir) = path.parent() {
         // First run: ~/Library/Caches/momr does not exist yet.
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     // A socket file left behind by a crash refuses new binds; nobody answers on it.
-    if UnixStream::connect(path).is_err() {
+    if sock::connect(path).is_err() {
         let _ = std::fs::remove_file(path);
     }
-    let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
+    let listener = sock::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let clients: Arc<Mutex<Vec<Stream>>> = Arc::default();
 
     let accepted = clients.clone();
     thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        loop {
+            // A failed accept must not end this thread: a client that hangs
+            // up before we accept (`momr start` always does) returns
+            // ECONNABORTED, and ending here would leave the socket file
+            // alive with nobody answering. A persistent error (out of file
+            // descriptors) is retried slowly instead of spinning.
+            let stream = match listener.accept() {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if !matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionAborted | ErrorKind::Interrupted
+                    ) {
+                        eprintln!("{APP_NAME}: socket accept: {e}");
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    continue;
+                }
+            };
             // Best effort: macOS refuses SO_SNDTIMEO once the peer has
             // already gone, which fire-and-forget clients (`momr start`)
             // always have. Dropping the connection then would lose the
@@ -148,7 +166,7 @@ pub fn serve(
     Ok(())
 }
 
-fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static str>) {
+fn read_commands(stream: Stream, commands: &async_channel::Sender<&'static str>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
@@ -166,7 +184,7 @@ fn read_commands(stream: UnixStream, commands: &async_channel::Sender<&'static s
 
 /// `momr stop`: ask the running app to stop recording.
 pub fn send(command: &str) -> bool {
-    match UnixStream::connect(socket_path()) {
+    match sock::connect(socket_path()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
         Err(_) => false,
     }
@@ -180,7 +198,7 @@ fn round(value: f64) -> f64 {
 pub fn watch() {
     let mut stdout = std::io::stdout();
     loop {
-        if let Ok(stream) = UnixStream::connect(socket_path()) {
+        if let Ok(stream) = sock::connect(socket_path()) {
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             loop {
@@ -222,6 +240,8 @@ mod tests {
 
     /// `momr start` connects, writes one line and hangs up at once; the
     /// command must still arrive, and the state lines must flow to a reader.
+    /// Unix-only: elsewhere the socket constructors report unsupported.
+    #[cfg(unix)]
     #[test]
     fn fire_and_forget_commands_arrive() {
         let dir = std::env::temp_dir().join(format!("momr-ipc-{}", std::process::id()));
@@ -232,17 +252,42 @@ mod tests {
             ..Default::default()
         }));
         serve(&path, status, || (0.5, 0.0), tx).expect("listens");
-        let mut client = UnixStream::connect(&path).expect("connects");
+        let mut client = sock::connect(&path).expect("connects");
         client.write_all(b"stop\nnot-a-command\n").unwrap();
         drop(client);
         let command = rx.recv_blocking().expect("the command reaches the app");
         assert_eq!(command, "stop");
-        let reader = UnixStream::connect(&path).unwrap();
+        let reader = sock::connect(&path).unwrap();
         let mut line = String::new();
         BufReader::new(reader).read_line(&mut line).unwrap();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(value["state"], "idle");
         assert!(value["mic"].as_f64().unwrap() > 0.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn idle() -> SharedStatus {
+        Arc::new(Mutex::new(Status {
+            state: "idle",
+            ..Default::default()
+        }))
+    }
+
+    /// A crash leaves the socket file behind with nobody listening; the next
+    /// launch must take it over, while a second instance must leave a live
+    /// one alone rather than unlink the first app's socket.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_socket_is_replaced_and_a_live_one_kept() {
+        let dir = std::env::temp_dir().join(format!("momr-ipc-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        drop(sock::bind(&path).unwrap());
+        assert!(path.exists(), "the crashed app's file stays");
+        let (tx, _rx) = async_channel::unbounded();
+        serve(&path, idle(), || (0.0, 0.0), tx.clone()).expect("takes over a stale socket");
+        assert!(serve(&path, idle(), || (0.0, 0.0), tx).is_err());
+        assert!(sock::connect(&path).is_ok(), "the first app still answers");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

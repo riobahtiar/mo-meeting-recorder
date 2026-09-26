@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::chapters::Chapter;
 use crate::export::Format;
 
 pub const EXTENSION: &str = "meeting-recorder";
@@ -51,6 +50,15 @@ pub fn parse_speaker_n(label: &str) -> Option<usize> {
     label.strip_prefix(SPEAKER_PREFIX)?.parse().ok()
 }
 
+/// One chapter of a meeting: where it starts and what it is called. Stored
+/// in the manifest and written into `transcript.md`, so it lives with the
+/// meeting data rather than with the agent that made it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chapter {
+    pub start_ms: i64,
+    pub title: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pub title: String,
@@ -77,12 +85,16 @@ pub struct Manifest {
     pub chapters: Vec<Chapter>,
     /// Which agent made them, e.g. "claude".
     pub chapters_by: Option<String>,
+    /// Whether the listening audio was voice-enhanced (plan 17). The kept
+    /// `.tracks/` and the transcript are never enhanced (D26). Absent in
+    /// older manifests and upstream ones, which read as false.
+    pub enhanced: bool,
 }
 
 impl Manifest {
     fn to_json(&self) -> Value {
         json!({
-            "app": crate::APP_NAME,
+            "app": momr_platform::APP_NAME,
             "version": 1,
             "title": self.title,
             "started_at": self.started_at,
@@ -98,6 +110,7 @@ impl Manifest {
                 .map(|c| json!({ "start_ms": c.start_ms, "title": c.title }))
                 .collect::<Vec<_>>(),
             "chapters_by": self.chapters_by,
+            "enhanced": self.enhanced,
         })
     }
 
@@ -139,6 +152,7 @@ impl Manifest {
                 })
                 .unwrap_or_default(),
             chapters_by: value["chapters_by"].as_str().map(str::to_owned),
+            enhanced: value["enhanced"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -172,6 +186,116 @@ pub fn relabel_all(markdown: &str, renames: &[(String, String)]) -> String {
         text = relabel(&text, &format!("\u{1}{i}\u{1}"), to);
     }
     text
+}
+
+/// Splits `**[01:23] You:** text` into its time, speaker and text.
+pub fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
+    let rest = line.strip_prefix("**[")?;
+    let (time, rest) = rest.split_once("] ")?;
+    let (speaker, text) = rest.split_once(":** ")?;
+    Some((time, speaker, text.trim()))
+}
+
+/// The speaker labels in transcript Markdown, in order of first appearance.
+pub fn speakers_in(markdown: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for line in markdown.lines() {
+        if let Some((_, speaker, _)) = parse_segment(line)
+            && !found.iter().any(|f| f == speaker)
+        {
+            found.push(speaker.to_owned());
+        }
+    }
+    found
+}
+
+/// Fits `manifest.speakers` to the voices a fresh transcript found, then
+/// writes this meeting's names over the transcription's default labels.
+/// Both shells finish a transcript through here, so a meeting's names come
+/// out the same whichever shell recorded it.
+pub fn fit_speakers(manifest: &mut Manifest, markdown: &str) -> String {
+    if manifest.imported.is_some() {
+        // An import finds its own number of speakers; keep names already
+        // given and number the rest.
+        let found = speakers_in(markdown);
+        let mut names = manifest.speakers.clone();
+        names.resize_with(found.len(), String::new);
+        for (i, name) in names.iter_mut().enumerate() {
+            if name.is_empty() {
+                *name = speaker_n(i + 1);
+            }
+        }
+        manifest.speakers = names;
+    } else {
+        // Several voices on the computer audio come out as Remote 1,
+        // Remote 2, ...: one name each, after your own.
+        let remotes = speakers_in(markdown)
+            .iter()
+            .filter_map(|s| parse_remote_n(s))
+            .max()
+            .unwrap_or(0);
+        if remotes > 1 {
+            let mut names = manifest.speakers.clone();
+            if names.len() <= 2 {
+                names.truncate(1);
+            }
+            while names.len() < remotes + 1 {
+                let n = names.len();
+                names.push(remote_n(n));
+            }
+            names.truncate(remotes + 1);
+            manifest.speakers = names;
+        } else if manifest.speakers.len() > 2 {
+            manifest.speakers.truncate(2);
+            manifest.speakers[1] = default_remote().to_owned();
+        }
+    }
+    let renames: Vec<(String, String)> = manifest
+        .default_labels()
+        .into_iter()
+        .zip(manifest.speakers.iter().cloned())
+        .filter(|(label, name)| label != name)
+        .collect();
+    relabel_all(markdown, &renames)
+}
+
+/// The local time a meeting started, as `%Y-%m-%d %H:%M` for the
+/// transcript's heading; empty for a time the clock cannot show.
+pub fn date_line(started_at: i64) -> String {
+    local_time(started_at, "%Y-%m-%d %H:%M")
+}
+
+/// `started_at` in local time with a chrono `format`, empty when the
+/// timestamp is out of range.
+fn local_time(started_at: i64, format: &str) -> String {
+    use chrono::TimeZone;
+    // A Unix time names one instant, so this is never ambiguous.
+    chrono::Local
+        .timestamp_opt(started_at, 0)
+        .single()
+        .map(|t| t.format(format).to_string())
+        .unwrap_or_default()
+}
+
+/// The folder a meeting started at `started_at` and called `title` gets
+/// under the meetings folder: `202609241400 Weekly sync`. `from_folder`
+/// reads the same shape back.
+pub fn folder_for(started_at: i64, title: &str) -> PathBuf {
+    let stamp = local_time(started_at, "%Y%m%d%H%M");
+    crate::settings::meetings_dir().join(format!("{stamp} {}", crate::export::safe_name(title)))
+}
+
+/// `folder_for`, numbered (`… Weekly sync 2`) when that folder exists
+/// already: two meetings in the same minute with the same title must not
+/// share one folder and overwrite each other's audio.
+pub fn unused_folder_for(started_at: i64, title: &str) -> PathBuf {
+    let mut out = folder_for(started_at, title);
+    let mut n = 2;
+    while out.exists() {
+        out = folder_for(started_at, &format!("{title} {n}"));
+        n += 1;
+    }
+    out
 }
 
 fn name(value: &Value, fallback: &str) -> String {
@@ -208,7 +332,7 @@ pub fn relabel(markdown: &str, from: &str, to: &str) -> String {
 
 /// The manifest's path for `title` inside `dir`.
 pub fn path_for(dir: &Path, title: &str) -> PathBuf {
-    dir.join(format!("{}.{EXTENSION}", crate::ui::safe_name(title)))
+    dir.join(format!("{}.{EXTENSION}", crate::export::safe_name(title)))
 }
 
 /// Finds the manifest in a meeting folder, whatever its name.
@@ -257,15 +381,11 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
         return None;
     }
     let num = |range: std::ops::Range<usize>| stamp[range].parse::<i32>().ok();
-    let started = gtk::glib::DateTime::from_local(
-        num(0..4)?,
-        num(4..6)?,
-        num(6..8)?,
-        num(8..10)?,
-        num(10..12)?,
-        0.0,
-    )
-    .ok()?;
+    let date = chrono::NaiveDate::from_ymd_opt(num(0..4)?, num(4..6)? as u32, num(6..8)? as u32)?;
+    let time = chrono::NaiveTime::from_hms_opt(num(8..10)? as u32, num(10..12)? as u32, 0)?;
+    // The hour DST repeats reads as its first pass, as glib read it.
+    let started =
+        crate::timer::first_reading(date.and_time(time).and_local_timezone(chrono::Local))?;
     let format = if dir.join("mic.ogg").exists() {
         Format::Separate
     } else {
@@ -273,7 +393,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
     };
     Some(Manifest {
         title: title.to_owned(),
-        started_at: started.to_unix(),
+        started_at: started.timestamp(),
         duration_secs: 0,
         format,
         language: "auto".to_owned(),
@@ -284,6 +404,7 @@ fn from_folder(dir: &Path) -> Option<Manifest> {
         provider: None,
         chapters: Vec::new(),
         chapters_by: None,
+        enhanced: false,
     })
 }
 
@@ -313,8 +434,11 @@ mod tests {
     /// The checked-in invented meeting opens with its names and settings.
     #[test]
     fn fixture_folder_opens() {
-        let dir = std::path::Path::new("tests/fixtures/meeting");
-        let (folder, manifest) = super::open(dir).expect("fixture opens");
+        // Tests run with the package dir as CWD, so anchor at the workspace.
+        // The fixtures stay at the root: the end-to-end test uses them too.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/meeting");
+        let (folder, manifest) = super::open(&dir).expect("fixture opens");
         assert_eq!(folder, dir);
         assert_eq!(manifest.title, "Demo");
         assert_eq!(manifest.speakers, vec!["Maya".to_owned(), "Tom".to_owned()]);
@@ -326,9 +450,10 @@ mod tests {
     /// An upstream manifest in the old `{"you", "remote"}` shape still reads.
     #[test]
     fn legacy_manifest_shape_reads() {
-        let (_, manifest) = super::open(std::path::Path::new(
-            "tests/fixtures/legacy/Legacy.meeting-recorder",
-        ))
+        let (_, manifest) = super::open(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/legacy/Legacy.meeting-recorder"),
+        )
         .expect("legacy opens");
         assert_eq!(manifest.title, "Legacy");
         assert_eq!(manifest.speakers, vec!["Maya".to_owned(), "Tom".to_owned()]);
@@ -349,6 +474,8 @@ mod tests {
         )
         .expect("reads");
         assert_eq!(half.speakers, vec!["Maya".to_owned(), "Remote".to_owned()]);
+        // Upstream and older manifests have no "enhanced": not enhanced.
+        assert!(!half.enhanced);
     }
 
     #[test]
@@ -369,9 +496,11 @@ mod tests {
                 title: "Intro".into(),
             }],
             chapters_by: Some("claude".into()),
+            enhanced: true,
         };
         let back = Manifest::from_json(&manifest.to_json()).expect("reads back");
         assert_eq!(back.title, manifest.title);
+        assert!(back.enhanced);
         assert_eq!(back.duration_secs, 42);
         assert_eq!(back.format.key(), Format::Separate.key());
         assert_eq!(back.language, "id");

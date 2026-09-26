@@ -64,9 +64,11 @@ find "$C/Frameworks" -name '*.dylib' | while IFS= read -r lib; do sign "$lib"; d
 for b in momr-audio ffmpeg; do
   sign --entitlements packaging/macos/entitlements.plist "$C/MacOS/$b"
 done
-for b in ffprobe momr-menubar; do
-  sign "$C/MacOS/$b"
-done
+# ffprobe loads the bundled ffmpeg dylibs too, so it needs library
+# validation off like ffmpeg, but not the microphone. momr-menubar links
+# only system frameworks.
+sign --entitlements packaging/macos/entitlements-tools.plist "$C/MacOS/ffprobe"
+sign "$C/MacOS/momr-menubar"
 sign --entitlements packaging/macos/entitlements.plist "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 if [ "$IDENTITY" = "-" ]; then

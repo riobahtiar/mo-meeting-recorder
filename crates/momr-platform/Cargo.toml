@@ -1,0 +1,6 @@
+[package]
+# momr-platform: one module per OS seam (plan 16, D25). It stays std-only so
+# a new target is a new branch in one file, never a new dependency.
+name = "momr-platform"
+version = "1.1.1"
+edition = "2024"

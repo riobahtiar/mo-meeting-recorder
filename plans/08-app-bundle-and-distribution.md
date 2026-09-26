@@ -241,7 +241,7 @@ with the release tag); the release workflow builds per-arch DMGs with
 signing steps that skip cleanly without secrets.
 Observed 2026-09-25: `scripts/bundle-macos.sh` assembles the layout (5
 binaries, 58 Frameworks dylibs, schemas, icons) and the app launches from
-the bundle with a live mic meter — no Homebrew needed at runtime. No
-Developer ID here, so steps 6–8 wait for a certificate; no icon yet (plan 07
-step 10), so the Resources icon is still open. `HANDLES_OPEN` ships from
-upstream and needs only the Finder double-click check.
+the bundle with a live mic meter — no Homebrew needed at runtime. The icon
+ships (plan 07 step 10: `data/icon/MOMRecorder.icns`, copied by the script).
+No Developer ID here, so steps 6–8 wait for a certificate. `HANDLES_OPEN`
+ships from upstream and needs only the Finder double-click check.

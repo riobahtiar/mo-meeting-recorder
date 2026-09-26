@@ -29,13 +29,15 @@ Checkbox states: `[ ]` not started, `[~]` in progress, `[x]` done.
 | [09 Menu bar item](09-menu-bar-item.md) | Live recording status in the menu bar | 03, 08 | 2 Feels native | `[~]` |
 | [10 Testing and CI](10-testing-and-ci.md) | Tests for the new seams; CI on macOS (workflows disabled for now) | 02 | all | `[~]` |
 | [11 Identity](11-identity.md) | Confirm the bundle id, UTI and folder names; last brand sweep | 08 | 3 Ships | `[~]` |
-| [12 Native shell option](12-native-shell-option.md) | When and how to build a SwiftUI front end on the Rust core | 07 | 4 Optional | reference |
+| [12 Native shell option](12-native-shell-option.md) | AppKit shell on the Rust core; GTK retires at parity | 07 | 4 Native | `[~]` entered 2026-09-25 (D24) |
 | [13 Transcription providers](13-transcription-providers.md) | ElevenLabs, Google and OpenRouter transcription, English + Indonesian UI | 05, 07 | 5 Providers | `[~]` |
 | [14 UI polish](14-ui-polish.md) | Focus rings, one window size, appearance switch, rows that fit, animation, Settings pages and button, compact strip | 07 | 2 Feels native | `[~]` |
 | [15 Reset, timer, sources](15-reset-timer-sources.md) | Storage cleanup and reset; timed recordings; microphone and per-app computer audio | 14 | 6 Features | `[~]` |
-| [16 Multi-platform architecture](16-multi-platform-architecture.md) | Core crate, platform seams and the shell to build Windows and Linux versions on | 12 | 4 Optional | reference |
+| [16 Multi-platform architecture](16-multi-platform-architecture.md) | Core crate, platform seams and the shell to build Windows and Linux versions on | 12 | 4 Native | `[~]` entered 2026-09-25 as blueprint (D25) |
+| [17 Sources and voice enhancement](17-sources-and-voice-enhancement.md) | Record the mic, the computer or both; a voice enhancement switch, transcripts from the original audio (D26) | 12, 15 | 6 Features | `[~]` |
+| [18 Player](18-player.md) | A full player on the done page: transport, speed, volume, waveform seek with hover, playing animation, keys | 04, 14 | 2 Feels native | `[~]` |
 
-Phases: **1 Works** is a usable app started from a terminal. **2 Feels native** is what a Mac user expects from the chrome. **3 Ships** is something a person can download and double-click. **4 Optional** is only entered if phase 2 falls short by the criteria in plan 12, or when another platform is scheduled (plan 16). **5 Providers** and **6 Features** are what people asked for once it recorded.
+Phases: **1 Works** is a usable app started from a terminal. **2 Feels native** is what a Mac user expects from the chrome. **3 Ships** is something a person can download and double-click. **4 Native** is the AppKit shell on the Rust core (plan 12, entered by D24) and the groundwork for other platforms (plan 16). **5 Providers** and **6 Features** are what people asked for once it recorded.
 
 A plan whose every box is ticked moves to [`archives/`](archives/README.md), whose index says what each one delivered. What each release added or retired is in the root [`CHANGELOG.md`](../CHANGELOG.md).
 

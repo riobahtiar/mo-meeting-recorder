@@ -18,14 +18,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use gtk::glib;
+use chrono::Local;
 use whisper_rs::{
     DtwMode, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
 };
 
-use crate::APP_NAME;
-use crate::audio::{CHANNELS, RATE};
+use crate::export::{CHANNELS, RATE};
 use crate::provider::{Cloud, Provider, Word as CloudWord};
+use momr_platform::APP_NAME;
 
 pub const WHISPER_RATE: usize = 16_000;
 
@@ -466,7 +466,7 @@ fn locate(map: &[(usize, Region)], glued_ms: i64) -> (i64, usize) {
 
 /// Where downloaded models live: `~/Library/Application Support/momr/models`.
 pub fn models_dir() -> PathBuf {
-    crate::paths::models()
+    momr_platform::paths::models()
 }
 
 /// Downloads `url` to `target` through a `.part` file, reporting progress as
@@ -929,7 +929,7 @@ fn remote_voices(
         Err(e) => {
             eprintln!(
                 "{}: finding the voices on the computer audio: {e}",
-                crate::APP_NAME
+                momr_platform::APP_NAME
             );
             Ok(Vec::new())
         }
@@ -1541,7 +1541,7 @@ fn cli_provider(parsed: &FileArgs) -> Result<Provider, String> {
 }
 
 /// `momr transcribe <mic> <computer> [--language xx] [--model name] [--provider id]`
-pub fn cli(args: &[String]) -> glib::ExitCode {
+pub fn cli(args: &[String]) -> u8 {
     let Ok(parsed) = parse_file_args(args, false) else {
         return usage();
     };
@@ -1560,7 +1560,7 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
 }
 
 /// `momr transcribe-file <audio> [--speakers N] [--language xx] [--model name] [--provider id]`
-pub fn cli_file(args: &[String]) -> glib::ExitCode {
+pub fn cli_file(args: &[String]) -> u8 {
     let Ok(parsed) = parse_file_args(args, true) else {
         return usage();
     };
@@ -1586,7 +1586,29 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
 
 /// Runs a transcription for the command line: progress and live lines on
 /// stderr, the Markdown on stdout.
-fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> glib::ExitCode {
+fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> u8 {
+    let started = Instant::now();
+    match run_reporting(work) {
+        Ok(transcript) => {
+            let date = Local::now().format("%Y-%m-%d %H:%M").to_string();
+            print!("{}", to_markdown("Transcript", &date, &transcript));
+            let secs = format!("{:.1}", started.elapsed().as_secs_f64());
+            eprintln!("{}", crate::locales::tf("cli.done_in", &[&secs]));
+            0
+        }
+        Err(message) => {
+            eprintln!("{APP_NAME}: {message}");
+            1
+        }
+    }
+}
+
+/// Runs `work` with its stages and live lines reported on stderr, the way
+/// every command-line transcription shows progress (`transcribe`,
+/// `transcribe-file`, `finish`).
+pub fn run_reporting(
+    work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>,
+) -> Result<Transcript, String> {
     let (tx, rx) = async_channel::unbounded();
     let started = Instant::now();
     let reporter = std::thread::spawn(move || {
@@ -1615,33 +1637,17 @@ fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> 
     let result = work(&tx, &abort);
     emit(&tx, Event::Finished);
     let _ = reporter.join();
-
-    match result {
-        Ok(transcript) => {
-            let date = glib::DateTime::now_local()
-                .and_then(|t| t.format("%Y-%m-%d %H:%M"))
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            print!("{}", to_markdown("Transcript", &date, &transcript));
-            let secs = format!("{:.1}", started.elapsed().as_secs_f64());
-            eprintln!("{}", crate::locales::tf("cli.done_in", &[&secs]));
-            glib::ExitCode::SUCCESS
-        }
-        Err(message) => {
-            eprintln!("{APP_NAME}: {message}");
-            glib::ExitCode::FAILURE
-        }
-    }
+    result
 }
 
-fn usage() -> glib::ExitCode {
+fn usage() -> u8 {
     eprintln!(
         "Usage: {APP_NAME} transcribe <mic> <computer> [--language auto|en|nl|...] [--model name] [--provider local|elevenlabs|google|openrouter]"
     );
     eprintln!(
         "       {APP_NAME} transcribe-file <audio> [--speakers N] [--language auto|en|nl|...] [--model name] [--provider local|elevenlabs|google|openrouter]"
     );
-    glib::ExitCode::from(2)
+    2
 }
 
 #[cfg(test)]

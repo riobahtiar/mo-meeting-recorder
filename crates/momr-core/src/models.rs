@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use gtk::glib;
 use whisper_rs::DtwModelPreset;
 
 use crate::transcribe::{Abort, Events, download, models_dir};
@@ -87,7 +86,7 @@ pub fn set_override(name: &str) {
 }
 
 pub fn config_file() -> PathBuf {
-    crate::paths::config_file()
+    momr_platform::paths::config_file()
 }
 
 /// The value of `key = "…"` in config.toml, comments stripped; None when the
@@ -191,11 +190,16 @@ fn file_name(model: &Model) -> String {
     format!("ggml-{}.bin", model.name)
 }
 
-/// voxtype's models: same files, no need to have them twice. Homebrew's GLib
-/// has no Cocoa support (D22), so this is `~/.local/share/voxtype/models`,
-/// where voxtype keeps them; that is on purpose (plan 06), not a leftover.
+/// voxtype's models: same files, no need to have them twice. voxtype keeps
+/// XDG paths wherever it runs, so this lookup follows GLib's
+/// `user_data_dir` (`$XDG_DATA_HOME` when absolute, else
+/// `~/.local/share`) instead of this app's `~/Library` move.
 fn voxtype_models() -> PathBuf {
-    glib::user_data_dir().join("voxtype/models")
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| momr_platform::paths::home_dir().join(".local/share"))
+        .join("voxtype/models")
 }
 
 /// A complete model file: at least most of its expected size.

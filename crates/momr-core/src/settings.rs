@@ -11,7 +11,7 @@ use crate::export::Format;
 use crate::transcribe::LANGUAGE_CODES;
 
 fn path() -> PathBuf {
-    crate::paths::settings_file()
+    momr_platform::paths::settings_file()
 }
 
 fn load() -> serde_json::Value {
@@ -75,6 +75,44 @@ pub fn save_format(format: Format) -> std::io::Result<()> {
     save("format", format.key())
 }
 
+/// Which sides a new recording keeps; both until the ready page says otherwise.
+pub fn load_sources() -> crate::audio::Sources {
+    load()["sources"]
+        .as_str()
+        .map(crate::audio::Sources::from_key)
+        .unwrap_or(crate::audio::Sources::Both)
+}
+
+pub fn save_sources(sources: crate::audio::Sources) -> std::io::Result<()> {
+    save("sources", sources.key())
+}
+
+/// The player's speed and volume, kept between meetings and launches.
+pub fn load_player_sound() -> crate::playback::Sound {
+    let settings = load();
+    let default = crate::playback::Sound::default();
+    crate::playback::Sound {
+        speed: settings["player_speed"].as_f64().unwrap_or(default.speed),
+        volume: settings["player_volume"].as_f64().unwrap_or(default.volume),
+    }
+    .clamped()
+}
+
+pub fn save_player_sound(sound: crate::playback::Sound) -> std::io::Result<()> {
+    save_value("player_speed", serde_json::json!(sound.speed))?;
+    save_value("player_volume", serde_json::json!(sound.volume))
+}
+
+/// Whether new recordings are saved with voice enhancement; off until the
+/// ready page's switch says otherwise.
+pub fn load_enhance() -> bool {
+    load()["enhance"].as_bool().unwrap_or(false)
+}
+
+pub fn save_enhance(on: bool) -> std::io::Result<()> {
+    save_value("enhance", serde_json::Value::Bool(on))
+}
+
 /// A whisper language code from `LANGUAGE_CODES`, "auto" when unset or unknown.
 pub fn load_language() -> &'static str {
     let settings = load();
@@ -119,7 +157,7 @@ pub fn save_meetings_dir(dir: &std::path::Path) -> std::io::Result<()> {
 /// The meetings folder: the one chosen in Settings, else `~/Documents/Meetings`.
 /// The single place that resolves it, so the library and Settings agree.
 pub fn meetings_dir() -> std::path::PathBuf {
-    load_meetings_dir().unwrap_or_else(crate::paths::meetings)
+    load_meetings_dir().unwrap_or_else(momr_platform::paths::meetings)
 }
 
 /// The interface language saved in Settings, None when never chosen (then
@@ -132,6 +170,29 @@ pub fn load_ui_language() -> Option<crate::locales::Lang> {
 
 pub fn save_ui_language(lang: crate::locales::Lang) -> std::io::Result<()> {
     save("ui_language", lang.code())
+}
+
+/// The interface language for this launch: the Settings choice, else the
+/// first macOS preferred language (what a Finder launch sees; `$LANG` is
+/// usually unset there), else `$LANG` for a terminal without defaults.
+/// `main` feeds it to `crate::locales::init_lang` once at startup.
+pub fn current_locale() -> crate::locales::Lang {
+    crate::locales::resolve_lang(
+        load_ui_language(),
+        apple_language().as_deref(),
+        &std::env::var("LANG").unwrap_or_default(),
+    )
+}
+
+/// The first entry of the global `AppleLanguages` default.
+fn apple_language() -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    crate::locales::first_apple_language(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub use crate::theme::Appearance;

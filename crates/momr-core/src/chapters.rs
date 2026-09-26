@@ -15,11 +15,7 @@ pub const MIN_DURATION_MS: i64 = 3 * 60 * 1000;
 const MAX_CHAPTERS: usize = 20;
 const MAX_TITLE_CHARS: usize = 80;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Chapter {
-    pub start_ms: i64,
-    pub title: String,
-}
+pub use crate::meeting::Chapter;
 
 /// One turn of the transcript, as the agent gets to see it.
 pub struct Line<'a> {

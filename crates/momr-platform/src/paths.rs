@@ -1,13 +1,14 @@
 //! Where the app keeps things: `~/Library/Application Support/momr` for config,
 //! settings and models, `~/Library/Caches/momr` for staging and the socket,
 //! `~/Documents/Meetings` for meetings (or the folder picked in Settings,
-//! see `settings::meetings_dir`). Every path but the meetings is under
-//! `APP_NAME`.
+//! see `momr_core::settings::meetings_dir`). Every path but the meetings is
+//! under `APP_NAME`.
 //!
-//! GLib's `user_data_dir()` and friends return Linux-style `~/.local` paths
-//! from Homebrew's build (measured, no Cocoa support), so the macOS locations
-//! are built from the home directory here. An absolute `XDG_*` variable still
-//! wins when set, which keeps power users and tests hermetic.
+//! The locations are built from environment variables with a home-directory
+//! fallback, because Homebrew GLib's directory functions return Linux paths
+//! here (measured, no Cocoa support: D22) and std has no home API. An
+//! absolute `XDG_*` variable still wins when set, which keeps power users
+//! and tests hermetic.
 
 use std::path::PathBuf;
 
@@ -24,7 +25,7 @@ fn env_or(var: &str, fallback: PathBuf) -> PathBuf {
 pub fn data() -> PathBuf {
     env_or(
         "XDG_DATA_HOME",
-        gtk::glib::home_dir().join("Library/Application Support"),
+        home_dir().join("Library/Application Support"),
     )
     .join(APP_NAME)
 }
@@ -33,7 +34,7 @@ pub fn data() -> PathBuf {
 pub fn config() -> PathBuf {
     env_or(
         "XDG_CONFIG_HOME",
-        gtk::glib::home_dir().join("Library/Application Support"),
+        home_dir().join("Library/Application Support"),
     )
     .join(APP_NAME)
 }
@@ -42,18 +43,14 @@ pub fn config() -> PathBuf {
 pub fn state() -> PathBuf {
     env_or(
         "XDG_STATE_HOME",
-        gtk::glib::home_dir().join("Library/Application Support"),
+        home_dir().join("Library/Application Support"),
     )
     .join(APP_NAME)
 }
 
 /// `~/Library/Caches/momr`.
 pub fn cache() -> PathBuf {
-    env_or(
-        "XDG_CACHE_HOME",
-        gtk::glib::home_dir().join("Library/Caches"),
-    )
-    .join(APP_NAME)
+    env_or("XDG_CACHE_HOME", home_dir().join("Library/Caches")).join(APP_NAME)
 }
 
 /// The whisper models.
@@ -72,11 +69,28 @@ pub fn settings_file() -> PathBuf {
     state().join("settings.json")
 }
 
-/// The meetings folder, honouring a relocated Documents folder.
+/// The home directory: `$HOME` on macOS and Linux, `%USERPROFILE%` on
+/// Windows. Both are always set for a launched app; without either there is
+/// no home to build from, so the current directory is the last resort, and
+/// the temp dir when even that is gone: every path built on this stays
+/// absolute, never relative to wherever the process happens to run.
+/// Shared with runners that keep dotfiles there (agents, shells).
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// The meetings folder. macOS and Linux keep it at `~/Documents`, Windows at
+/// `%USERPROFILE%\Documents`; all three flow through `home_dir`. A relocated
+/// Windows Known Folder is the Windows shell's problem (plan 16), not this
+/// function's: std has no Known-Folder API and this crate takes no dependency
+/// to get one.
 pub fn meetings() -> PathBuf {
-    gtk::glib::user_special_dir(gtk::glib::UserDirectory::Documents)
-        .unwrap_or_else(gtk::glib::home_dir)
-        .join("Meetings")
+    home_dir().join("Documents").join("Meetings")
 }
 
 #[cfg(test)]
@@ -84,7 +98,9 @@ mod tests {
     use super::*;
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::env_lock()
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

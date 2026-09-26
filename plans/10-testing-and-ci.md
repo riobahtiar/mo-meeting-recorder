@@ -11,8 +11,9 @@ Every platform seam has a unit test that runs without audio hardware, the transc
 - [ ] `.github/workflows/ci.yml` runs fmt, clippy with `-D warnings`, tests, a release build and the Swift package's tests on `macos-14`, green. (Disabled 2026-09-25: both workflows are commented out with a TODO; uncomment to reactivate.)
 - [ ] The smoke checklist below has been walked once per milestone and the results noted in the pull request.
 
-Observed 2026-09-25: 55 unit tests pass; `tests/transcribe.rs` (`#[ignore]`)
-passes with `-- --ignored` in ~3 s; 6 Swift tests pass; the meeting fixture
+Observed 2026-09-25: 104 unit tests pass; `tests/transcribe.rs` (`#[ignore]`)
+passes with `-- --ignored` in ~3 s; 27 Swift tests pass (13 momr-audioTests,
+14 MomrWatchTests); the meeting fixture
 (`tests/fixtures/meeting`, invented Maya/Tom lines) opens in both manifest
 shapes. Both workflows are commented out with a reactivation TODO, so no CI
 runs on push and no DMGs build on tags until they are uncommented. The smoke

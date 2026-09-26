@@ -1,0 +1,38 @@
+[package]
+# momr-core: the UI-free meeting engine (plan 12 step 1, D25). It compiles
+# for Windows 11+, macOS and Linux, so this manifest grows only with crates
+# that do the same; anything platform-shaped belongs in momr-platform.
+name = "momr-core"
+version = "1.1.1"
+edition = "2024"
+
+[dependencies]
+# The on-disk and wire formats: the manifest, the staging note, settings,
+# NDJSON state lines, provider bodies and `momr-audio list`. Hand-rolled
+# parsing would reimplement serde; it builds everywhere the core must.
+serde_json = "1.0.151"
+# Local clock math for the recording timer: formatting and next-occurrence
+# need time zones, which std cannot do. Chrono is pure Rust with no system
+# dependencies, so it builds everywhere the core must.
+chrono = "0.4"
+# Progress and live lines flow from worker threads over an async channel;
+# the UI and the CLI drain the same `Events` type.
+async-channel = "2.5.0"
+# The OS seams flow upward from the bottom crate (D25): paths, process
+# trees, private files and sockets, and the shared APP_NAME.
+momr-platform = { path = "../momr-platform" }
+# Speech-to-text and speaker separation. Heavy, but pure Rust bindings over
+# C++/ONNX libraries that build on every target; GPU choice stays a feature
+# per target (D17), never core code.
+whisper-rs = "0.16"
+ort = "2.0.0-rc.13"
+realfft = "3"
+# HTTPS file upload (ElevenLabs) and JSON bodies (Google, OpenRouter) for the
+# optional cloud transcription providers. No new crates, only ureq's own features.
+ureq = { version = "3.4.2", features = ["multipart", "json"] }
+
+[features]
+default = []
+# GPU transcription through whisper.cpp's Metal backend, for Apple silicon and
+# recent Intel Macs. The shells select it per target; the core never assumes it.
+metal = ["whisper-rs/metal"]

@@ -4,83 +4,84 @@
 //! bar item or any other client.
 //!
 //! The socket commands (`start`, `stop`, `pause`, `compact`, `watch`) only
-//! talk to a running app, so they skip the environment set-up: SwiftBar and
-//! keybindings run them without `TERM`, where the login-shell probe would
-//! cost every click up to three seconds.
+//! talk to a running app, so they skip the environment set-up and the
+//! language lookup: SwiftBar and keybindings run them without `TERM`, where
+//! the login-shell probe would cost every click up to three seconds.
 
-mod agent;
 mod animation;
-mod audio;
-mod chapters;
-mod cleanup;
-mod diarize;
-mod export;
-mod helper;
-mod ipc;
-mod locales;
-mod meeting;
-mod models;
-mod nemotron;
-mod paths;
 mod player;
-mod provider;
-mod settings;
 mod theme;
-mod timer;
-mod transcribe;
 mod ui;
 
 use gtk::glib;
 
 pub const APP_ID: &str = "io.github.riobahtiar.MOMRecorder";
-pub const APP_NAME: &str = "momr";
+pub use momr_platform::APP_NAME;
 fn main() -> glib::ExitCode {
     let command = std::env::args().nth(1);
-    if !matches!(
+    let socket_command = matches!(
         command.as_deref(),
         Some("start" | "stop" | "compact" | "pause" | "watch")
-    ) {
+    );
+    if !socket_command {
+        // The launch language asks `defaults`, a process per run; the
+        // socket commands print only on failure, so they ask then.
+        momr_core::locales::init_lang(momr_core::settings::current_locale());
         extend_path(login_shell_path);
         bundle_environment();
     }
     match command.as_deref() {
         None => ui::run(None),
         Some("watch") => {
-            ipc::watch();
+            momr_core::ipc::watch();
             glib::ExitCode::SUCCESS
         }
         Some(command @ ("start" | "stop" | "compact" | "pause")) => {
-            if ipc::send(command) {
+            if momr_core::ipc::send(command) {
                 glib::ExitCode::SUCCESS
             } else {
-                eprintln!("{APP_NAME}: {}", crate::locales::t("cli.not_running"));
+                momr_core::locales::init_lang(momr_core::settings::current_locale());
+                eprintln!("{APP_NAME}: {}", momr_core::locales::t("cli.not_running"));
                 glib::ExitCode::FAILURE
             }
         }
-        Some("transcribe-file") => {
-            transcribe::cli_file(&std::env::args().skip(2).collect::<Vec<_>>())
-        }
-        Some("diarize") => diarize::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
-        Some("transcribe") => transcribe::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
-        Some("ask") => agent::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("transcribe-file") => exit_code(momr_core::transcribe::cli_file(
+            &std::env::args().skip(2).collect::<Vec<_>>(),
+        )),
+        Some("diarize") => exit_code(momr_core::diarize::cli(
+            &std::env::args().skip(2).collect::<Vec<_>>(),
+        )),
+        Some("transcribe") => exit_code(momr_core::transcribe::cli(
+            &std::env::args().skip(2).collect::<Vec<_>>(),
+        )),
+        Some("finish") => exit_code(momr_core::finish::cli(
+            &std::env::args().skip(2).collect::<Vec<_>>(),
+        )),
+        Some("ask") => exit_code(momr_core::agent::cli(
+            &std::env::args().skip(2).collect::<Vec<_>>(),
+        )),
         Some("-h" | "--help") => {
-            println!("{}", crate::locales::t("cli.usage").replace("{}", APP_NAME));
+            println!(
+                "{}",
+                momr_core::locales::t("cli.usage").replace("{}", APP_NAME)
+            );
             println!();
-            println!("  {}", crate::locales::t("cli.no_command"));
-            println!("  {}", crate::locales::t("cli.meeting"));
-            println!("  {}", crate::locales::t("cli.start"));
-            println!("  {}", crate::locales::t("cli.stop"));
-            println!("  {}", crate::locales::t("cli.compact"));
-            println!("  {}", crate::locales::t("cli.pause"));
-            println!("  {}", crate::locales::t("cli.watch"));
-            println!("  {}", crate::locales::t("cli.transcribe"));
-            println!("  {}", crate::locales::t("cli.transcribe_file"));
-            println!("  {}", crate::locales::t("cli.diarize_help"));
-            println!("  {}", crate::locales::t("cli.ask"));
+            println!("  {}", momr_core::locales::t("cli.no_command"));
+            println!("  {}", momr_core::locales::t("cli.meeting"));
+            println!("  {}", momr_core::locales::t("cli.start"));
+            println!("  {}", momr_core::locales::t("cli.stop"));
+            println!("  {}", momr_core::locales::t("cli.compact"));
+            println!("  {}", momr_core::locales::t("cli.pause"));
+            println!("  {}", momr_core::locales::t("cli.watch"));
+            println!("  {}", momr_core::locales::t("cli.transcribe"));
+            println!("  {}", momr_core::locales::t("cli.transcribe_file"));
+            println!("  {}", momr_core::locales::t("cli.finish"));
+            println!("  {}", momr_core::locales::t("cli.diarize_help"));
+            println!("  {}", momr_core::locales::t("cli.ask"));
             glib::ExitCode::SUCCESS
         }
         Some(path)
-            if path.ends_with(&format!(".{}", meeting::EXTENSION))
+            if path.ends_with(&format!(".{}", momr_core::meeting::EXTENSION))
                 || std::path::Path::new(path).is_dir() =>
         {
             ui::run(Some(path))
@@ -88,11 +89,17 @@ fn main() -> glib::ExitCode {
         Some(other) => {
             eprintln!(
                 "{APP_NAME}: {}",
-                crate::locales::t("cli.unknown").replace("{}", other)
+                momr_core::locales::t("cli.unknown").replace("{}", other)
             );
             glib::ExitCode::from(2)
         }
     }
+}
+
+/// The core reports command-line exits as a plain byte, the range a process
+/// exit has; GTK wants its own code type.
+fn exit_code(code: u8) -> glib::ExitCode {
+    glib::ExitCode::from(code)
 }
 
 /// Inside `MOM Recorder.app`, point GTK at the bundled resources instead of
@@ -200,9 +207,10 @@ fn login_shell_path() -> Option<String> {
     Some(path)
 }
 
-/// One lock for every test that changes the process environment: `set_var`
-/// racing a `getenv` elsewhere (GLib's included) is undefined behaviour, so
-/// such tests must not run alongside each other.
+/// One lock for every test in this crate that changes the process
+/// environment: `set_var` racing a `getenv` elsewhere (GLib's included) is
+/// undefined behaviour, so such tests must not run alongside each other.
+/// `momr-platform` has its own, since each crate's tests are one process.
 #[cfg(test)]
 pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
